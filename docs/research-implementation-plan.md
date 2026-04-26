@@ -4,13 +4,16 @@
 
 Issue #2 references two research reports:
 
-- [GeminiReport.pdf](https://github.com/user-attachments/files/27101518/GeminiReport.pdf)
-- [Perplexity.pdf](https://github.com/user-attachments/files/27101528/Perplexity.pdf)
+- GeminiReport.pdf — unavailable as of 2026-04-26; the referenced attachment
+  URL returned `404`.
+- Perplexity.pdf — unavailable as of 2026-04-26; the referenced attachment URL
+  returned `404`.
 
-Both attachment URLs returned `404` during implementation, so this plan captures the
-actionable direction from the issue brief, the current README product statement, and
-the overlapping market themes for secure local coordination of autonomous coding
-agents. Replace or refine the findings below once the report text is available.
+Both attachment URLs returned `404` during implementation on 2026-04-26, so this
+plan captures the actionable direction from the issue brief, the current README
+product statement, and the overlapping market themes for secure local
+coordination of autonomous coding agents. Replace or refine the findings below
+once the report text is available.
 
 ## Product direction
 
@@ -64,7 +67,7 @@ requiring a cloud broker.
 - Define a small, stable envelope:
   `id`, `type`, `from`, `to`, `conversationId`, `createdAt`, `expiresAt`,
   `capabilities`, and `payload`.
-- Support at-least-once local delivery with acknowledgements and idempotency keys.
+- Support at-least-once local delivery with acknowledgments and idempotency keys.
 - Model task lifecycle states: `queued`, `accepted`, `running`, `blocked`,
   `completed`, `failed`, and `cancelled`.
 - Add leases for exclusive work claims so multiple coding agents do not edit or
@@ -95,12 +98,12 @@ requiring a cloud broker.
   checks.
 - Persist messages and task state locally.
 - Add integration tests for enrollment, direct messaging, topic broadcast, task
-  assignment, acknowledgement, and cancellation.
+  assignment, acknowledgment, and cancellation.
 
 ### Phase 2: Developer SDK and adapters
 
 - Ship a TypeScript SDK for registering an agent, subscribing to messages,
-  sending task updates, and acknowledging work.
+  sending task updates, and sending acknowledgments.
 - Add an MCP server adapter exposing mesh operations to compatible coding agents.
 - Add examples for two local agents coordinating code review and test execution.
 
@@ -124,7 +127,7 @@ requiring a cloud broker.
 - Agent B can accept, update, complete, or fail the task.
 - The CLI can display the full task timeline and message audit trail.
 - The mesh runs without cloud services and stores all state locally.
-- Tests cover the message envelope, enrollment, delivery, acknowledgement, and
+- Tests cover the message envelope, enrollment, delivery, acknowledgment, and
   task lifecycle transitions.
 
 ## Open questions
