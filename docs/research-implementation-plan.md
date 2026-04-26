@@ -82,6 +82,27 @@ share state, and produce an auditable record without requiring a cloud broker.
 - Provide replay tooling for debugging rather than promising exactly-once
   semantics in the MVP.
 
+### Open-source bus comparison
+
+Zorn Mesh should not reject existing messaging buses. The question is whether an
+open-source bus should be the core of the MVP or an optional backend behind the
+Zorn Mesh protocol.
+
+| Approach | Strengths | Tradeoffs | Fit for Zorn Mesh |
+| --- | --- | --- | --- |
+| Custom local bus in `zorn-meshd` with SQLite | Small install footprint, direct UDS/OS-identity integration, agent-specific envelope, first-class audit/replay, no extra daemon to configure | Zorn Mesh owns routing, retries, backpressure, dead letters, and protocol hardening | Best MVP default because the product needs local agent identity, policy, and observability more than broker feature depth |
+| NATS or NATS JetStream | Mature pub/sub and request/reply, strong performance, persistence via JetStream, clear path to later multi-host topologies | Adds another runtime and operational surface; agent registration, capability policy, JSON-RPC control plane, and audit semantics still need to be built around it | Strong candidate for a pluggable backend after the canonical envelope and local control plane are stable |
+| Redis Streams or Redis pub/sub | Widely available, simple streams and consumer groups, easy local experimentation | Requires Redis, weaker fit for UDS process identity and durable audit semantics, pub/sub alone does not cover task lifecycle or policy | Useful for prototypes or adapters, but not the safest default for a local-first security boundary |
+| RabbitMQ or Kafka | Rich broker ecosystems and durable messaging patterns | Heavyweight for a single-developer machine and optimized for service/backend systems rather than local agent IPC | Better as enterprise integration targets than as the default local mesh runtime |
+| Dapr sidecars | Mature application-runtime model with pluggable pub/sub and service invocation | Requires sidecar/runtime conventions that are broader than Zorn Mesh's agent-focused control plane | Conceptual inspiration, but likely too broad for the first local-first implementation |
+
+The recommended path is therefore hybrid: implement Zorn Mesh's canonical
+envelope, agent registry, policy, UDS JSON-RPC API, and SQLite audit trail in the
+MVP, but keep the routing layer abstract enough to add NATS JetStream or another
+broker as an optional backend later. That preserves a small local-first default
+while avoiding a dead end if users need mature broker features or multi-host
+messaging.
+
 ### Security model
 
 - Default to local-only UDS communication with strict socket permissions.
