@@ -1,5 +1,5 @@
 ---
-stepsCompleted: ['step-01-init', 'step-02-discovery']
+stepsCompleted: ['step-01-init', 'step-02-discovery', 'step-02b-vision', 'step-02c-executive-summary']
 inputDocuments:
   - "_bmad-output/project-context.md"
   - "_bmad-output/planning-artifacts/product-brief-zorn-mesh.md"
