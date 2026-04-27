@@ -95,7 +95,7 @@
   > AC: Given a developer queries dead letters by subject, agent, correlation ID, failure category, or time window, When matching records exist, Then the CLI/API returns structured results with stable schema and clear empty-state behavior.
   > AC: Given DLQ conformance tests run, When no-recipient, TTL-expired, retry-exhausted, validation-terminal, redaction, corrupt-store, restart-recovery, and filtered-query scenarios execute, Then each terminal failure creates exactly one inspectable dead-letter record.
   > Spec: specs/planning-artifacts/epics.md#story-4-3
-- [ ] Story 4.4: Inspect Persistence State with Structured Filters
+- [x] Story 4.4: Inspect Persistence State with Structured Filters
   > As a developer
   > I want to inspect persisted messages, dead letters, audit entries, and runtime metadata with filters
   > So that I can answer "what happened?" without opening SQLite by hand.

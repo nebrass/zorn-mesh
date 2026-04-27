@@ -7,6 +7,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use zornmesh_core::Envelope;
+use zornmesh_store::{
+    DeadLetterFailureCategory, EvidenceDeadLetterInput, EvidenceEnvelopeInput, EvidenceStore,
+    FileEvidenceStore,
+};
+
 const TEST_SOCKET: &str = "/tmp/zorn-cli-contract.sock";
 
 fn zornmesh(args: &[&str]) -> Output {
@@ -21,6 +27,7 @@ fn zornmesh_command(args: &[&str]) -> Command {
         .args(args)
         .env_remove("NO_COLOR")
         .env_remove("ZORN_SOCKET_PATH")
+        .env_remove("ZORN_EVIDENCE_PATH")
         .env_remove("XDG_RUNTIME_DIR");
     command
 }
@@ -108,6 +115,112 @@ fn temp_config(contents: &str) -> std::path::PathBuf {
     path
 }
 
+fn temp_evidence_path(name: &str) -> PathBuf {
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "zornmesh-cli-evidence-{name}-{}-{id}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("temp evidence dir created");
+    dir.join("evidence.log")
+}
+
+fn evidence_envelope(
+    source: &str,
+    subject: &str,
+    correlation_id: &str,
+    timestamp_unix_ms: u64,
+) -> Envelope {
+    Envelope::with_metadata(
+        source,
+        subject,
+        b"{\"password\":\"must-not-leak\"}".to_vec(),
+        timestamp_unix_ms,
+        correlation_id,
+        "application/json; token=must-not-leak",
+    )
+    .expect("valid evidence envelope")
+}
+
+fn seed_inspect_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/source",
+                    "mesh.inspect.created",
+                    "corr-inspect",
+                    1_700_000_000_001,
+                ),
+                "msg-inspect-1",
+                "trace-inspect",
+                "accepted",
+            )
+            .expect("valid envelope input")
+            .with_target("agent.local/target"),
+        )
+        .expect("first envelope persists");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/source",
+                    "mesh.inspect.created",
+                    "corr-inspect",
+                    1_700_000_000_002,
+                ),
+                "msg-inspect-2",
+                "trace-inspect",
+                "accepted",
+            )
+            .expect("valid envelope input")
+            .with_target("agent.local/target"),
+        )
+        .expect("second envelope persists");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/other",
+                    "mesh.other.created",
+                    "corr-other",
+                    1_700_000_000_003,
+                ),
+                "msg-other",
+                "trace-other",
+                "accepted",
+            )
+            .expect("valid envelope input"),
+        )
+        .expect("other envelope persists");
+    store
+        .persist_dead_letter(
+            EvidenceDeadLetterInput::new(
+                evidence_envelope(
+                    "agent.local/source",
+                    "mesh.inspect.created",
+                    "corr-inspect",
+                    1_700_000_000_001,
+                ),
+                "msg-inspect-1",
+                "trace-inspect",
+                "dead_lettered",
+                DeadLetterFailureCategory::RetryExhausted,
+                "retry exhausted with token=must-not-leak",
+            )
+            .expect("valid dead letter input")
+            .with_intended_target("agent.local/target")
+            .with_attempt_count(3)
+            .with_last_failure_category(DeadLetterFailureCategory::Timeout)
+            .with_timing(1_700_000_000_010, 1_700_000_000_020, 1_700_000_000_030),
+        )
+        .expect("dead letter persists");
+}
+
 #[test]
 fn read_json_outputs_are_parseable_and_share_top_level_shape() {
     let cases = [
@@ -129,6 +242,11 @@ fn read_json_outputs_are_parseable_and_share_top_level_shape() {
         (vec!["agents", "--help", "--output", "json"], "agents help"),
         (vec!["doctor", "--output", "json"], "doctor"),
         (vec!["doctor", "--help", "--output", "json"], "doctor help"),
+        (vec!["inspect", "--output", "json"], "inspect"),
+        (
+            vec!["inspect", "messages", "--output", "json"],
+            "inspect messages",
+        ),
         (vec!["trace", "--help", "--output", "json"], "trace help"),
     ];
 
@@ -141,6 +259,246 @@ fn read_json_outputs_are_parseable_and_share_top_level_shape() {
         assert!(!text.contains("zornmesh doctor\n"));
         assert_read_json_contract(&read_json(&output), command);
     }
+}
+
+#[test]
+fn inspect_messages_json_filters_redacts_and_paginates() {
+    let path = temp_evidence_path("messages");
+    seed_inspect_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+    let output = zornmesh(&[
+        "inspect",
+        "messages",
+        "--evidence",
+        path,
+        "--correlation-id",
+        "corr-inspect",
+        "--trace-id",
+        "trace-inspect",
+        "--agent-id",
+        "agent.local/source",
+        "--subject",
+        "mesh.inspect.created",
+        "--since",
+        "1700000000000",
+        "--until",
+        "1700000000100",
+        "--limit",
+        "1",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let text = stdout(&output);
+    assert_no_ansi(&text);
+    assert!(!text.contains("must-not-leak"));
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "inspect messages");
+    let data = &value["data"];
+    assert_eq!(data["collection"], "messages");
+    assert_eq!(data["availability"], "available");
+    assert_eq!(data["state"], "partial");
+    assert_eq!(data["filters"][0]["key"], "correlation_id");
+    assert_eq!(data["filters"][0]["value"], "corr-inspect");
+    assert_eq!(data["filters"][4]["key"], "since");
+    assert_eq!(data["records"].as_array().expect("records array").len(), 1);
+    assert_eq!(data["records"][0]["message_id"], "msg-inspect-1");
+    assert_eq!(data["records"][0]["delivery_state"], "dead_lettered");
+    assert_eq!(data["records"][0]["payload_content_type"], "[REDACTED]");
+    assert_eq!(data["pagination"]["limit"], 1);
+    assert_eq!(data["pagination"]["total"], 2);
+    assert_eq!(data["pagination"]["returned"], 1);
+    assert_eq!(data["pagination"]["complete"], false);
+    assert_eq!(data["pagination"]["next_cursor"], "1");
+    assert_eq!(
+        data["metadata"]["evidence_store"]["schema_version"],
+        zornmesh_store::EVIDENCE_STORE_SCHEMA_VERSION
+    );
+    assert_eq!(
+        data["metadata"]["runtime"]["status"],
+        "unsupported_placeholder"
+    );
+    assert_eq!(data["metadata"]["release_integrity"]["sbom"], "unavailable");
+
+    let second_page = zornmesh(&[
+        "inspect",
+        "messages",
+        "--evidence",
+        path,
+        "--correlation-id",
+        "corr-inspect",
+        "--trace-id",
+        "trace-inspect",
+        "--agent-id",
+        "agent.local/source",
+        "--subject",
+        "mesh.inspect.created",
+        "--since",
+        "1700000000000",
+        "--until",
+        "1700000000100",
+        "--limit",
+        "1",
+        "--cursor",
+        "1",
+        "--output",
+        "json",
+    ]);
+    assert_success(&second_page);
+    let second_page = read_json(&second_page);
+    assert_eq!(
+        second_page["data"]["records"][0]["message_id"],
+        "msg-inspect-2"
+    );
+    assert_eq!(second_page["data"]["pagination"]["complete"], true);
+    assert!(second_page["data"]["pagination"]["next_cursor"].is_null());
+}
+
+#[test]
+fn inspect_dead_letters_and_audit_apply_structured_filters() {
+    let path = temp_evidence_path("dlq-audit");
+    seed_inspect_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let dead_letters = zornmesh(&[
+        "inspect",
+        "dead-letters",
+        "--evidence",
+        path,
+        "--failure-category",
+        "retry_exhausted",
+        "--agent-id",
+        "agent.local/target",
+        "--output",
+        "json",
+    ]);
+    assert_success(&dead_letters);
+    let dlq = read_json(&dead_letters);
+    assert_read_json_contract(&dlq, "inspect dead-letters");
+    assert_eq!(dlq["data"]["records"][0]["message_id"], "msg-inspect-1");
+    assert_eq!(
+        dlq["data"]["records"][0]["failure_category"],
+        "retry_exhausted"
+    );
+    assert_eq!(dlq["data"]["records"][0]["safe_details"], "[REDACTED]");
+    assert!(!stdout(&dead_letters).contains("must-not-leak"));
+
+    let audit = zornmesh(&[
+        "inspect",
+        "audit",
+        "--evidence",
+        path,
+        "--correlation-id",
+        "corr-inspect",
+        "--trace-id",
+        "trace-inspect",
+        "--agent-id",
+        "agent.local/source",
+        "--subject",
+        "mesh.inspect.created",
+        "--delivery-state",
+        "dead_lettered",
+        "--output",
+        "json",
+    ]);
+    assert_success(&audit);
+    let audit = read_json(&audit);
+    assert_read_json_contract(&audit, "inspect audit");
+    assert_eq!(audit["data"]["records"].as_array().unwrap().len(), 1);
+    assert_eq!(audit["data"]["records"][0]["action"], "dead_lettered");
+    assert_eq!(audit["data"]["records"][0]["state_to"], "dead_lettered");
+}
+
+#[test]
+fn inspect_empty_and_unavailable_states_are_explicit() {
+    let empty_path = temp_evidence_path("empty");
+    FileEvidenceStore::open_evidence(&empty_path).expect("empty evidence store opens");
+    let empty_path = empty_path.to_str().expect("evidence path is utf8");
+    let empty = zornmesh(&[
+        "inspect",
+        "messages",
+        "--evidence",
+        empty_path,
+        "--correlation-id",
+        "missing-correlation",
+        "--output",
+        "json",
+    ]);
+    assert_success(&empty);
+    let empty = read_json(&empty);
+    assert_eq!(empty["data"]["availability"], "available");
+    assert_eq!(empty["data"]["state"], "empty");
+    assert_eq!(empty["data"]["records"].as_array().unwrap().len(), 0);
+    assert!(empty["data"]["next_actions"].as_array().unwrap().len() >= 4);
+    assert_eq!(empty["data"]["pagination"]["complete"], true);
+
+    let unavailable = zornmesh(&["inspect", "messages", "--output", "json"]);
+    assert_success(&unavailable);
+    let unavailable = read_json(&unavailable);
+    assert_eq!(unavailable["data"]["availability"], "unavailable");
+    assert_eq!(unavailable["data"]["state"], "unavailable");
+    assert_eq!(unavailable["data"]["records"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        unavailable["warnings"][0]["code"],
+        "W_EVIDENCE_STORE_UNAVAILABLE"
+    );
+
+    let missing_path = temp_evidence_path("missing");
+    let missing_path_text = missing_path.to_str().expect("evidence path is utf8");
+    let missing = zornmesh(&[
+        "inspect",
+        "messages",
+        "--evidence",
+        missing_path_text,
+        "--output",
+        "json",
+    ]);
+    assert_success(&missing);
+    let missing = read_json(&missing);
+    assert_eq!(missing["data"]["availability"], "unavailable");
+    assert_eq!(
+        missing["warnings"][0]["code"],
+        "W_EVIDENCE_STORE_UNAVAILABLE"
+    );
+    assert!(
+        !missing_path.exists(),
+        "inspect must not create a missing evidence store"
+    );
+}
+
+#[test]
+fn inspect_human_output_is_stable_and_plain() {
+    let path = temp_evidence_path("human");
+    seed_inspect_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+    let output = zornmesh(&[
+        "inspect",
+        "messages",
+        "--evidence",
+        path,
+        "--correlation-id",
+        "missing-correlation",
+    ]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "zornmesh inspect messages\nstatus: available\nstate: empty\nrecords: 0\nfilters: correlation_id=missing-correlation\nempty: no messages matched the inspect filters\nnext_actions: trace, tail, doctor, retention checks\npagination: complete\n"
+    );
+    assert_no_ansi(&stdout(&output));
+}
+
+#[test]
+fn inspect_over_limit_request_returns_stable_validation_error() {
+    let output = zornmesh(&["inspect", "messages", "--limit", "101"]);
+
+    assert_eq!(output.status.code(), Some(65));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr(&output),
+        "E_VALIDATION_FAILED: inspect limit 101 exceeds maximum 100\n"
+    );
 }
 
 #[test]

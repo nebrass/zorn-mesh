@@ -12,6 +12,7 @@ zornmesh-core = { path = "../zornmesh-core" }
 zornmesh-daemon = { path = "../zornmesh-daemon" }
 zornmesh-rpc = { path = "../zornmesh-rpc" }
 zornmesh-sdk = { path = "../zornmesh-sdk" }
+zornmesh-store = { path = "../zornmesh-store" }
 
 [lib]
 path = "src/lib.rs"

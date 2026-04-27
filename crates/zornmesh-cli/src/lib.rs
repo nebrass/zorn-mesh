@@ -1,6 +1,7 @@
 #![doc = "Command skeleton for the public zornmesh CLI."]
 
 use std::{
+    collections::HashMap,
     fs,
     io::{self, BufRead, Write},
     os::unix::{
@@ -14,6 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use zornmesh_store::{
+    DeadLetterFailureCategory, DeadLetterQuery, EvidenceAuditEntry, EvidenceEnvelopeRecord,
+    EvidenceQuery, EvidenceStore, FileEvidenceStore,
+};
+
 pub const ROOT_HELP: &str = include_str!("../../../fixtures/cli/root-help.stdout");
 pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.stdout");
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
@@ -25,7 +31,10 @@ const CLI_VERSION: &str = "0.1.0";
 pub const MCP_BRIDGE_PROTOCOL_VERSION: &str = "2025-03-26";
 const DEFAULT_SHUTDOWN_BUDGET_MS: u64 = 10_000;
 const MAX_SHUTDOWN_BUDGET_MS: u64 = 60_000;
+const DEFAULT_INSPECT_LIMIT: usize = 50;
+const MAX_INSPECT_LIMIT: usize = 100;
 const SUPPORTED_SHELLS: &str = "bash, zsh, fish";
+const ENV_EVIDENCE_PATH: &str = "ZORN_EVIDENCE_PATH";
 static NEXT_BRIDGE_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 const BASH_COMPLETION: &str = r#"_zornmesh()
 {
@@ -33,7 +42,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio trace completion help"
+    commands="daemon doctor agents stdio inspect trace completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -69,7 +78,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio trace completion help)
+  commands=(daemon doctor agents stdio inspect trace completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -89,7 +98,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio trace completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -455,6 +464,8 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "agents" => run_agents(rest, &invocation),
         [command] if command == "stdio" => run_stdio(&[], &invocation),
         [command, rest @ ..] if command == "stdio" => run_stdio(rest, &invocation),
+        [command] if command == "inspect" => run_inspect(&[], &invocation),
+        [command, rest @ ..] if command == "inspect" => run_inspect(rest, &invocation),
         [command] if command == "doctor" => run_doctor(&[], &invocation),
         [command, rest @ ..] if command == "doctor" => run_doctor(rest, &invocation),
         [command] if command == "completion" => print_completion_help(invocation.output),
@@ -889,6 +900,885 @@ fn agents_inspect(agent_id: &str) -> Result<(), CliError> {
 fn print_agents_help(output: OutputFormat) -> Result<(), CliError> {
     let help = "zornmesh agents\nList and inspect registered agents.\n\nUsage: zornmesh agents [COMMAND]\n\nCommands:\n  inspect <AGENT_ID>  Inspect one registered agent\n  help                Print agents help\n\nOptions:\n  -h, --help          Print help\n";
     print_help("agents help", help, output)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectCollection {
+    Messages,
+    DeadLetters,
+    Audit,
+    Metadata,
+}
+
+impl InspectCollection {
+    fn parse(raw: &str) -> Result<Self, CliError> {
+        match raw {
+            "messages" => Ok(Self::Messages),
+            "dead-letters" | "dead_letters" => Ok(Self::DeadLetters),
+            "audit" | "audit-log" | "audit_log" => Ok(Self::Audit),
+            "metadata" | "schema" | "version" | "sbom" => Ok(Self::Metadata),
+            other => Err(CliError::new(
+                "E_UNSUPPORTED_COMMAND",
+                format!("unsupported zornmesh inspect collection '{other}'"),
+                ExitKind::UserError,
+            )),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Messages => "messages",
+            Self::DeadLetters => "dead-letters",
+            Self::Audit => "audit",
+            Self::Metadata => "metadata",
+        }
+    }
+
+    const fn empty_noun(self) -> &'static str {
+        match self {
+            Self::Messages => "messages",
+            Self::DeadLetters => "dead letters",
+            Self::Audit => "audit entries",
+            Self::Metadata => "metadata records",
+        }
+    }
+
+    fn command(self) -> String {
+        format!("inspect {}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct InspectFilters {
+    correlation_id: Option<String>,
+    trace_id: Option<String>,
+    agent_id: Option<String>,
+    subject: Option<String>,
+    delivery_state: Option<String>,
+    failure_category: Option<DeadLetterFailureCategory>,
+    since_unix_ms: Option<u64>,
+    until_unix_ms: Option<u64>,
+}
+
+impl InspectFilters {
+    fn time_window(&self) -> Option<(u64, u64)> {
+        match (self.since_unix_ms, self.until_unix_ms) {
+            (Some(since), Some(until)) => Some((since, until)),
+            (Some(since), None) => Some((since, u64::MAX)),
+            (None, Some(until)) => Some((0, until)),
+            (None, None) => None,
+        }
+    }
+
+    fn chips(&self) -> Vec<InspectFilterChip> {
+        let mut chips = Vec::new();
+        push_filter_chip(&mut chips, "correlation_id", self.correlation_id.as_deref());
+        push_filter_chip(&mut chips, "trace_id", self.trace_id.as_deref());
+        push_filter_chip(&mut chips, "agent_id", self.agent_id.as_deref());
+        push_filter_chip(&mut chips, "subject", self.subject.as_deref());
+        push_filter_chip(&mut chips, "delivery_state", self.delivery_state.as_deref());
+        if let Some(category) = self.failure_category {
+            push_filter_chip(&mut chips, "failure_category", Some(category.as_str()));
+        }
+        if let Some(since) = self.since_unix_ms {
+            chips.push(InspectFilterChip::new("since", since.to_string()));
+        }
+        if let Some(until) = self.until_unix_ms {
+            chips.push(InspectFilterChip::new("until", until.to_string()));
+        }
+        chips
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InspectFilterChip {
+    key: &'static str,
+    value: String,
+    label: String,
+}
+
+impl InspectFilterChip {
+    fn new(key: &'static str, value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self {
+            key,
+            label: format!("{key}={value}"),
+            value,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InspectOptions {
+    evidence_path: Option<PathBuf>,
+    filters: InspectFilters,
+    limit: usize,
+    cursor: usize,
+}
+
+impl Default for InspectOptions {
+    fn default() -> Self {
+        Self {
+            evidence_path: None,
+            filters: InspectFilters::default(),
+            limit: DEFAULT_INSPECT_LIMIT,
+            cursor: 0,
+        }
+    }
+}
+
+fn run_inspect(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_inspect_help(invocation.output),
+        [flag] if is_help(flag) => print_inspect_help(invocation.output),
+        [collection, rest @ ..] if rest.iter().any(|arg| is_help(arg)) => {
+            InspectCollection::parse(collection)?;
+            print_inspect_help(invocation.output)
+        }
+        [collection, rest @ ..] => {
+            let collection = InspectCollection::parse(collection)?;
+            let options = parse_inspect_options(rest)?;
+            inspect_collection(collection, options, invocation.output)
+        }
+    }
+}
+
+fn parse_inspect_options(args: &[String]) -> Result<InspectOptions, CliError> {
+    let mut options = InspectOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = arg.strip_prefix("--evidence=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence", value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--evidence-path=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence-path", value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--store=") {
+            options.evidence_path = Some(parse_non_empty_path("--store", value)?);
+            index += 1;
+        } else if matches!(arg.as_str(), "--evidence" | "--evidence-path" | "--store") {
+            let value = inspect_option_value(args, index, arg)?;
+            options.evidence_path = Some(parse_non_empty_path(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--correlation-id=") {
+            options.filters.correlation_id = Some(parse_non_empty_string(arg, value)?);
+            index += 1;
+        } else if arg == "--correlation-id" || arg == "--correlation" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.filters.correlation_id = Some(parse_non_empty_string(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--trace-id=") {
+            options.filters.trace_id = Some(parse_non_empty_string(arg, value)?);
+            index += 1;
+        } else if arg == "--trace-id" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.filters.trace_id = Some(parse_non_empty_string(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--agent-id=") {
+            options.filters.agent_id = Some(parse_non_empty_string(arg, value)?);
+            index += 1;
+        } else if arg == "--agent-id" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.filters.agent_id = Some(parse_non_empty_string(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--subject=") {
+            options.filters.subject = Some(parse_non_empty_string(arg, value)?);
+            index += 1;
+        } else if arg == "--subject" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.filters.subject = Some(parse_non_empty_string(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--delivery-state=") {
+            options.filters.delivery_state = Some(parse_non_empty_string(arg, value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--state=") {
+            options.filters.delivery_state = Some(parse_non_empty_string(arg, value)?);
+            index += 1;
+        } else if arg == "--delivery-state" || arg == "--state" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.filters.delivery_state = Some(parse_non_empty_string(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--failure-category=") {
+            options.filters.failure_category = Some(parse_failure_category(value)?);
+            index += 1;
+        } else if arg == "--failure-category" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.filters.failure_category = Some(parse_failure_category(value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--since=") {
+            options.filters.since_unix_ms = Some(parse_u64_option("--since", value)?);
+            index += 1;
+        } else if arg == "--since" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.filters.since_unix_ms = Some(parse_u64_option(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--until=") {
+            options.filters.until_unix_ms = Some(parse_u64_option("--until", value)?);
+            index += 1;
+        } else if arg == "--until" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.filters.until_unix_ms = Some(parse_u64_option(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--limit=") {
+            options.limit = parse_limit(value)?;
+            index += 1;
+        } else if arg == "--limit" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.limit = parse_limit(value)?;
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--cursor=") {
+            options.cursor = parse_cursor(value)?;
+            index += 1;
+        } else if arg == "--cursor" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.cursor = parse_cursor(value)?;
+            index += 2;
+        } else {
+            return Err(CliError::new(
+                "E_UNSUPPORTED_COMMAND",
+                format!("unsupported zornmesh inspect argument '{arg}'"),
+                ExitKind::UserError,
+            ));
+        }
+    }
+
+    if let Some((since, until)) = options.filters.time_window()
+        && since > until
+    {
+        return Err(CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("inspect time window is invalid: since {since} is after until {until}"),
+            ExitKind::Validation,
+        ));
+    }
+
+    Ok(options)
+}
+
+fn inspect_option_value<'a>(
+    args: &'a [String],
+    index: usize,
+    option: &str,
+) -> Result<&'a str, CliError> {
+    args.get(index + 1).map(String::as_str).ok_or_else(|| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("{option} requires a value"),
+            ExitKind::Validation,
+        )
+    })
+}
+
+fn parse_non_empty_path(option: &str, value: &str) -> Result<PathBuf, CliError> {
+    Ok(PathBuf::from(parse_non_empty_string(option, value)?))
+}
+
+fn parse_non_empty_string(option: &str, value: &str) -> Result<String, CliError> {
+    if value.trim().is_empty() {
+        return Err(CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("{option} requires a non-empty value"),
+            ExitKind::Validation,
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_u64_option(option: &str, value: &str) -> Result<u64, CliError> {
+    value.parse::<u64>().map_err(|error| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("{option} must be an unsigned integer millisecond timestamp: {error}"),
+            ExitKind::Validation,
+        )
+    })
+}
+
+fn parse_limit(value: &str) -> Result<usize, CliError> {
+    let limit = value.parse::<usize>().map_err(|error| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("inspect limit must be an integer: {error}"),
+            ExitKind::Validation,
+        )
+    })?;
+    if limit == 0 {
+        return Err(CliError::new(
+            "E_VALIDATION_FAILED",
+            "inspect limit must be greater than zero",
+            ExitKind::Validation,
+        ));
+    }
+    if limit > MAX_INSPECT_LIMIT {
+        return Err(CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("inspect limit {limit} exceeds maximum {MAX_INSPECT_LIMIT}"),
+            ExitKind::Validation,
+        ));
+    }
+    Ok(limit)
+}
+
+fn parse_cursor(value: &str) -> Result<usize, CliError> {
+    value.parse::<usize>().map_err(|error| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("inspect cursor must be an integer offset: {error}"),
+            ExitKind::Validation,
+        )
+    })
+}
+
+fn parse_failure_category(value: &str) -> Result<DeadLetterFailureCategory, CliError> {
+    DeadLetterFailureCategory::from_wire(value).ok_or_else(|| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("unsupported failure category '{value}'"),
+            ExitKind::Validation,
+        )
+    })
+}
+
+fn inspect_collection(
+    collection: InspectCollection,
+    options: InspectOptions,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?;
+    let chips = options.filters.chips();
+    let mut warnings = Vec::new();
+    let (availability, mut records, metadata) = match evidence_path.as_ref() {
+        Some(path) => match fs::metadata(path) {
+            Ok(_) => match FileEvidenceStore::open_evidence(path) {
+                Ok(store) => (
+                    "available",
+                    inspect_records(collection, &store, &options.filters),
+                    inspect_metadata_json("available", Some(path), Some(&store), None),
+                ),
+                Err(error) => {
+                    let message = format!("evidence store is unavailable: {error}");
+                    warnings.push(DiagnosticWarning::new(
+                        "W_EVIDENCE_STORE_UNAVAILABLE",
+                        message.clone(),
+                    ));
+                    (
+                        "unavailable",
+                        Vec::new(),
+                        inspect_metadata_json("unavailable", Some(path), None, Some(&message)),
+                    )
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let message = "evidence store does not exist".to_owned();
+                warnings.push(DiagnosticWarning::new(
+                    "W_EVIDENCE_STORE_UNAVAILABLE",
+                    message.clone(),
+                ));
+                (
+                    "unavailable",
+                    Vec::new(),
+                    inspect_metadata_json("unavailable", Some(path), None, Some(&message)),
+                )
+            }
+            Err(error) => {
+                let message = format!("evidence store cannot be inspected: {error}");
+                warnings.push(DiagnosticWarning::new(
+                    "W_EVIDENCE_STORE_UNAVAILABLE",
+                    message.clone(),
+                ));
+                (
+                    "unavailable",
+                    Vec::new(),
+                    inspect_metadata_json("unavailable", Some(path), None, Some(&message)),
+                )
+            }
+        },
+        None => {
+            let message = format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            );
+            warnings.push(DiagnosticWarning::new(
+                "W_EVIDENCE_STORE_UNAVAILABLE",
+                message.clone(),
+            ));
+            (
+                "unavailable",
+                Vec::new(),
+                inspect_metadata_json("unavailable", None, None, Some(&message)),
+            )
+        }
+    };
+
+    if collection == InspectCollection::Metadata && availability == "available" {
+        records.push(serde_json::json!({
+            "kind": "schema",
+            "status": "available",
+            "schema_version": zornmesh_store::EVIDENCE_STORE_SCHEMA_VERSION,
+        }));
+        records.push(serde_json::json!({
+            "kind": "release_integrity",
+            "status": "unsupported_placeholder",
+            "signature": "unverifiable",
+            "sbom": "unavailable",
+        }));
+    }
+
+    let total = records.len();
+    let page_records = records
+        .into_iter()
+        .skip(options.cursor)
+        .take(options.limit)
+        .collect::<Vec<_>>();
+    let returned = page_records.len();
+    let next_offset = options.cursor.saturating_add(returned);
+    let next_cursor = if next_offset < total {
+        Some(next_offset.to_string())
+    } else {
+        None
+    };
+    let state = inspect_state(availability, total, next_cursor.as_deref());
+    let empty_message = if state == "empty" {
+        Some(format!(
+            "no {} matched the inspect filters",
+            collection.empty_noun()
+        ))
+    } else if state == "unavailable" {
+        Some("inspect data is unavailable".to_owned())
+    } else {
+        None
+    };
+    let next_actions = inspect_next_actions(state);
+
+    match output {
+        OutputFormat::Human => print_inspect_human(InspectHumanReport {
+            collection,
+            availability,
+            state,
+            returned,
+            total,
+            limit: options.limit,
+            next_cursor: next_cursor.as_deref(),
+            chips: &chips,
+            records: &page_records,
+            empty_message: empty_message.as_deref(),
+            next_actions: &next_actions,
+            warnings: &warnings,
+        }),
+        OutputFormat::Json => {
+            let data = serde_json::json!({
+                "collection": collection.as_str(),
+                "availability": availability,
+                "state": state,
+                "records": page_records,
+                "filters": chips.iter().map(filter_chip_json).collect::<Vec<_>>(),
+                "pagination": {
+                    "cursor": options.cursor.to_string(),
+                    "limit": options.limit,
+                    "default_limit": DEFAULT_INSPECT_LIMIT,
+                    "max_limit": MAX_INSPECT_LIMIT,
+                    "returned": returned,
+                    "total": total,
+                    "next_cursor": next_cursor,
+                    "complete": next_offset >= total,
+                },
+                "metadata": metadata,
+                "empty": empty_message,
+                "next_actions": next_actions,
+            });
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": collection.command(),
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => Err(ndjson_not_supported(&collection.command())),
+    }
+}
+
+fn resolve_evidence_path(cli_path: Option<&PathBuf>) -> Result<Option<PathBuf>, CliError> {
+    if let Some(path) = cli_path {
+        return Ok(Some(path.clone()));
+    }
+    match std::env::var(ENV_EVIDENCE_PATH) {
+        Ok(raw) if raw.trim().is_empty() => Err(CliError::new(
+            "E_INVALID_CONFIG",
+            format!("{ENV_EVIDENCE_PATH} must not be empty"),
+            ExitKind::UserError,
+        )),
+        Ok(raw) => Ok(Some(PathBuf::from(raw))),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(CliError::new(
+            "E_INVALID_CONFIG",
+            format!("{ENV_EVIDENCE_PATH} must be valid UTF-8"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn inspect_records(
+    collection: InspectCollection,
+    store: &FileEvidenceStore,
+    filters: &InspectFilters,
+) -> Vec<serde_json::Value> {
+    match collection {
+        InspectCollection::Messages => inspect_message_records(store, filters),
+        InspectCollection::DeadLetters => inspect_dead_letter_records(store, filters),
+        InspectCollection::Audit => inspect_audit_records(store, filters),
+        InspectCollection::Metadata => Vec::new(),
+    }
+}
+
+fn inspect_message_records(
+    store: &FileEvidenceStore,
+    filters: &InspectFilters,
+) -> Vec<serde_json::Value> {
+    let mut query = EvidenceQuery::new();
+    if let Some(value) = filters.correlation_id.as_deref() {
+        query = query.correlation_id(value);
+    }
+    if let Some(value) = filters.trace_id.as_deref() {
+        query = query.trace_id(value);
+    }
+    if let Some(value) = filters.agent_id.as_deref() {
+        query = query.agent_id(value);
+    }
+    if let Some(value) = filters.subject.as_deref() {
+        query = query.subject(value);
+    }
+    if let Some(value) = filters.delivery_state.as_deref() {
+        query = query.delivery_state(value);
+    }
+    if let Some((since, until)) = filters.time_window() {
+        query = query.time_window(since, until);
+    }
+
+    let mut records = store.query_envelopes(query);
+    records.sort_by(|left, right| {
+        (left.daemon_sequence(), left.message_id())
+            .cmp(&(right.daemon_sequence(), right.message_id()))
+    });
+    records.iter().map(message_record_json).collect()
+}
+
+fn inspect_dead_letter_records(
+    store: &FileEvidenceStore,
+    filters: &InspectFilters,
+) -> Vec<serde_json::Value> {
+    let mut query = DeadLetterQuery::new();
+    if let Some(value) = filters.correlation_id.as_deref() {
+        query = query.correlation_id(value);
+    }
+    if let Some(value) = filters.trace_id.as_deref() {
+        query = query.trace_id(value);
+    }
+    if let Some(value) = filters.agent_id.as_deref() {
+        query = query.agent_id(value);
+    }
+    if let Some(value) = filters.subject.as_deref() {
+        query = query.subject(value);
+    }
+    if let Some(value) = filters.failure_category {
+        query = query.failure_category(value);
+    }
+    if let Some((since, until)) = filters.time_window() {
+        query = query.time_window(since, until);
+    }
+
+    let mut records = store.query_dead_letters(query);
+    if let Some(state) = filters.delivery_state.as_deref() {
+        records.retain(|record| record.terminal_state() == state);
+    }
+    records.sort_by(|left, right| {
+        (left.daemon_sequence(), left.message_id())
+            .cmp(&(right.daemon_sequence(), right.message_id()))
+    });
+    records
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "daemon_sequence": record.daemon_sequence(),
+                "message_id": record.message_id(),
+                "source_agent": record.source_agent(),
+                "intended_target": record.intended_target(),
+                "subject": record.subject(),
+                "correlation_id": record.correlation_id(),
+                "trace_id": record.trace_id(),
+                "terminal_state": record.terminal_state(),
+                "failure_category": record.failure_category().as_str(),
+                "safe_details": record.safe_details(),
+                "attempt_count": record.attempt_count(),
+                "last_failure_category": record.last_failure_category().as_str(),
+                "first_attempted_unix_ms": record.first_attempted_unix_ms(),
+                "last_attempted_unix_ms": record.last_attempted_unix_ms(),
+                "terminal_unix_ms": record.terminal_unix_ms(),
+                "payload_len": record.payload_len(),
+                "payload_content_type": record.payload_content_type(),
+            })
+        })
+        .collect()
+}
+
+fn inspect_audit_records(
+    store: &FileEvidenceStore,
+    filters: &InspectFilters,
+) -> Vec<serde_json::Value> {
+    let timestamps = store
+        .query_envelopes(EvidenceQuery::new())
+        .into_iter()
+        .map(|record| (record.message_id().to_owned(), record.timestamp_unix_ms()))
+        .collect::<HashMap<_, _>>();
+    let mut entries = store
+        .audit_entries()
+        .into_iter()
+        .filter(|entry| audit_matches_filters(entry, filters, &timestamps))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        (left.daemon_sequence(), left.message_id(), left.action()).cmp(&(
+            right.daemon_sequence(),
+            right.message_id(),
+            right.action(),
+        ))
+    });
+    entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "daemon_sequence": entry.daemon_sequence(),
+                "message_id": entry.message_id(),
+                "timestamp_unix_ms": timestamps.get(entry.message_id()).copied(),
+                "previous_audit_hash": entry.previous_audit_hash(),
+                "current_audit_hash": entry.current_audit_hash(),
+                "actor": entry.actor(),
+                "action": entry.action(),
+                "capability_or_subject": entry.capability_or_subject(),
+                "correlation_id": entry.correlation_id(),
+                "trace_id": entry.trace_id(),
+                "state_from": entry.state_from(),
+                "state_to": entry.state_to(),
+                "outcome_details": entry.outcome_details(),
+            })
+        })
+        .collect()
+}
+
+fn audit_matches_filters(
+    entry: &EvidenceAuditEntry,
+    filters: &InspectFilters,
+    timestamps: &HashMap<String, u64>,
+) -> bool {
+    if filters
+        .correlation_id
+        .as_deref()
+        .is_some_and(|value| entry.correlation_id() != value)
+    {
+        return false;
+    }
+    if filters
+        .trace_id
+        .as_deref()
+        .is_some_and(|value| entry.trace_id() != value)
+    {
+        return false;
+    }
+    if filters
+        .agent_id
+        .as_deref()
+        .is_some_and(|value| entry.actor() != value)
+    {
+        return false;
+    }
+    if filters
+        .subject
+        .as_deref()
+        .is_some_and(|value| entry.capability_or_subject() != value)
+    {
+        return false;
+    }
+    if filters
+        .delivery_state
+        .as_deref()
+        .is_some_and(|value| entry.state_to() != value)
+    {
+        return false;
+    }
+    if let Some((since, until)) = filters.time_window() {
+        let Some(timestamp) = timestamps.get(entry.message_id()).copied() else {
+            return false;
+        };
+        if timestamp < since || timestamp > until {
+            return false;
+        }
+    }
+    true
+}
+
+fn message_record_json(record: &EvidenceEnvelopeRecord) -> serde_json::Value {
+    serde_json::json!({
+        "daemon_sequence": record.daemon_sequence(),
+        "message_id": record.message_id(),
+        "source_agent": record.source_agent(),
+        "target_or_subject": record.target_or_subject(),
+        "subject": record.subject(),
+        "timestamp_unix_ms": record.timestamp_unix_ms(),
+        "correlation_id": record.correlation_id(),
+        "trace_id": record.trace_id(),
+        "parent_message_id": record.parent_message_id(),
+        "delivery_state": record.delivery_state(),
+        "payload_len": record.payload_len(),
+        "payload_content_type": record.payload_content_type(),
+    })
+}
+
+fn inspect_metadata_json(
+    status: &'static str,
+    path: Option<&Path>,
+    store: Option<&FileEvidenceStore>,
+    reason: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "evidence_store": {
+            "status": status,
+            "path": path.map(|path| path.display().to_string()),
+            "schema_version": store.map(|_| zornmesh_store::EVIDENCE_STORE_SCHEMA_VERSION),
+            "indexes": store.map(EvidenceStore::index_names).unwrap_or_default(),
+            "reason": reason,
+        },
+        "runtime": {
+            "status": "unsupported_placeholder",
+            "reason": "daemon runtime metadata requires a live daemon inspect API",
+        },
+        "release_integrity": {
+            "status": "unsupported_placeholder",
+            "signature": "unverifiable",
+            "sbom": "unavailable",
+        },
+    })
+}
+
+fn inspect_state(availability: &str, total: usize, next_cursor: Option<&str>) -> &'static str {
+    if availability != "available" {
+        "unavailable"
+    } else if total == 0 {
+        "empty"
+    } else if next_cursor.is_some() {
+        "partial"
+    } else {
+        "complete"
+    }
+}
+
+fn inspect_next_actions(state: &str) -> Vec<&'static str> {
+    match state {
+        "empty" => vec!["trace", "tail", "doctor", "retention checks"],
+        "unavailable" => vec!["doctor", "configure evidence store", "retention checks"],
+        _ => Vec::new(),
+    }
+}
+
+struct InspectHumanReport<'a> {
+    collection: InspectCollection,
+    availability: &'static str,
+    state: &'static str,
+    returned: usize,
+    total: usize,
+    limit: usize,
+    next_cursor: Option<&'a str>,
+    chips: &'a [InspectFilterChip],
+    records: &'a [serde_json::Value],
+    empty_message: Option<&'a str>,
+    next_actions: &'a [&'static str],
+    warnings: &'a [DiagnosticWarning],
+}
+
+fn print_inspect_human(report: InspectHumanReport<'_>) -> Result<(), CliError> {
+    println!("zornmesh inspect {}", report.collection.as_str());
+    println!("status: {}", report.availability);
+    println!("state: {}", report.state);
+    println!("records: {}", report.returned);
+    if !report.chips.is_empty() {
+        println!("filters: {}", filter_summary(report.chips));
+    }
+    if let Some(message) = report.empty_message {
+        println!("empty: {message}");
+    }
+    for warning in report.warnings {
+        println!("warning: {}", warning.message);
+    }
+    for record in report.records {
+        println!("record: {}", inspect_human_record_summary(record));
+    }
+    if !report.next_actions.is_empty() {
+        println!("next_actions: {}", report.next_actions.join(", "));
+    }
+    if let Some(cursor) = report.next_cursor {
+        println!(
+            "pagination: next_cursor={cursor} limit={} total={}",
+            report.limit, report.total
+        );
+    } else {
+        println!("pagination: complete");
+    }
+    Ok(())
+}
+
+fn inspect_human_record_summary(record: &serde_json::Value) -> String {
+    let sequence = record
+        .get("daemon_sequence")
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unavailable".to_owned());
+    let message_id = record
+        .get("message_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("metadata");
+    let state = record
+        .get("delivery_state")
+        .or_else(|| record.get("terminal_state"))
+        .or_else(|| record.get("state_to"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("metadata");
+    format!("sequence={sequence} message_id={message_id} state={state}")
+}
+
+fn filter_summary(chips: &[InspectFilterChip]) -> String {
+    chips
+        .iter()
+        .map(|chip| chip.label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn filter_chip_json(chip: &InspectFilterChip) -> serde_json::Value {
+    serde_json::json!({
+        "key": chip.key,
+        "value": chip.value,
+        "label": chip.label,
+    })
+}
+
+fn warning_json(warning: &DiagnosticWarning) -> serde_json::Value {
+    serde_json::json!({
+        "code": warning.code,
+        "message": warning.message,
+    })
+}
+
+fn push_filter_chip(chips: &mut Vec<InspectFilterChip>, key: &'static str, value: Option<&str>) {
+    if let Some(value) = value {
+        chips.push(InspectFilterChip::new(key, value));
+    }
+}
+
+fn print_inspect_help(output: OutputFormat) -> Result<(), CliError> {
+    let help = "zornmesh inspect\nInspect persisted messages, dead letters, audit entries, and metadata.\n\nUsage: zornmesh inspect <messages|dead-letters|audit|metadata> [OPTIONS]\n\nOptions:\n      --evidence <PATH>           Read this evidence log\n      --correlation-id <ID>       Filter by correlation ID\n      --trace-id <ID>             Filter by trace ID\n      --agent-id <ID>             Filter by source, target, or actor agent ID\n      --subject <SUBJECT>         Filter by subject or audit capability/subject\n      --delivery-state <STATE>    Filter by delivery or terminal state\n      --failure-category <CAT>    Filter dead letters by failure category\n      --since <UNIX_MS>           Include records at or after this timestamp\n      --until <UNIX_MS>           Include records at or before this timestamp\n      --limit <N>                 Page size, default 50 and maximum 100\n      --cursor <OFFSET>           Stable offset cursor from a previous page\n  -h, --help                      Print help\n";
+    print_help("inspect", help, output)
 }
 
 fn run_stdio(args: &[String], invocation: &Invocation) -> Result<(), CliError> {

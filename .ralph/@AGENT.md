@@ -53,6 +53,7 @@ cd sdks/typescript && bun test
 - Story 4.1 adds the first evidence persistence boundary: accepted envelopes, audit hash links, trace/correlation indexes, recovery replay, corrupt/future-schema diagnostics, and daemon durable ACK-after-commit wiring.
 - Story 4.2 adds W3C tracecontext propagation and local `zornmesh.telemetry.v1` spans/metrics with cardinality-safe labels and bounded exporter diagnostics.
 - Story 4.3 adds durable dead-letter records to the evidence log with structured failure categories, redacted safe details, retry/timing metadata, filtered queries, replay recovery, and no-recipient daemon DLQ persistence before publish ACK.
+- Story 4.4 adds `zornmesh inspect <messages|dead-letters|audit|metadata>` with `--evidence`/`ZORN_EVIDENCE_PATH`, structured filters, redacted human/JSON output, and cursor pagination.
 
 ## Feature Development Quality Standards
 

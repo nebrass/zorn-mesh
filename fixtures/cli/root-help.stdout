@@ -8,6 +8,7 @@ Commands:
   agents   List and inspect registered agents
   doctor   Run first-day local mesh diagnostics
   stdio    Bridge an MCP-compatible host over stdio
+  inspect  Inspect persisted messages, dead letters, audit entries, and metadata
   trace    Inspect trace and fixture scaffolding
   completion  Generate shell completions
   help     Print command help

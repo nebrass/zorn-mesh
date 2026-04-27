@@ -166,6 +166,7 @@ dependencies = [
  "zornmesh-daemon",
  "zornmesh-rpc",
  "zornmesh-sdk",
+ "zornmesh-store",
 ]
 
 [[package]]
