@@ -752,6 +752,118 @@ impl Broker {
         }
     }
 
+    pub fn accept_connection(
+        &self,
+        agent_canonical_id: &str,
+        credentials: PeerCredentials,
+        policy: SocketTrustPolicy,
+        socket_mode: u32,
+    ) -> Result<ConnectionAcceptanceOutcome, BrokerError> {
+        self.accept_connection_with_transport(
+            agent_canonical_id,
+            credentials,
+            policy,
+            socket_mode,
+            "unix",
+        )
+    }
+
+    pub fn accept_connection_with_transport(
+        &self,
+        agent_canonical_id: &str,
+        credentials: PeerCredentials,
+        policy: SocketTrustPolicy,
+        socket_mode: u32,
+        transport: &str,
+    ) -> Result<ConnectionAcceptanceOutcome, BrokerError> {
+        let transport_lower = transport.trim().to_ascii_lowercase();
+        if transport_lower != "unix" {
+            return Ok(ConnectionAcceptanceOutcome::Rejected {
+                code: SocketTrustErrorCode::UnsupportedSocketForm,
+                remediation: format!(
+                    "transport '{transport}' is not supported; use a Unix-domain socket owned by the invoking user"
+                ),
+            });
+        }
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        if !inner.agent_cards.contains_key(agent_canonical_id) {
+            return Ok(ConnectionAcceptanceOutcome::Rejected {
+                code: SocketTrustErrorCode::UnknownAgent,
+                remediation: format!(
+                    "agent '{agent_canonical_id}' must register an AgentCard before connecting"
+                ),
+            });
+        }
+        if credentials.uid() != policy.owner_uid() {
+            return Ok(ConnectionAcceptanceOutcome::Rejected {
+                code: SocketTrustErrorCode::ForeignUid,
+                remediation: format!(
+                    "peer uid {} does not match daemon owner uid {}; connect as the same user",
+                    credentials.uid(),
+                    policy.owner_uid()
+                ),
+            });
+        }
+        if (socket_mode & 0o077) != 0 {
+            return Ok(ConnectionAcceptanceOutcome::Rejected {
+                code: SocketTrustErrorCode::UnsafeMode,
+                remediation: format!(
+                    "socket mode {socket_mode:o} is unsafe; remove group/other permissions and re-bind"
+                ),
+            });
+        }
+
+        inner.agent_presence.insert(
+            agent_canonical_id.to_owned(),
+            AgentPresenceRecord {
+                state: AgentPresenceState::Connected,
+                credentials: Some(credentials.clone()),
+            },
+        );
+        inner.agent_presence_events.push(AgentPresenceEvent {
+            agent_canonical_id: agent_canonical_id.to_owned(),
+            state: AgentPresenceState::Connected,
+        });
+        Ok(ConnectionAcceptanceOutcome::Accepted { credentials })
+    }
+
+    pub fn record_disconnect(&self, agent_canonical_id: &str) {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let entry = inner
+            .agent_presence
+            .entry(agent_canonical_id.to_owned())
+            .or_insert(AgentPresenceRecord {
+                state: AgentPresenceState::Disconnected,
+                credentials: None,
+            });
+        if entry.state != AgentPresenceState::Disconnected {
+            entry.state = AgentPresenceState::Disconnected;
+            entry.credentials = None;
+            inner.agent_presence_events.push(AgentPresenceEvent {
+                agent_canonical_id: agent_canonical_id.to_owned(),
+                state: AgentPresenceState::Disconnected,
+            });
+        }
+    }
+
+    pub fn agent_presence_state(&self, agent_canonical_id: &str) -> AgentPresenceState {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .agent_presence
+            .get(agent_canonical_id)
+            .map(|record| record.state)
+            .unwrap_or(AgentPresenceState::Disconnected)
+    }
+
+    pub fn agent_presence_events(&self) -> Vec<AgentPresenceEvent> {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .agent_presence_events
+            .clone()
+    }
+
     pub fn authorize_invocation(
         &self,
         agent_canonical_id: &str,
@@ -1342,6 +1454,130 @@ struct BrokerInner {
     high_privilege_capabilities: HashSet<(String, String)>,
     high_privilege_allowlist: HashSet<(String, String, String)>,
     authorization_events: Vec<AuthorizationEvent>,
+    agent_presence: HashMap<String, AgentPresenceRecord>,
+    agent_presence_events: Vec<AgentPresenceEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentPresenceRecord {
+    state: AgentPresenceState,
+    #[allow(dead_code)]
+    credentials: Option<PeerCredentials>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerCredentials {
+    uid: u32,
+    gid: u32,
+    pid: u32,
+}
+
+impl PeerCredentials {
+    pub const fn new(uid: u32, gid: u32, pid: u32) -> Self {
+        Self { uid, gid, pid }
+    }
+
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    pub const fn gid(&self) -> u32 {
+        self.gid
+    }
+
+    pub const fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocketTrustPolicy {
+    owner_uid: u32,
+    owner_gid: u32,
+    expected_mode: u32,
+}
+
+impl SocketTrustPolicy {
+    pub const fn new(owner_uid: u32, owner_gid: u32, expected_mode: u32) -> Self {
+        Self {
+            owner_uid,
+            owner_gid,
+            expected_mode,
+        }
+    }
+
+    pub const fn owner_uid(&self) -> u32 {
+        self.owner_uid
+    }
+
+    pub const fn owner_gid(&self) -> u32 {
+        self.owner_gid
+    }
+
+    pub const fn expected_mode(&self) -> u32 {
+        self.expected_mode
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionAcceptanceOutcome {
+    Accepted {
+        credentials: PeerCredentials,
+    },
+    Rejected {
+        code: SocketTrustErrorCode,
+        remediation: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketTrustErrorCode {
+    ForeignUid,
+    UnsafeMode,
+    UnknownAgent,
+    UnsupportedSocketForm,
+}
+
+impl SocketTrustErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForeignUid => "E_SOCKET_FOREIGN_UID",
+            Self::UnsafeMode => "E_SOCKET_UNSAFE_MODE",
+            Self::UnknownAgent => "E_SOCKET_UNKNOWN_AGENT",
+            Self::UnsupportedSocketForm => "E_SOCKET_UNSUPPORTED_FORM",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPresenceState {
+    Connected,
+    Disconnected,
+}
+
+impl AgentPresenceState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Disconnected => "disconnected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPresenceEvent {
+    agent_canonical_id: String,
+    state: AgentPresenceState,
+}
+
+impl AgentPresenceEvent {
+    pub fn agent_canonical_id(&self) -> &str {
+        &self.agent_canonical_id
+    }
+
+    pub const fn state(&self) -> AgentPresenceState {
+        self.state
+    }
 }
 
 #[derive(Debug, Clone, Default)]

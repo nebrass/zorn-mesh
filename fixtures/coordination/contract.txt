@@ -124,3 +124,11 @@ authorization|decision|revoked
 authorization|reason|not_allowlisted
 authorization|reason|capability_revoked
 authorization|error|E_AUTHORIZATION_DENIED
+socket_trust|outcome|accepted
+socket_trust|outcome|rejected
+socket_trust|error|E_SOCKET_FOREIGN_UID
+socket_trust|error|E_SOCKET_UNSAFE_MODE
+socket_trust|error|E_SOCKET_UNKNOWN_AGENT
+socket_trust|error|E_SOCKET_UNSUPPORTED_FORM
+agent_presence|state|connected
+agent_presence|state|disconnected

@@ -29,17 +29,7 @@
 - [x] Story 3.1: Register Minimal AgentCard Identity
 - [x] Story 3.2: Advertise and Resolve Symmetric Capabilities
 - [x] Story 3.3: Gate High-Privilege Capabilities by Local Allowlist
-  > As an operator
-  > I want high-privilege capabilities to be denied unless explicitly allow-listed
-  > So that one local agent cannot silently advertise or invoke dangerous actions.
-  > AC: Given a capability is marked high-privilege by local policy, When an agent attempts to advertise it without an allowlist entry, Then registration rejects that capability with a stable authorization error, And the agent may still register non-rejected capabilities when safe to do so.
-  > AC: Given an agent is not allow-listed for a high-privilege capability, When it attempts to invoke or consume that capability, Then the daemon rejects the invocation before dispatch, And no downstream agent receives the unauthorized request.
-  > AC: Given an operator provides a valid local allowlist entry, When the allow-listed agent advertises or invokes the high-privilege capability, Then the operation is permitted according to the local policy, And the decision is recorded as an observable authorization event.
-  > AC: Given the allowlist file or config is missing, malformed, or unreadable, When high-privilege policy evaluation runs, Then default policy is deny, And diagnostics explain the safe remediation path without exposing secrets.
-  > AC: Given an allowlist entry is revoked while an agent session is active, When policy reload or policy re-evaluation observes the revocation, Then the revoked capability is removed or marked unavailable for that agent before any new dispatch, And queued or undispatched invocations are denied with a stable authorization error while already-dispatched work follows the documented in-flight policy and emits an audit event.
-  > AC: Given authorization conformance tests run, When deny-by-default, allow-listed advertise, allow-listed invoke, malformed-policy, active-session-revocation, and unauthorized-dispatch scenarios execute, Then no high-privilege capability bypasses policy and every denial has a stable error code.
-  > Spec: specs/planning-artifacts/epics.md#story-3-3
-- [ ] Story 3.4: Enforce Local Socket Permission Model on Agent Connections
+- [x] Story 3.4: Enforce Local Socket Permission Model on Agent Connections
   > As an operator
   > I want the mesh to reject agent connections that do not satisfy the local socket trust model
   > So that cross-user or unsafe local processes cannot join the bus by accident.
