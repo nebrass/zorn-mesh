@@ -5,13 +5,23 @@ use std::{
     fmt,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
+
+use zornmesh_core::{Envelope, REDACTION_MARKER};
 
 pub const CRATE_BOUNDARY: &str = "zornmesh-store";
 pub const MAX_SUBSCRIPTION_IDENTITY_BYTES: usize = 256;
 pub const DURABLE_SUBSCRIPTION_LOG_VERSION: u32 = 1;
+pub const EVIDENCE_STORE_SCHEMA_VERSION: u32 = 1;
+pub const EVIDENCE_INDEX_CORRELATION_ID: &str = "idx_evidence_correlation_id";
+pub const EVIDENCE_INDEX_TRACE_ID: &str = "idx_evidence_trace_id";
+pub const EVIDENCE_INDEX_AGENT_ID: &str = "idx_evidence_agent_id";
+pub const EVIDENCE_INDEX_SUBJECT: &str = "idx_evidence_subject";
+pub const EVIDENCE_INDEX_DELIVERY_STATE: &str = "idx_evidence_delivery_state";
+pub const EVIDENCE_INDEX_TIMESTAMP: &str = "idx_evidence_timestamp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreBoundary;
@@ -139,6 +149,1134 @@ impl fmt::Display for SubscriptionStoreError {
 }
 
 impl std::error::Error for SubscriptionStoreError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceStoreErrorCode {
+    Validation,
+    Io,
+    Corrupt,
+    FutureSchema,
+    MigrationLocked,
+}
+
+impl EvidenceStoreErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "E_EVIDENCE_VALIDATION",
+            Self::Io => "E_EVIDENCE_IO",
+            Self::Corrupt => "E_EVIDENCE_CORRUPT",
+            Self::FutureSchema => "E_EVIDENCE_FUTURE_SCHEMA",
+            Self::MigrationLocked => "E_EVIDENCE_MIGRATION_LOCKED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceStoreError {
+    code: EvidenceStoreErrorCode,
+    message: String,
+}
+
+impl EvidenceStoreError {
+    fn new(code: EvidenceStoreErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> EvidenceStoreErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for EvidenceStoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for EvidenceStoreError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceEnvelopeInput {
+    envelope: Envelope,
+    message_id: String,
+    trace_id: String,
+    delivery_state: String,
+    target: Option<String>,
+    parent_message_id: Option<String>,
+}
+
+impl EvidenceEnvelopeInput {
+    pub fn new(
+        envelope: Envelope,
+        message_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        delivery_state: impl Into<String>,
+    ) -> Result<Self, EvidenceStoreError> {
+        let message_id = message_id.into();
+        let trace_id = trace_id.into();
+        let delivery_state = delivery_state.into();
+        validate_evidence_field("message ID", &message_id)?;
+        validate_evidence_field("trace ID", &trace_id)?;
+        validate_evidence_field("delivery state", &delivery_state)?;
+        Ok(Self {
+            envelope,
+            message_id,
+            trace_id,
+            delivery_state,
+            target: None,
+            parent_message_id: None,
+        })
+    }
+
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        let target = target.into();
+        if !target.trim().is_empty() {
+            self.target = Some(target);
+        }
+        self
+    }
+
+    pub fn with_parent_message_id(mut self, parent_message_id: impl Into<String>) -> Self {
+        let parent_message_id = parent_message_id.into();
+        if !parent_message_id.trim().is_empty() {
+            self.parent_message_id = Some(parent_message_id);
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceStateTransitionInput {
+    daemon_sequence: u64,
+    message_id: String,
+    actor: String,
+    action: String,
+    capability_or_subject: String,
+    correlation_id: String,
+    trace_id: String,
+    state_from: String,
+    state_to: String,
+    outcome_details: String,
+}
+
+impl EvidenceStateTransitionInput {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        daemon_sequence: u64,
+        message_id: impl Into<String>,
+        actor: impl Into<String>,
+        action: impl Into<String>,
+        capability_or_subject: impl Into<String>,
+        correlation_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        state_from: impl Into<String>,
+        state_to: impl Into<String>,
+        outcome_details: impl Into<String>,
+    ) -> Result<Self, EvidenceStoreError> {
+        if daemon_sequence == 0 {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                "daemon sequence must be greater than zero",
+            ));
+        }
+        let input = Self {
+            daemon_sequence,
+            message_id: message_id.into(),
+            actor: actor.into(),
+            action: action.into(),
+            capability_or_subject: capability_or_subject.into(),
+            correlation_id: correlation_id.into(),
+            trace_id: trace_id.into(),
+            state_from: state_from.into(),
+            state_to: state_to.into(),
+            outcome_details: outcome_details.into(),
+        };
+        validate_evidence_field("message ID", &input.message_id)?;
+        validate_evidence_field("actor", &input.actor)?;
+        validate_evidence_field("action", &input.action)?;
+        validate_evidence_field("capability or subject", &input.capability_or_subject)?;
+        validate_evidence_field("correlation ID", &input.correlation_id)?;
+        validate_evidence_field("trace ID", &input.trace_id)?;
+        validate_evidence_field("state from", &input.state_from)?;
+        validate_evidence_field("state to", &input.state_to)?;
+        validate_evidence_field("outcome details", &input.outcome_details)?;
+        Ok(input)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceEnvelopeRecord {
+    daemon_sequence: u64,
+    message_id: String,
+    source_agent: String,
+    target_or_subject: String,
+    subject: String,
+    timestamp_unix_ms: u64,
+    correlation_id: String,
+    trace_id: String,
+    parent_message_id: Option<String>,
+    delivery_state: String,
+    payload_len: usize,
+    payload_content_type: String,
+}
+
+impl EvidenceEnvelopeRecord {
+    pub const fn daemon_sequence(&self) -> u64 {
+        self.daemon_sequence
+    }
+
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+
+    pub fn source_agent(&self) -> &str {
+        &self.source_agent
+    }
+
+    pub fn target_or_subject(&self) -> &str {
+        &self.target_or_subject
+    }
+
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    pub const fn timestamp_unix_ms(&self) -> u64 {
+        self.timestamp_unix_ms
+    }
+
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
+    }
+
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    pub fn parent_message_id(&self) -> Option<&str> {
+        self.parent_message_id.as_deref()
+    }
+
+    pub fn delivery_state(&self) -> &str {
+        &self.delivery_state
+    }
+
+    pub const fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    pub fn payload_content_type(&self) -> &str {
+        &self.payload_content_type
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceAuditEntry {
+    daemon_sequence: u64,
+    message_id: String,
+    previous_audit_hash: String,
+    current_audit_hash: String,
+    actor: String,
+    action: String,
+    capability_or_subject: String,
+    correlation_id: String,
+    trace_id: String,
+    state_from: Option<String>,
+    state_to: String,
+    outcome_details: String,
+}
+
+impl EvidenceAuditEntry {
+    pub const fn daemon_sequence(&self) -> u64 {
+        self.daemon_sequence
+    }
+
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+
+    pub fn previous_audit_hash(&self) -> &str {
+        &self.previous_audit_hash
+    }
+
+    pub fn current_audit_hash(&self) -> &str {
+        &self.current_audit_hash
+    }
+
+    pub fn actor(&self) -> &str {
+        &self.actor
+    }
+
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+
+    pub fn capability_or_subject(&self) -> &str {
+        &self.capability_or_subject
+    }
+
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
+    }
+
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    pub fn state_from(&self) -> Option<&str> {
+        self.state_from.as_deref()
+    }
+
+    pub fn state_to(&self) -> &str {
+        &self.state_to
+    }
+
+    pub fn outcome_details(&self) -> &str {
+        &self.outcome_details
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceCommit {
+    envelope: EvidenceEnvelopeRecord,
+    audit_entry: EvidenceAuditEntry,
+}
+
+impl EvidenceCommit {
+    pub const fn envelope(&self) -> &EvidenceEnvelopeRecord {
+        &self.envelope
+    }
+
+    pub const fn audit_entry(&self) -> &EvidenceAuditEntry {
+        &self.audit_entry
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EvidenceQuery {
+    correlation_id: Option<String>,
+    trace_id: Option<String>,
+    agent_id: Option<String>,
+    subject: Option<String>,
+    delivery_state: Option<String>,
+    time_window: Option<(u64, u64)>,
+}
+
+impl EvidenceQuery {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn correlation_id(mut self, value: impl Into<String>) -> Self {
+        self.correlation_id = Some(value.into());
+        self
+    }
+
+    pub fn trace_id(mut self, value: impl Into<String>) -> Self {
+        self.trace_id = Some(value.into());
+        self
+    }
+
+    pub fn agent_id(mut self, value: impl Into<String>) -> Self {
+        self.agent_id = Some(value.into());
+        self
+    }
+
+    pub fn subject(mut self, value: impl Into<String>) -> Self {
+        self.subject = Some(value.into());
+        self
+    }
+
+    pub fn delivery_state(mut self, value: impl Into<String>) -> Self {
+        self.delivery_state = Some(value.into());
+        self
+    }
+
+    pub const fn time_window(mut self, start_unix_ms: u64, end_unix_ms: u64) -> Self {
+        self.time_window = Some((start_unix_ms, end_unix_ms));
+        self
+    }
+}
+
+pub trait EvidenceStore {
+    fn persist_accepted_envelope(
+        &self,
+        input: EvidenceEnvelopeInput,
+    ) -> Result<EvidenceCommit, EvidenceStoreError>;
+
+    fn persist_state_transition(
+        &self,
+        input: EvidenceStateTransitionInput,
+    ) -> Result<EvidenceAuditEntry, EvidenceStoreError>;
+
+    fn query_envelopes(&self, query: EvidenceQuery) -> Vec<EvidenceEnvelopeRecord>;
+
+    fn get_envelope(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<EvidenceEnvelopeRecord>, EvidenceStoreError>;
+
+    fn audit_entries(&self) -> Vec<EvidenceAuditEntry>;
+
+    fn next_daemon_sequence(&self) -> u64;
+
+    fn index_names(&self) -> Vec<&'static str>;
+}
+
+#[derive(Debug, Clone)]
+pub struct FileEvidenceStore {
+    inner: Arc<Mutex<FileEvidenceInner>>,
+}
+
+#[derive(Debug)]
+struct FileEvidenceInner {
+    path: PathBuf,
+    envelopes: Vec<EvidenceEnvelopeRecord>,
+    message_index: HashMap<String, usize>,
+    audit_entries: Vec<EvidenceAuditEntry>,
+    next_daemon_sequence: u64,
+    last_audit_hash: String,
+}
+
+impl FileEvidenceStore {
+    pub fn open_evidence(path: impl AsRef<Path>) -> Result<Self, EvidenceStoreError> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                EvidenceStoreError::new(
+                    EvidenceStoreErrorCode::Io,
+                    format!("create evidence store parent dir failed: {error}"),
+                )
+            })?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    EvidenceStoreError::new(
+                        EvidenceStoreErrorCode::Io,
+                        format!("secure evidence store parent dir failed: {error}"),
+                    )
+                },
+            )?;
+        }
+        if Self::migration_lock_path(&path).exists() {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::MigrationLocked,
+                "evidence store migration lock is held by another worker",
+            ));
+        }
+
+        let should_write_header = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata.len() == 0,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => {
+                return Err(EvidenceStoreError::new(
+                    EvidenceStoreErrorCode::Io,
+                    format!("stat evidence store failed: {error}"),
+                ));
+            }
+        };
+
+        let inner = Self::replay(&path)?;
+        if should_write_header {
+            write_evidence_line(&path, &EvidenceLogRecord::Schema.encode())?;
+        }
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(FileEvidenceInner { path, ..inner })),
+        })
+    }
+
+    pub fn migration_lock_path(path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.migration.lock", path.display()))
+    }
+
+    fn replay(path: &Path) -> Result<FileEvidenceInner, EvidenceStoreError> {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(FileEvidenceInner::empty(path.to_path_buf()));
+            }
+            Err(error) => {
+                return Err(EvidenceStoreError::new(
+                    EvidenceStoreErrorCode::Io,
+                    format!("open evidence store failed: {error}"),
+                ));
+            }
+        };
+
+        let mut inner = FileEvidenceInner::empty(path.to_path_buf());
+        let reader = BufReader::new(file);
+        for (line_number, line) in reader.lines().enumerate() {
+            let line = line.map_err(|error| {
+                EvidenceStoreError::new(
+                    EvidenceStoreErrorCode::Io,
+                    format!("read evidence line {line_number}: {error}"),
+                )
+            })?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let record = EvidenceLogRecord::parse(trimmed).ok_or_else(|| {
+                EvidenceStoreError::new(
+                    EvidenceStoreErrorCode::Corrupt,
+                    format!("evidence line {line_number} is corrupt"),
+                )
+            })?;
+            if matches!(record, EvidenceLogRecord::FutureSchema) {
+                return Err(EvidenceStoreError::new(
+                    EvidenceStoreErrorCode::FutureSchema,
+                    format!("evidence line {line_number} uses a future schema version"),
+                ));
+            }
+            inner.apply(record).map_err(|message| {
+                EvidenceStoreError::new(
+                    EvidenceStoreErrorCode::Corrupt,
+                    format!("evidence line {line_number}: {message}"),
+                )
+            })?;
+        }
+        Ok(inner)
+    }
+}
+
+impl FileEvidenceInner {
+    fn empty(path: PathBuf) -> Self {
+        Self {
+            path,
+            envelopes: Vec::new(),
+            message_index: HashMap::new(),
+            audit_entries: Vec::new(),
+            next_daemon_sequence: 1,
+            last_audit_hash: "0".to_owned(),
+        }
+    }
+
+    fn apply(&mut self, record: EvidenceLogRecord) -> Result<(), String> {
+        match record {
+            EvidenceLogRecord::Schema => Ok(()),
+            EvidenceLogRecord::FutureSchema => {
+                Err("future schema marker reached replay".to_owned())
+            }
+            EvidenceLogRecord::Accepted { envelope, audit } => {
+                if envelope.daemon_sequence != self.next_daemon_sequence {
+                    return Err(format!(
+                        "daemon sequence {} does not match expected {}",
+                        envelope.daemon_sequence, self.next_daemon_sequence
+                    ));
+                }
+                if self.message_index.contains_key(&envelope.message_id) {
+                    return Err(format!("duplicate message ID '{}'", envelope.message_id));
+                }
+                validate_audit_hash(&self.last_audit_hash, &audit)?;
+                self.message_index
+                    .insert(envelope.message_id.clone(), self.envelopes.len());
+                self.envelopes.push(envelope);
+                self.last_audit_hash = audit.current_audit_hash.clone();
+                self.audit_entries.push(audit);
+                self.next_daemon_sequence += 1;
+                Ok(())
+            }
+            EvidenceLogRecord::Transition { audit } => {
+                let Some(index) = self.message_index.get(audit.message_id()).copied() else {
+                    return Err(format!(
+                        "state transition references unknown message ID '{}'",
+                        audit.message_id()
+                    ));
+                };
+                validate_audit_hash(&self.last_audit_hash, &audit)?;
+                self.envelopes[index].delivery_state = audit.state_to.clone();
+                self.last_audit_hash = audit.current_audit_hash.clone();
+                self.audit_entries.push(audit);
+                Ok(())
+            }
+        }
+    }
+}
+
+impl EvidenceStore for FileEvidenceStore {
+    fn persist_accepted_envelope(
+        &self,
+        input: EvidenceEnvelopeInput,
+    ) -> Result<EvidenceCommit, EvidenceStoreError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("evidence store mutex not poisoned");
+        if inner.message_index.contains_key(&input.message_id) {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                format!("message ID '{}' already exists", input.message_id),
+            ));
+        }
+        let daemon_sequence = inner.next_daemon_sequence;
+        let payload_metadata = input.envelope.payload_metadata();
+        let envelope = EvidenceEnvelopeRecord {
+            daemon_sequence,
+            message_id: input.message_id.clone(),
+            source_agent: input.envelope.source_agent().to_owned(),
+            target_or_subject: input
+                .target
+                .clone()
+                .unwrap_or_else(|| input.envelope.subject().to_owned()),
+            subject: input.envelope.subject().to_owned(),
+            timestamp_unix_ms: input.envelope.timestamp_unix_ms(),
+            correlation_id: input.envelope.correlation_id().to_owned(),
+            trace_id: input.trace_id.clone(),
+            parent_message_id: input.parent_message_id.clone(),
+            delivery_state: input.delivery_state.clone(),
+            payload_len: payload_metadata.payload_len(),
+            payload_content_type: REDACTION_MARKER.to_owned(),
+        };
+        let audit = build_audit_entry(AuditBuildInput {
+            previous_hash: &inner.last_audit_hash,
+            daemon_sequence,
+            message_id: &input.message_id,
+            actor: input.envelope.source_agent(),
+            action: "accepted_envelope",
+            capability_or_subject: input.envelope.subject(),
+            correlation_id: input.envelope.correlation_id(),
+            trace_id: &input.trace_id,
+            state_from: None,
+            state_to: &input.delivery_state,
+            outcome_details: "accepted for durable processing",
+        });
+        let record = EvidenceLogRecord::Accepted {
+            envelope: envelope.clone(),
+            audit: audit.clone(),
+        };
+        write_evidence_line(&inner.path, &record.encode())?;
+        let envelope_index = inner.envelopes.len();
+        inner
+            .message_index
+            .insert(input.message_id.clone(), envelope_index);
+        inner.envelopes.push(envelope.clone());
+        inner.last_audit_hash = audit.current_audit_hash.clone();
+        inner.audit_entries.push(audit.clone());
+        inner.next_daemon_sequence += 1;
+        Ok(EvidenceCommit {
+            envelope,
+            audit_entry: audit,
+        })
+    }
+
+    fn persist_state_transition(
+        &self,
+        input: EvidenceStateTransitionInput,
+    ) -> Result<EvidenceAuditEntry, EvidenceStoreError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("evidence store mutex not poisoned");
+        let Some(envelope_index) = inner.message_index.get(&input.message_id).copied() else {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                format!("message ID '{}' is unknown", input.message_id),
+            ));
+        };
+        if inner.envelopes[envelope_index].daemon_sequence != input.daemon_sequence {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                format!(
+                    "daemon sequence {} does not match message ID '{}'",
+                    input.daemon_sequence, input.message_id
+                ),
+            ));
+        }
+        let audit = build_audit_entry(AuditBuildInput {
+            previous_hash: &inner.last_audit_hash,
+            daemon_sequence: input.daemon_sequence,
+            message_id: &input.message_id,
+            actor: &input.actor,
+            action: &input.action,
+            capability_or_subject: &input.capability_or_subject,
+            correlation_id: &input.correlation_id,
+            trace_id: &input.trace_id,
+            state_from: Some(&input.state_from),
+            state_to: &input.state_to,
+            outcome_details: &input.outcome_details,
+        });
+        let record = EvidenceLogRecord::Transition {
+            audit: audit.clone(),
+        };
+        write_evidence_line(&inner.path, &record.encode())?;
+        inner.envelopes[envelope_index].delivery_state = audit.state_to.clone();
+        inner.last_audit_hash = audit.current_audit_hash.clone();
+        inner.audit_entries.push(audit.clone());
+        Ok(audit)
+    }
+
+    fn query_envelopes(&self, query: EvidenceQuery) -> Vec<EvidenceEnvelopeRecord> {
+        let inner = self
+            .inner
+            .lock()
+            .expect("evidence store mutex not poisoned");
+        inner
+            .envelopes
+            .iter()
+            .filter(|record| evidence_matches_query(record, &query))
+            .cloned()
+            .collect()
+    }
+
+    fn get_envelope(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<EvidenceEnvelopeRecord>, EvidenceStoreError> {
+        validate_evidence_field("message ID", message_id)?;
+        let inner = self
+            .inner
+            .lock()
+            .expect("evidence store mutex not poisoned");
+        Ok(inner
+            .message_index
+            .get(message_id)
+            .map(|index| inner.envelopes[*index].clone()))
+    }
+
+    fn audit_entries(&self) -> Vec<EvidenceAuditEntry> {
+        self.inner
+            .lock()
+            .expect("evidence store mutex not poisoned")
+            .audit_entries
+            .clone()
+    }
+
+    fn next_daemon_sequence(&self) -> u64 {
+        self.inner
+            .lock()
+            .expect("evidence store mutex not poisoned")
+            .next_daemon_sequence
+    }
+
+    fn index_names(&self) -> Vec<&'static str> {
+        vec![
+            EVIDENCE_INDEX_CORRELATION_ID,
+            EVIDENCE_INDEX_TRACE_ID,
+            EVIDENCE_INDEX_AGENT_ID,
+            EVIDENCE_INDEX_SUBJECT,
+            EVIDENCE_INDEX_DELIVERY_STATE,
+            EVIDENCE_INDEX_TIMESTAMP,
+        ]
+    }
+}
+
+fn evidence_matches_query(record: &EvidenceEnvelopeRecord, query: &EvidenceQuery) -> bool {
+    if query
+        .correlation_id
+        .as_deref()
+        .is_some_and(|value| record.correlation_id() != value)
+    {
+        return false;
+    }
+    if query
+        .trace_id
+        .as_deref()
+        .is_some_and(|value| record.trace_id() != value)
+    {
+        return false;
+    }
+    if query
+        .agent_id
+        .as_deref()
+        .is_some_and(|value| record.source_agent() != value && record.target_or_subject() != value)
+    {
+        return false;
+    }
+    if query
+        .subject
+        .as_deref()
+        .is_some_and(|value| record.subject() != value)
+    {
+        return false;
+    }
+    if query
+        .delivery_state
+        .as_deref()
+        .is_some_and(|value| record.delivery_state() != value)
+    {
+        return false;
+    }
+    if query.time_window.is_some_and(|(start, end)| {
+        record.timestamp_unix_ms() < start || record.timestamp_unix_ms() > end
+    }) {
+        return false;
+    }
+    true
+}
+
+fn validate_evidence_field(name: &str, value: &str) -> Result<(), EvidenceStoreError> {
+    if value.trim().is_empty() {
+        return Err(EvidenceStoreError::new(
+            EvidenceStoreErrorCode::Validation,
+            format!("{name} must not be empty"),
+        ));
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(EvidenceStoreError::new(
+            EvidenceStoreErrorCode::Validation,
+            format!("{name} must not contain line breaks"),
+        ));
+    }
+    Ok(())
+}
+
+struct AuditBuildInput<'a> {
+    previous_hash: &'a str,
+    daemon_sequence: u64,
+    message_id: &'a str,
+    actor: &'a str,
+    action: &'a str,
+    capability_or_subject: &'a str,
+    correlation_id: &'a str,
+    trace_id: &'a str,
+    state_from: Option<&'a str>,
+    state_to: &'a str,
+    outcome_details: &'a str,
+}
+
+fn build_audit_entry(input: AuditBuildInput<'_>) -> EvidenceAuditEntry {
+    let outcome_details = redact_sensitive(input.outcome_details);
+    let state_from = input.state_from.map(ToOwned::to_owned);
+    let current_audit_hash = audit_hash(&AuditHashInput {
+        previous_hash: input.previous_hash,
+        daemon_sequence: input.daemon_sequence,
+        message_id: input.message_id,
+        actor: input.actor,
+        action: input.action,
+        capability_or_subject: input.capability_or_subject,
+        correlation_id: input.correlation_id,
+        trace_id: input.trace_id,
+        state_from: state_from.as_deref(),
+        state_to: input.state_to,
+        outcome_details: &outcome_details,
+    });
+    EvidenceAuditEntry {
+        daemon_sequence: input.daemon_sequence,
+        message_id: input.message_id.to_owned(),
+        previous_audit_hash: input.previous_hash.to_owned(),
+        current_audit_hash,
+        actor: input.actor.to_owned(),
+        action: input.action.to_owned(),
+        capability_or_subject: input.capability_or_subject.to_owned(),
+        correlation_id: input.correlation_id.to_owned(),
+        trace_id: input.trace_id.to_owned(),
+        state_from,
+        state_to: input.state_to.to_owned(),
+        outcome_details,
+    }
+}
+
+fn validate_audit_hash(
+    expected_previous_hash: &str,
+    audit: &EvidenceAuditEntry,
+) -> Result<(), String> {
+    if audit.previous_audit_hash() != expected_previous_hash {
+        return Err(format!(
+            "audit previous hash '{}' does not match expected '{}'",
+            audit.previous_audit_hash(),
+            expected_previous_hash
+        ));
+    }
+    let expected_current_hash = audit_hash(&AuditHashInput {
+        previous_hash: audit.previous_audit_hash(),
+        daemon_sequence: audit.daemon_sequence(),
+        message_id: audit.message_id(),
+        actor: audit.actor(),
+        action: audit.action(),
+        capability_or_subject: audit.capability_or_subject(),
+        correlation_id: audit.correlation_id(),
+        trace_id: audit.trace_id(),
+        state_from: audit.state_from(),
+        state_to: audit.state_to(),
+        outcome_details: audit.outcome_details(),
+    });
+    if audit.current_audit_hash() != expected_current_hash {
+        return Err(format!(
+            "audit current hash '{}' does not match computed '{}'",
+            audit.current_audit_hash(),
+            expected_current_hash
+        ));
+    }
+    Ok(())
+}
+
+struct AuditHashInput<'a> {
+    previous_hash: &'a str,
+    daemon_sequence: u64,
+    message_id: &'a str,
+    actor: &'a str,
+    action: &'a str,
+    capability_or_subject: &'a str,
+    correlation_id: &'a str,
+    trace_id: &'a str,
+    state_from: Option<&'a str>,
+    state_to: &'a str,
+    outcome_details: &'a str,
+}
+
+fn audit_hash(input: &AuditHashInput<'_>) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for part in [
+        input.previous_hash,
+        &input.daemon_sequence.to_string(),
+        input.message_id,
+        input.actor,
+        input.action,
+        input.capability_or_subject,
+        input.correlation_id,
+        input.trace_id,
+        input.state_from.unwrap_or(""),
+        input.state_to,
+        input.outcome_details,
+    ] {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if hash == 0 {
+        "1".to_owned()
+    } else {
+        format!("{hash:016x}")
+    }
+}
+
+fn redact_sensitive(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("password") || lower.contains("token") || lower.contains("secret") {
+        REDACTION_MARKER.to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn write_evidence_line(path: &Path, line: &str) -> Result<(), EvidenceStoreError> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| {
+            EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Io,
+                format!("open evidence store for append failed: {error}"),
+            )
+        })?;
+    file.write_all(line.as_bytes()).map_err(|error| {
+        EvidenceStoreError::new(
+            EvidenceStoreErrorCode::Io,
+            format!("append evidence line failed: {error}"),
+        )
+    })?;
+    file.write_all(b"\n").map_err(|error| {
+        EvidenceStoreError::new(
+            EvidenceStoreErrorCode::Io,
+            format!("append evidence newline failed: {error}"),
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        EvidenceStoreError::new(
+            EvidenceStoreErrorCode::Io,
+            format!("fsync evidence store failed: {error}"),
+        )
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvidenceLogRecord {
+    Schema,
+    FutureSchema,
+    Accepted {
+        envelope: EvidenceEnvelopeRecord,
+        audit: EvidenceAuditEntry,
+    },
+    Transition {
+        audit: EvidenceAuditEntry,
+    },
+}
+
+impl EvidenceLogRecord {
+    fn encode(&self) -> String {
+        match self {
+            Self::Schema => format!("v{EVIDENCE_STORE_SCHEMA_VERSION}|schema|evidence-store"),
+            Self::FutureSchema => unreachable!("future schema markers are never encoded"),
+            Self::Accepted { envelope, audit } => [
+                format!("v{EVIDENCE_STORE_SCHEMA_VERSION}"),
+                "accepted".to_owned(),
+                envelope.daemon_sequence().to_string(),
+                encode_field(envelope.message_id()),
+                encode_field(envelope.source_agent()),
+                encode_field(envelope.target_or_subject()),
+                encode_field(envelope.subject()),
+                envelope.timestamp_unix_ms().to_string(),
+                encode_field(envelope.correlation_id()),
+                encode_field(envelope.trace_id()),
+                encode_field(envelope.parent_message_id().unwrap_or("")),
+                encode_field(envelope.delivery_state()),
+                envelope.payload_len().to_string(),
+                encode_field(envelope.payload_content_type()),
+                encode_field(audit.previous_audit_hash()),
+                encode_field(audit.current_audit_hash()),
+                encode_field(audit.actor()),
+                encode_field(audit.action()),
+                encode_field(audit.capability_or_subject()),
+                encode_field(audit.state_from().unwrap_or("")),
+                encode_field(audit.state_to()),
+                encode_field(audit.outcome_details()),
+            ]
+            .join("|"),
+            Self::Transition { audit } => [
+                format!("v{EVIDENCE_STORE_SCHEMA_VERSION}"),
+                "transition".to_owned(),
+                audit.daemon_sequence().to_string(),
+                encode_field(audit.message_id()),
+                encode_field(audit.actor()),
+                encode_field(audit.action()),
+                encode_field(audit.capability_or_subject()),
+                encode_field(audit.correlation_id()),
+                encode_field(audit.trace_id()),
+                encode_field(audit.state_from().unwrap_or("")),
+                encode_field(audit.state_to()),
+                encode_field(audit.outcome_details()),
+                encode_field(audit.previous_audit_hash()),
+                encode_field(audit.current_audit_hash()),
+            ]
+            .join("|"),
+        }
+    }
+
+    fn parse(line: &str) -> Option<Self> {
+        let parts: Vec<&str> = line.split('|').collect();
+        let prefix = parts.first()?;
+        if !prefix.starts_with('v') {
+            return None;
+        }
+        let version: u32 = prefix.trim_start_matches('v').parse().ok()?;
+        if version > EVIDENCE_STORE_SCHEMA_VERSION {
+            return Some(Self::FutureSchema);
+        }
+        if version != EVIDENCE_STORE_SCHEMA_VERSION {
+            return None;
+        }
+        match *parts.get(1)? {
+            "schema" if parts.get(2) == Some(&"evidence-store") => Some(Self::Schema),
+            "accepted" => Self::parse_accepted(&parts),
+            "transition" => Self::parse_transition(&parts),
+            _ => None,
+        }
+    }
+
+    fn parse_accepted(parts: &[&str]) -> Option<Self> {
+        if parts.len() != 22 {
+            return None;
+        }
+        let envelope = EvidenceEnvelopeRecord {
+            daemon_sequence: parts.get(2)?.parse().ok()?,
+            message_id: decode_field(parts.get(3)?)?,
+            source_agent: decode_field(parts.get(4)?)?,
+            target_or_subject: decode_field(parts.get(5)?)?,
+            subject: decode_field(parts.get(6)?)?,
+            timestamp_unix_ms: parts.get(7)?.parse().ok()?,
+            correlation_id: decode_field(parts.get(8)?)?,
+            trace_id: decode_field(parts.get(9)?)?,
+            parent_message_id: decode_optional_field(parts.get(10)?)?,
+            delivery_state: decode_field(parts.get(11)?)?,
+            payload_len: parts.get(12)?.parse().ok()?,
+            payload_content_type: decode_field(parts.get(13)?)?,
+        };
+        let audit = EvidenceAuditEntry {
+            daemon_sequence: envelope.daemon_sequence,
+            message_id: envelope.message_id.clone(),
+            previous_audit_hash: decode_field(parts.get(14)?)?,
+            current_audit_hash: decode_field(parts.get(15)?)?,
+            actor: decode_field(parts.get(16)?)?,
+            action: decode_field(parts.get(17)?)?,
+            capability_or_subject: decode_field(parts.get(18)?)?,
+            correlation_id: envelope.correlation_id.clone(),
+            trace_id: envelope.trace_id.clone(),
+            state_from: decode_optional_field(parts.get(19)?)?,
+            state_to: decode_field(parts.get(20)?)?,
+            outcome_details: decode_field(parts.get(21)?)?,
+        };
+        Some(Self::Accepted { envelope, audit })
+    }
+
+    fn parse_transition(parts: &[&str]) -> Option<Self> {
+        if parts.len() != 14 {
+            return None;
+        }
+        Some(Self::Transition {
+            audit: EvidenceAuditEntry {
+                daemon_sequence: parts.get(2)?.parse().ok()?,
+                message_id: decode_field(parts.get(3)?)?,
+                actor: decode_field(parts.get(4)?)?,
+                action: decode_field(parts.get(5)?)?,
+                capability_or_subject: decode_field(parts.get(6)?)?,
+                correlation_id: decode_field(parts.get(7)?)?,
+                trace_id: decode_field(parts.get(8)?)?,
+                state_from: decode_optional_field(parts.get(9)?)?,
+                state_to: decode_field(parts.get(10)?)?,
+                outcome_details: decode_field(parts.get(11)?)?,
+                previous_audit_hash: decode_field(parts.get(12)?)?,
+                current_audit_hash: decode_field(parts.get(13)?)?,
+            },
+        })
+    }
+}
+
+fn encode_field(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(nibble_to_hex(byte >> 4));
+        encoded.push(nibble_to_hex(byte & 0x0f));
+    }
+    encoded
+}
+
+fn nibble_to_hex(value: u8) -> char {
+    match value {
+        0..=9 => char::from(b'0' + value),
+        10..=15 => char::from(b'a' + (value - 10)),
+        _ => unreachable!("nibble is masked to four bits"),
+    }
+}
+
+fn decode_optional_field(value: &str) -> Option<Option<String>> {
+    let decoded = decode_field(value)?;
+    Some((!decoded.is_empty()).then_some(decoded))
+}
+
+fn decode_field(value: &str) -> Option<String> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = hex_to_nibble(pair[0])?;
+        let low = hex_to_nibble(pair[1])?;
+        bytes.push((high << 4) | low);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn hex_to_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
 
 pub trait DurableSubscriptionStore {
     fn create_subscription(
@@ -386,9 +1524,7 @@ impl DurableSubscriptionStore for FileDurableStore {
         if state.scope != scope {
             return Err(SubscriptionStoreError::new(
                 SubscriptionStoreErrorCode::Conflict,
-                format!(
-                    "subscription identity '{identity}' has a different scope than provided"
-                ),
+                format!("subscription identity '{identity}' has a different scope than provided"),
             ));
         }
         if requested_from_sequence > state.last_acked_sequence + 1 {
@@ -517,18 +1653,16 @@ impl LogRecord {
             } => format!(
                 "v{DURABLE_SUBSCRIPTION_LOG_VERSION}|create|{identity}|{consumer_agent}|{pattern}"
             ),
-            Self::Ack { identity, sequence } => format!(
-                "v{DURABLE_SUBSCRIPTION_LOG_VERSION}|ack|{identity}|{sequence}"
-            ),
+            Self::Ack { identity, sequence } => {
+                format!("v{DURABLE_SUBSCRIPTION_LOG_VERSION}|ack|{identity}|{sequence}")
+            }
             Self::Retry { identity } => {
                 format!("v{DURABLE_SUBSCRIPTION_LOG_VERSION}|retry|{identity}")
             }
             Self::Retention {
                 identity,
                 min_retained,
-            } => format!(
-                "v{DURABLE_SUBSCRIPTION_LOG_VERSION}|retention|{identity}|{min_retained}"
-            ),
+            } => format!("v{DURABLE_SUBSCRIPTION_LOG_VERSION}|retention|{identity}|{min_retained}"),
         }
     }
 

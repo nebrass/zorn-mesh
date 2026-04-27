@@ -1472,6 +1472,7 @@ fn cli_error_from_daemon(error: zornmesh_daemon::DaemonError) -> CliError {
         zornmesh_daemon::DaemonErrorCode::LocalTrustUnsafe
         | zornmesh_daemon::DaemonErrorCode::ElevatedPrivilege => ExitKind::PermissionDenied,
         zornmesh_daemon::DaemonErrorCode::DaemonUnreachable => ExitKind::DaemonUnreachable,
+        zornmesh_daemon::DaemonErrorCode::PersistenceUnavailable => ExitKind::TemporaryUnavailable,
         zornmesh_daemon::DaemonErrorCode::InvalidConfig => ExitKind::UserError,
         zornmesh_daemon::DaemonErrorCode::Io => ExitKind::Io,
     };

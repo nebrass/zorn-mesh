@@ -57,7 +57,7 @@
 ### Forensic Persistence, Trace, and Recovery
 > Goal: Developers can reconstruct, inspect, tail, replay, and recover multi-agent conversations from durable local evidence when something breaks.
 
-- [ ] Story 4.1: Persist Envelopes, Audit Entries, and Trace Indexes
+- [x] Story 4.1: Persist Envelopes, Audit Entries, and Trace Indexes
   > As a developer
   > I want every accepted envelope to become durable local evidence
   > So that I can later inspect, trace, replay, and audit what agents actually did.

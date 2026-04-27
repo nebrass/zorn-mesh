@@ -615,6 +615,9 @@ impl From<DaemonError> for SdkError {
             zornmesh_daemon::DaemonErrorCode::ElevatedPrivilege => SdkErrorCode::ElevatedPrivilege,
             zornmesh_daemon::DaemonErrorCode::DaemonUnreachable
             | zornmesh_daemon::DaemonErrorCode::ExistingOwner => SdkErrorCode::DaemonUnreachable,
+            zornmesh_daemon::DaemonErrorCode::PersistenceUnavailable => {
+                SdkErrorCode::PersistenceUnavailable
+            }
             zornmesh_daemon::DaemonErrorCode::InvalidConfig => SdkErrorCode::InvalidConfig,
             zornmesh_daemon::DaemonErrorCode::Io => SdkErrorCode::Io,
         };

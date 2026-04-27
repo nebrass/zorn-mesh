@@ -159,3 +159,17 @@ stdio_bridge|error|E_BRIDGE_SOCKET_PERMISSION_DENIED
 stdio_bridge|degradation|streaming
 stdio_bridge|degradation|delivery_ack
 stdio_bridge|degradation|trace_context
+evidence|state|accepted
+evidence|state|authorized
+evidence|audit_action|accepted_envelope
+evidence|audit_action|authorization_decision
+evidence|index|idx_evidence_correlation_id
+evidence|index|idx_evidence_trace_id
+evidence|index|idx_evidence_agent_id
+evidence|index|idx_evidence_subject
+evidence|index|idx_evidence_delivery_state
+evidence|index|idx_evidence_timestamp
+evidence|error|E_EVIDENCE_VALIDATION
+evidence|error|E_EVIDENCE_CORRUPT
+evidence|error|E_EVIDENCE_FUTURE_SCHEMA
+evidence|error|E_EVIDENCE_MIGRATION_LOCKED
