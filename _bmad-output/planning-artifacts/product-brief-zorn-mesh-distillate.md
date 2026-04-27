@@ -4,6 +4,7 @@ type: llm-distillate
 source: "product-brief-zorn-mesh.md"
 project_name: "zorn-mesh"
 created: "2026-04-26"
+updated: "2026-04-27"
 purpose: "Token-efficient context for downstream PRD creation, story authoring, and agent prompts. Every detail captured here was either compressed or omitted from the 1-2 page executive brief because brevity demanded it. This file does NOT duplicate the technical spec at `_bmad-output/project-context.md` — it bridges the brief to the spec by capturing audience, success metrics, rejected directions, scope signals, and open questions the spec itself does not address."
 related_artifacts:
   - "_bmad-output/project-context.md  # canonical technical specification"
@@ -12,6 +13,8 @@ related_artifacts:
 ---
 
 # Product Brief Distillate: Zorn Mesh
+
+> **Scope update (2026-04-27):** The edited PRD and UX specification supersede this distillate wherever it defers a "web dashboard" or treats UI as non-core. v0.1 includes a constrained local web companion UI for observing the mesh, inspecting trace chronology, sending safely, and confirming outcomes. Hosted/cloud dashboards, LAN/public consoles, accounts/teams, workflow editors, full chat workspaces, and remote collaboration remain deferred/out of scope.
 
 ## Identity & one-line positioning
 
@@ -95,7 +98,7 @@ related_artifacts:
 - Logging: `tracing` JSON output with `opentelemetry-appender-tracing` so every log record carries active `trace_id` and `span_id`.
 - Operator wiring: `OTEL_EXPORTER_OTLP_ENDPOINT` env var to Tempo/Jaeger/Honeycomb/SigNoz.
 - **Cardinality discipline:** `id`, `correlation_id`, `trace_id`, `dedup_id` are span attributes, NEVER metric labels.
-- **Killer feature for adoption:** `zornmesh trace <correlation_id>` — terminal command that reconstructs the full envelope timeline for a single conversation across agents, Jaeger-style without leaving the shell. UI is sugar; traceability is oxygen.
+- **Killer feature for adoption:** `zornmesh trace <correlation_id>` and the local Focus Trace Reader reconstruct the full envelope timeline for a single conversation across agents. The v0.1 UI is valuable only because it makes traceability visible; traceability remains oxygen.
 
 ## Roadmap & deferral list
 
@@ -103,7 +106,7 @@ related_artifacts:
 |---|---|---|---|
 | v0.1 MVP | ~10 weeks from start | Linux + macOS, Rust + TS SDKs, full feature set | "Cargo install zornmesh" + "npm i @zornmesh/sdk" launch |
 | v0.2 | ~6 weeks after v0.1 | Ed25519 keys, Windows named pipes, Python SDK, MCP-stdio bridge polish | Replay protection via per-envelope `id` + recent-ID set (already required for idempotency) |
-| v0.5 | TBD | Capability tokens (biscuit-auth), web dashboard at `localhost:9876`, A2A gateway, optional fjall hot-log split if measured | Web dashboard is single Axum-served page reading from SQLite — no separate frontend toolchain |
+| v0.5 | TBD | Capability tokens (biscuit-auth), advanced local UI expansion, A2A gateway, optional fjall hot-log split if measured | Future UI expands the v0.1 local witness/control surface; hosted/cloud dashboard and public console remain separate scope |
 | v1.0 | TBD | Stable wire protocol with deprecation policy, AGNTCY/SLIM bridge if demand exists, federation between Zorn Mesh instances on different machines via TLS-tunneled gRPC | Federation is the upgrade path for the platform-engineer secondary persona |
 
 ## v0.1 explicit NON-goals (every one of these is a deliberate "not yet")
@@ -114,7 +117,7 @@ related_artifacts:
 - Multi-host federation
 - A2A bridge
 - AGNTCY bridge
-- Web dashboard
+- Hosted/cloud dashboard or LAN/public web console
 - Dynamic policy
 - Any form of replication
 - Windows support
@@ -132,7 +135,7 @@ related_artifacts:
 - **gRPC as the public/agent-facing transport** — JSON-RPC is canonical; gRPC is fallback only, multiplexed on the same socket.
 - **Push-based delivery without bounded buffers** — OOM in production; pull + leases is the only option.
 - **redb + fjall split from day one** — doubles backup story and debug surface; SQLite wins on operability over throughput at this scale.
-- **Web UI before `zornmesh trace` works** — UI is sugar, traceability is oxygen.
+- **Generic UI before `zornmesh trace` works** — UI must stay anchored to traceability; chronology is oxygen.
 - **`ts-proto` / `google-protobuf`** — twice the bundle size of `@bufbuild/protobuf`.
 - **`grpcio` for Python** — Pydantic v2 + protobuf runtime gives better DX.
 - **End-to-end encryption between agents** — kernel protects loopback IPC.
@@ -169,7 +172,7 @@ related_artifacts:
 - **Unit:** `cargo nextest`, sub-second feedback. Codec, capability negotiation, subject/topic matcher (NATS-style trie), backoff calculator, dedup window.
 - **Property** (mandatory `proptest = "1"` with shrinking on these specifically): codec round-trip JSON↔Protobuf↔Rust types preserves equality; lease state machine (no envelope is both leased AND re-queued; total in-flight count bounded); dedup window (no false positives outside, no false negatives inside).
 - **Integration:** spawn daemon in-process, real `tokio::net::UnixStream` clients. Catches framing, ACL, and capability-negotiation bugs unit tests miss.
-- **Chaos:** `turmoil` for deterministic clock skew, agent crashes mid-stream, slow consumers, sockets blocking on accept (where lease-reaper bugs surface). `loom` for routing-table concurrency invariants.
+- **Chaos:** `turmoil` for deterministic clock skew, agent crashes mid-stream, consumers that exceed queue or acknowledgement bounds, sockets blocking on accept (where lease-reaper bugs surface). `loom` for routing-table concurrency invariants.
 - **Contract:** recorded JSON fixtures one per message type, golden-tested. `buf breaking` in CI for wire stability.
 - **Python cancellation suite ships with Python SDK in v0.2** and runs every PR — highest 2am-page risk.
 
@@ -179,7 +182,7 @@ related_artifacts:
 2. Two persistence stores from day one (doubles operational surface).
 3. Defining a Zorn-native wire incompatible with MCP (kills "MCP superset" claim).
 4. Implementing exactly-once semantics (impossible, lying erodes trust).
-5. Adding web UI before `zornmesh trace` works (UI is sugar, traceability is oxygen).
+5. Adding generic UI before `zornmesh trace` works (UI must stay anchored to traceability; chronology is oxygen).
 6. Using `sled` (unmaintained).
 7. Abstract Unix sockets (no ACL).
 8. Push-based delivery without bounded buffers (OOM in production).
@@ -189,7 +192,7 @@ related_artifacts:
 - **Bootstrap-deadlock concern raised by Dr. Quinn's earlier review** (the validation-of-failed-validation-ack problem) is structurally unaddressed by the single-Envelope design. May surface as a real bug under certain partial-handshake failure modes. Worth a property-test exploration before v0.1 lock.
 - **Demand-signal threshold for AGNTCY/SLIM bridge** — Claude.pdf says "v1.0 if demand exists." What's the demand metric and threshold? (suggestion: 3 production deployments asking for it, or one paying customer.)
 - **Federation transport choice for v1.0** — TLS-tunneled gRPC is named, but the wire protocol stability contract under federation is unspecified. Likely needs a separate design doc when the time comes.
-- **Web dashboard scope at v0.5** — Claude.pdf says "single Axum-served page, no separate frontend toolchain." What's the minimum feature set: live agent topology, message timeline, DLQ inspection, replay tool? Needs a dashboard PRD as a separate exercise.
+- **Advanced local UI expansion at v0.5** — what is the minimum feature set beyond the v0.1 witness/control surface: richer topology analysis, expanded DLQ inspection, replay workflows, saved views, cross-session search? Needs a focused UI expansion PRD if it grows beyond the local companion model.
 - **Capability-token distribution / bootstrapping at v0.5** — biscuit-auth root key generation, rotation policy, operator UX for issuing first token to a new agent.
 - **Windows named-pipe path + ACL story for v0.2** — `\\.\pipe\zornmesh-<sid>` is the path, but per-pipe SDDL/DACL strategy and the SID equivalent of `peer_cred()` are not yet specified.
 - **TypeScript SDK runtime reversal back-compat** — earlier in the spec lifecycle a Bun-only TS SDK was promised; reversed to Node + pnpm. If any pre-v0.1 alpha consumers built against Bun, communicate the reversal explicitly.

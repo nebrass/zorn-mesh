@@ -3,7 +3,7 @@ title: "Product Brief: Zorn Mesh"
 project_name: "zorn-mesh"
 status: "complete"
 created: "2026-04-26"
-updated: "2026-04-26"
+updated: "2026-04-27"
 author: "Nebrass"
 mode: "yolo"
 source_inputs: ["_bmad-output/project-context.md", "Claude.pdf", "GeminiReport.pdf", "Perplexity.pdf"]
@@ -12,6 +12,8 @@ source_inputs: ["_bmad-output/project-context.md", "Claude.pdf", "GeminiReport.p
 # Product Brief: Zorn Mesh
 
 **A local-first agent IPC fabric — the SQLite of agent buses.**
+
+> **Scope update (2026-04-27):** The edited PRD and UX specification supersede this brief wherever it defers a "web dashboard." v0.1 includes a constrained local web companion UI for observing the mesh, inspecting trace chronology, sending safely, and confirming outcomes. Hosted/cloud dashboards, LAN/public consoles, accounts/teams, workflow editors, full chat workspaces, and remote collaboration remain deferred/out of scope.
 
 ## Executive Summary
 
@@ -74,7 +76,7 @@ The North Star metric is **time-to-first-coordinated-message** — the wall-cloc
 
 **v0.1 (in scope):** agent registration with capabilities, presence and heartbeats, request/reply with correlation and cancellation, fire-and-forget events, topic pub/sub with `*` and `>` wildcards, streaming chunks, append-only message log with offset-based replay, OS-level trust (UID match + socket ACL), structured OpenTelemetry tracing, the `zornmesh` CLI (`tail`, `trace`, `agents`, `inspect`, `doctor`, `replay`, `stdio`). Linux and macOS. Rust SDK and TypeScript SDK at parity.
 
-**v0.1 (explicitly deferred):** per-agent cryptographic identity, signed envelopes, capability tokens, web dashboard, A2A bridge, AGNTCY/SLIM bridge, Windows named-pipe support (v0.2), Python SDK (v0.2), multi-host federation, any form of replication.
+**v0.1 (explicitly deferred):** per-agent cryptographic identity, signed envelopes, capability tokens, hosted/cloud dashboard, LAN/public web console, A2A bridge, AGNTCY/SLIM bridge, Windows named-pipe support (v0.2), Python SDK (v0.2), multi-host federation, any form of replication.
 
 **The single biggest scope risk is creep into orchestration.** Zorn Mesh routes messages; it does not plan, retry tasks at the application layer, or own agent state. The bus stays dumb on purpose, the way Postfix and NATS stay dumb.
 
@@ -92,5 +94,5 @@ A Rust core on `tokio` 1.47 LTS using a `tower`-service architecture. JSON-RPC 2
 |---|---|---|
 | **v0.1 MVP** | ~10 weeks from start | Linux + macOS, Rust + TS SDKs, full feature set above |
 | **v0.2** | ~6 weeks after v0.1 | Ed25519 signed envelopes, Windows named-pipe support, Python SDK |
-| **v0.5** | TBD | Capability tokens (biscuit-auth), web dashboard, A2A gateway |
+| **v0.5** | TBD | Capability tokens (biscuit-auth), advanced local UI expansion, A2A gateway |
 | **v1.0** | TBD | Stable wire protocol with deprecation policy, multi-host federation |
