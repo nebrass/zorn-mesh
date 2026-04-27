@@ -18,9 +18,10 @@ use std::{
 };
 
 use zornmesh_broker::{Broker, BrokerError, BrokerErrorCode};
+use zornmesh_core::{CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome};
 use zornmesh_proto::{
-    ClientFrame, FrameStatus, ProtoError, SendResultFrame, ServerFrame, read_client_frame,
-    write_server_frame,
+    ClientFrame, DeliveryOutcomeFrame, FrameStatus, ProtoError, SendResultFrame, ServerFrame,
+    read_client_frame, write_server_frame,
 };
 use zornmesh_rpc::local::{
     self, ENV_SHUTDOWN_BUDGET_MS, LocalError, LocalErrorCode, connect_trusted_socket,
@@ -386,6 +387,14 @@ fn handle_client(mut stream: UnixStream, broker: Broker) {
     match read_client_frame(&mut stream) {
         Ok(ClientFrame::Subscribe { pattern }) => handle_subscribe(stream, broker, pattern),
         Ok(ClientFrame::Publish { envelope }) => handle_publish(&mut stream, broker, envelope),
+        Ok(ClientFrame::Ack { .. } | ClientFrame::Nack { .. }) => {
+            let _ = write_result(
+                &mut stream,
+                FrameStatus::ValidationFailed,
+                "E_PROTOCOL",
+                "ACK/NACK frames require an accepted subscription stream",
+            );
+        }
         Err(error) if is_connect_probe_close(&error) => {}
         Err(error) => {
             let _ = write_proto_error(&mut stream, &error);
@@ -419,6 +428,7 @@ fn handle_subscribe(mut stream: UnixStream, broker: Broker, pattern: String) {
         match delivery_rx.recv_timeout(Duration::from_millis(10)) {
             Ok(delivery) => {
                 let frame = ServerFrame::Delivery {
+                    delivery_id: delivery.delivery_id().to_owned(),
                     envelope: delivery.envelope().clone(),
                     attempt: delivery.attempt(),
                 };
@@ -430,7 +440,7 @@ fn handle_subscribe(mut stream: UnixStream, broker: Broker, pattern: String) {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if client_has_closed(&mut stream) {
+        if !handle_subscription_control(&mut stream, &broker) {
             break;
         }
     }
@@ -438,17 +448,59 @@ fn handle_subscribe(mut stream: UnixStream, broker: Broker, pattern: String) {
 
 fn handle_publish(stream: &mut UnixStream, broker: Broker, envelope: zornmesh_core::Envelope) {
     match broker.publish(envelope) {
-        Ok(delivery_attempts) => {
-            let _ = write_result(
+        Ok(receipt) => {
+            let _ = write_send_result(
                 stream,
                 FrameStatus::Accepted,
                 "ACCEPTED",
-                format!("accepted for routing; delivery_attempts={delivery_attempts}"),
+                format!(
+                    "accepted for routing; delivery_attempts={}",
+                    receipt.delivery_attempts()
+                ),
+                receipt.transport_outcome().clone(),
+                Some(receipt.durable_outcome().clone()),
             );
         }
         Err(error) => {
             let _ = write_broker_error(stream, &error);
         }
+    }
+}
+
+fn handle_subscription_control(stream: &mut UnixStream, broker: &Broker) -> bool {
+    match read_client_frame(stream) {
+        Ok(ClientFrame::Ack { delivery_id }) => {
+            write_delivery_outcome(stream, broker.record_ack(delivery_id)).is_ok()
+        }
+        Ok(ClientFrame::Nack {
+            delivery_id,
+            reason,
+        }) => write_delivery_outcome(stream, broker.record_nack(delivery_id, reason)).is_ok(),
+        Ok(ClientFrame::Subscribe { .. } | ClientFrame::Publish { .. }) => {
+            write_result(
+                stream,
+                FrameStatus::ValidationFailed,
+                "E_PROTOCOL",
+                "subscription stream accepts only ACK or NACK control frames after registration",
+            )
+            .is_ok()
+        }
+        Err(error) if is_no_subscription_control(&error) => true,
+        Err(error) if is_connect_probe_close(&error) => false,
+        Err(error) => write_proto_error(stream, &error).is_ok(),
+    }
+}
+
+fn write_delivery_outcome(
+    stream: &mut UnixStream,
+    outcome: Result<DeliveryOutcome, BrokerError>,
+) -> Result<(), ProtoError> {
+    match outcome {
+        Ok(outcome) => write_server_frame(
+            stream,
+            &ServerFrame::DeliveryOutcome(DeliveryOutcomeFrame::from_delivery_outcome(outcome)),
+        ),
+        Err(error) => write_broker_error(stream, &error),
     }
 }
 
@@ -465,6 +517,7 @@ fn write_broker_error(stream: &mut UnixStream, error: &BrokerError) -> Result<()
     let status = match error.code() {
         BrokerErrorCode::SubjectValidation => FrameStatus::ValidationFailed,
         BrokerErrorCode::SubscriptionCap => FrameStatus::Rejected,
+        BrokerErrorCode::DeliveryValidation => FrameStatus::ValidationFailed,
     };
     write_result(stream, status, error.code().as_str(), error.message())
 }
@@ -475,9 +528,49 @@ fn write_result(
     code: impl Into<String>,
     message: impl Into<String>,
 ) -> Result<(), ProtoError> {
+    let code = code.into();
+    let message = message.into();
+    let outcome = match status {
+        FrameStatus::Accepted => CoordinationOutcome::accepted(message.clone(), 0),
+        FrameStatus::Rejected => CoordinationOutcome::new(
+            CoordinationOutcomeKind::Rejected,
+            CoordinationStage::Transport,
+            code.clone(),
+            message.clone(),
+            false,
+            true,
+            0,
+        ),
+        FrameStatus::ValidationFailed => CoordinationOutcome::new(
+            CoordinationOutcomeKind::Failed,
+            CoordinationStage::Protocol,
+            code.clone(),
+            message.clone(),
+            false,
+            true,
+            0,
+        ),
+    };
+    write_send_result(stream, status, code, message, outcome, None)
+}
+
+fn write_send_result(
+    stream: &mut UnixStream,
+    status: FrameStatus,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    outcome: CoordinationOutcome,
+    durable_outcome: Option<CoordinationOutcome>,
+) -> Result<(), ProtoError> {
     write_server_frame(
         stream,
-        &ServerFrame::SendResult(SendResultFrame::new(status, code, message)),
+        &ServerFrame::SendResult(SendResultFrame::new(
+            status,
+            code,
+            message,
+            outcome,
+            durable_outcome,
+        )),
     )
 }
 
@@ -485,14 +578,11 @@ fn is_connect_probe_close(error: &ProtoError) -> bool {
     matches!(error, ProtoError::Truncated("frame_length"))
 }
 
-fn client_has_closed(stream: &mut UnixStream) -> bool {
-    let mut probe = [0_u8; 1];
-    match stream.read(&mut probe) {
-        Ok(0) => true,
-        Ok(_) => false,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
-        Err(_) => true,
-    }
+fn is_no_subscription_control(error: &ProtoError) -> bool {
+    matches!(
+        error.io_kind(),
+        Some(io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+    )
 }
 
 fn prepare_existing_socket(path: &Path, uid: u32) -> Result<(), DaemonError> {

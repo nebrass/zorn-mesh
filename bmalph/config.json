@@ -1,0 +1,9 @@
+{
+  "name": "zorn-mesh",
+  "description": "Secure local messaging and coordination for autonomous coding agents",
+  "createdAt": "2026-04-26T20:05:13.502Z",
+  "platform": "claude-code",
+  "upstreamVersions": {
+    "bmadCommit": "d1163f85"
+  }
+}

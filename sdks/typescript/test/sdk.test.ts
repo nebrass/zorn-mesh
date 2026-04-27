@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   CONNECT_STATE_NAMES,
+  COORDINATION_CONTRACT_VERSION,
+  COORDINATION_OUTCOME_KINDS,
   DEFAULT_CONNECT_TIMEOUT_MS,
   DEFAULT_RETRY_DELAY_MS,
+  DELIVERY_STATE_TAXONOMY_VERSION,
+  ENVELOPE_SCHEMA_VERSION,
+  ERROR_CATEGORIES,
+  ERROR_CONTRACT_VERSION,
+  NACK_REASON_CATEGORIES,
   SDK_BOUNDARY,
   SDK_ERROR_CODES,
   SdkError,
@@ -28,6 +35,24 @@ describe("TypeScript SDK boundary", () => {
     expect(JSON.stringify(packageJson).toLowerCase()).not.toMatch(
       /\b(npm|pnpm|yarn|vitest|jest|mocha)\b/,
     );
+  });
+
+  test("pins the shared coordination fixture taxonomy", async () => {
+    const fixture = await Bun.file(
+      new URL("../../../fixtures/coordination/contract.txt", import.meta.url),
+    ).text();
+
+    expect(COORDINATION_CONTRACT_VERSION).toBe("zornmesh.coordination.v1");
+    expect(ENVELOPE_SCHEMA_VERSION).toBe("zornmesh.envelope.v1");
+    expect(ERROR_CONTRACT_VERSION).toBe("zornmesh.error.v1");
+    expect(DELIVERY_STATE_TAXONOMY_VERSION).toBe("zornmesh.delivery-state.v1");
+    for (const kind of COORDINATION_OUTCOME_KINDS) {
+      expect(fixture).toContain(`outcome|${kind}|`);
+    }
+    for (const reason of NACK_REASON_CATEGORIES) {
+      expect(fixture).toContain(`nack_reason|${reason}`);
+    }
+    expect(ERROR_CATEGORIES).toContain("persistence_unavailable");
   });
 });
 
@@ -154,7 +179,22 @@ describe("TypeScript SDK first-message pub/sub parity", () => {
 
     expect(result.status).toBe("accepted");
     expect(result.code).toBe("ACCEPTED");
+    expect(result.outcome).toMatchObject({
+      kind: "accepted",
+      stage: "transport",
+      retryable: false,
+      terminal: false,
+      delivery_attempts: 1,
+    });
+    expect(result.durable_outcome).toMatchObject({
+      kind: "failed",
+      stage: "durable",
+      code: "E_PERSISTENCE_UNAVAILABLE",
+      retryable: false,
+      terminal: true,
+    });
     expect(delivery?.attempt).toBe(1);
+    expect(delivery?.delivery_id).toBe("corr-typescript-1:1");
     expect(delivery?.envelope).toMatchObject({
       source_agent: "agent.local/publisher",
       subject: "mesh.trace.created",
@@ -166,6 +206,7 @@ describe("TypeScript SDK first-message pub/sub parity", () => {
       },
     });
     expect(Array.from(delivery?.envelope.payload ?? [])).toEqual(Array.from(payload));
+    expect(Object.keys(delivery ?? {})).toEqual(["delivery_id", "envelope", "attempt"]);
     expect(Object.keys(delivery?.envelope ?? {})).toEqual([
       "source_agent",
       "subject",
@@ -175,6 +216,30 @@ describe("TypeScript SDK first-message pub/sub parity", () => {
       "payload",
     ]);
     expect("sourceAgent" in (delivery?.envelope ?? {})).toBe(false);
+
+    const ack = await subscription.ack(delivery!);
+    expect(ack).toMatchObject({
+      delivery_id: "corr-typescript-1:1",
+      kind: "acknowledged",
+      stage: "delivery",
+      reason: null,
+    });
+
+    const nackPayload = new TextEncoder().encode("{}");
+    await publisher.publish({
+      subject: "mesh.trace.rejected",
+      payload: nackPayload,
+      correlation_id: "corr-typescript-2",
+      timestamp_unix_ms: 1_717_000_000_001,
+    });
+    const rejectedDelivery = await subscription.recvDelivery(500);
+    const nack = await subscription.nack(rejectedDelivery!, "processing");
+    expect(nack).toMatchObject({
+      delivery_id: "corr-typescript-2:1",
+      kind: "rejected",
+      stage: "delivery",
+      reason: "processing",
+    });
 
     subscription.close();
   });

@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use zornmesh_core::Envelope;
+use zornmesh_core::{CoordinationOutcomeKind, CoordinationStage, Envelope, NackReasonCategory};
 use zornmesh_proto::{FrameStatus, MAX_FRAME_BYTES, ServerFrame, read_server_frame};
 use zornmesh_sdk::{ConnectOptions, Mesh, SdkErrorCode, SendStatus};
 
@@ -71,11 +71,18 @@ fn two_rust_clients_publish_and_receive_first_local_envelope() {
     let result = publisher.publish(&envelope);
 
     assert_eq!(result.status(), SendStatus::Accepted);
+    assert_eq!(result.outcome().kind(), CoordinationOutcomeKind::Accepted);
+    assert_eq!(result.outcome().stage(), CoordinationStage::Transport);
+    assert_eq!(
+        result.durable_outcome().expect("durable outcome is explicit").code(),
+        "E_PERSISTENCE_UNAVAILABLE"
+    );
     let delivery = subscription
         .recv_delivery(Duration::from_millis(500))
         .expect("subscriber receives one delivery attempt")
         .expect("matching envelope is delivered");
 
+    assert_eq!(delivery.delivery_id(), format!("{correlation_id}:1"));
     assert_eq!(delivery.attempt(), 1);
     assert_eq!(delivery.envelope().source_agent(), "agent.local/publisher");
     assert_eq!(delivery.envelope().subject(), "mesh.trace.created");
@@ -90,6 +97,66 @@ fn two_rust_clients_publish_and_receive_first_local_envelope() {
         envelope.payload().len()
     );
     assert_eq!(delivery.envelope().payload(), envelope.payload());
+}
+
+#[test]
+fn subscription_ack_and_nack_return_delivery_outcomes() {
+    let path = unique_socket("ack-nack");
+    let _cleanup = AutoSpawnCleanup::new(path.clone());
+    let subscriber = Mesh::connect_with_options(autospawn_options(path.clone()))
+        .expect("subscriber connects to local daemon");
+    let publisher = Mesh::connect_with_options(autospawn_options(path))
+        .expect("publisher connects to same local daemon");
+    let mut subscription = subscriber
+        .subscribe("mesh.trace.>")
+        .expect("subscriber registers prefix pattern");
+
+    let ack_envelope = Envelope::with_metadata(
+        "agent.local/publisher",
+        "mesh.trace.ack",
+        b"{}".to_vec(),
+        1,
+        "corr-ack",
+        "application/octet-stream",
+    )
+    .expect("valid ack envelope");
+    let nack_envelope = Envelope::with_metadata(
+        "agent.local/publisher",
+        "mesh.trace.nack",
+        b"{}".to_vec(),
+        2,
+        "corr-nack",
+        "application/octet-stream",
+    )
+    .expect("valid nack envelope");
+
+    assert_eq!(publisher.publish(&ack_envelope).status(), SendStatus::Accepted);
+    let ack_delivery = subscription
+        .recv_delivery(Duration::from_millis(500))
+        .expect("receive wait completes")
+        .expect("ack delivery arrives");
+    let ack = subscription
+        .ack(&ack_delivery)
+        .expect("ack response is returned");
+
+    assert_eq!(ack.delivery_id(), "corr-ack:1");
+    assert_eq!(ack.kind(), CoordinationOutcomeKind::Acknowledged);
+    assert_eq!(ack.stage(), CoordinationStage::Delivery);
+    assert_eq!(ack.reason(), None);
+
+    assert_eq!(publisher.publish(&nack_envelope).status(), SendStatus::Accepted);
+    let nack_delivery = subscription
+        .recv_delivery(Duration::from_millis(500))
+        .expect("receive wait completes")
+        .expect("nack delivery arrives");
+    let nack = subscription
+        .nack(&nack_delivery, NackReasonCategory::Processing)
+        .expect("nack response is returned");
+
+    assert_eq!(nack.delivery_id(), "corr-nack:1");
+    assert_eq!(nack.kind(), CoordinationOutcomeKind::Rejected);
+    assert_eq!(nack.stage(), CoordinationStage::Delivery);
+    assert_eq!(nack.reason(), Some(NackReasonCategory::Processing));
 }
 
 #[test]

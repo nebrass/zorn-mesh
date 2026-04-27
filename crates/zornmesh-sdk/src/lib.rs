@@ -12,7 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zornmesh_core::Envelope;
+use zornmesh_core::{
+    CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome, Envelope,
+    ErrorCategory, NackReasonCategory,
+};
 use zornmesh_daemon::DaemonError;
 use zornmesh_proto::{
     ClientFrame, FrameStatus, ProtoError, ServerFrame, read_server_frame, write_client_frame,
@@ -222,7 +225,7 @@ impl Mesh {
 
                 match read_server_frame(&mut stream) {
                     Ok(ServerFrame::SendResult(result)) => SendResult::from_frame(result),
-                    Ok(ServerFrame::Delivery { .. }) => {
+                    Ok(ServerFrame::Delivery { .. } | ServerFrame::DeliveryOutcome(_)) => {
                         SendResult::rejected("E_PROTOCOL", "daemon returned delivery to publisher")
                     }
                     Err(error) => SendResult::from_proto_error(error),
@@ -250,7 +253,7 @@ impl Mesh {
                 Ok(Subscription { stream })
             }
             ServerFrame::SendResult(result) => Err(SdkError::from_send_result(result)),
-            ServerFrame::Delivery { .. } => Err(SdkError::new(
+            ServerFrame::Delivery { .. } | ServerFrame::DeliveryOutcome(_) => Err(SdkError::new(
                 SdkErrorCode::Protocol,
                 "daemon returned delivery before subscription acceptance",
             )),
@@ -289,6 +292,8 @@ pub enum SdkErrorCode {
     SubscriptionCap,
     PayloadLimit,
     Protocol,
+    PersistenceUnavailable,
+    DeliveryValidation,
     Io,
 }
 
@@ -304,6 +309,8 @@ impl SdkErrorCode {
             Self::SubscriptionCap => "E_SUBSCRIPTION_CAP",
             Self::PayloadLimit => "E_PAYLOAD_LIMIT",
             Self::Protocol => "E_PROTOCOL",
+            Self::PersistenceUnavailable => "E_PERSISTENCE_UNAVAILABLE",
+            Self::DeliveryValidation => "E_DELIVERY_VALIDATION",
             Self::Io => "E_DAEMON_IO",
         }
     }
@@ -333,6 +340,14 @@ impl SdkError {
             SdkErrorCode::DaemonUnreachable | SdkErrorCode::DaemonReadinessTimeout
         )
     }
+
+    pub const fn category(&self) -> ErrorCategory {
+        error_category_for_sdk_code(self.code)
+    }
+
+    pub fn safe_details(&self) -> &str {
+        &self.message
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +363,8 @@ pub struct SendResult {
     status: SendStatus,
     code: String,
     message: String,
+    outcome: CoordinationOutcome,
+    durable_outcome: Option<CoordinationOutcome>,
 }
 
 impl SendResult {
@@ -361,6 +378,8 @@ impl SendResult {
             status,
             code: frame.code().to_owned(),
             message: frame.message().to_owned(),
+            outcome: frame.outcome().clone(),
+            durable_outcome: frame.durable_outcome().cloned(),
         }
     }
 
@@ -369,22 +388,56 @@ impl SendResult {
             status: SendStatus::DaemonUnreachable,
             code: SdkErrorCode::DaemonUnreachable.as_str().to_owned(),
             message: message.into(),
+            outcome: CoordinationOutcome::new(
+                CoordinationOutcomeKind::Retryable,
+                CoordinationStage::Transport,
+                SdkErrorCode::DaemonUnreachable.as_str(),
+                "daemon unreachable",
+                true,
+                false,
+                0,
+            ),
+            durable_outcome: None,
         }
     }
 
     fn rejected(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
+        let message = message.into();
         Self {
             status: SendStatus::Rejected,
-            code: code.into(),
-            message: message.into(),
+            outcome: CoordinationOutcome::new(
+                CoordinationOutcomeKind::Rejected,
+                CoordinationStage::Transport,
+                code.clone(),
+                message.clone(),
+                false,
+                true,
+                0,
+            ),
+            code,
+            message,
+            durable_outcome: None,
         }
     }
 
     fn validation_failed(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
+        let message = message.into();
         Self {
             status: SendStatus::ValidationFailed,
-            code: code.into(),
-            message: message.into(),
+            outcome: CoordinationOutcome::new(
+                CoordinationOutcomeKind::Failed,
+                CoordinationStage::Protocol,
+                code.clone(),
+                message.clone(),
+                false,
+                true,
+                0,
+            ),
+            code,
+            message,
+            durable_outcome: None,
         }
     }
 
@@ -408,6 +461,26 @@ impl SendResult {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    pub const fn outcome(&self) -> &CoordinationOutcome {
+        &self.outcome
+    }
+
+    pub const fn durable_outcome(&self) -> Option<&CoordinationOutcome> {
+        self.durable_outcome.as_ref()
+    }
+
+    pub const fn retryable(&self) -> bool {
+        self.outcome.retryable()
+    }
+
+    pub fn error_category(&self) -> ErrorCategory {
+        error_category_for_code(&self.code)
+    }
+
+    pub fn safe_details(&self) -> &str {
+        &self.message
+    }
 }
 
 #[derive(Debug)]
@@ -422,9 +495,16 @@ impl Subscription {
             .map_err(|error| SdkError::new(SdkErrorCode::Io, error.to_string()))?;
 
         match read_server_frame(&mut self.stream) {
-            Ok(ServerFrame::Delivery { envelope, attempt }) => {
-                Ok(Some(Delivery { envelope, attempt }))
-            }
+            Ok(ServerFrame::Delivery {
+                delivery_id,
+                envelope,
+                attempt,
+            }) => Ok(Some(Delivery {
+                delivery_id,
+                envelope,
+                attempt,
+            })),
+            Ok(ServerFrame::DeliveryOutcome(result)) => Err(SdkError::from_delivery_outcome(result)),
             Ok(ServerFrame::SendResult(result)) => Err(SdkError::from_send_result(result)),
             Err(error)
                 if matches!(
@@ -437,15 +517,49 @@ impl Subscription {
             Err(error) => Err(SdkError::from(error)),
         }
     }
+
+    pub fn ack(&mut self, delivery: &Delivery) -> Result<DeliveryOutcome, SdkError> {
+        self.delivery_control(ClientFrame::Ack {
+            delivery_id: delivery.delivery_id().to_owned(),
+        })
+    }
+
+    pub fn nack(
+        &mut self,
+        delivery: &Delivery,
+        reason: NackReasonCategory,
+    ) -> Result<DeliveryOutcome, SdkError> {
+        self.delivery_control(ClientFrame::Nack {
+            delivery_id: delivery.delivery_id().to_owned(),
+            reason,
+        })
+    }
+
+    fn delivery_control(&mut self, frame: ClientFrame) -> Result<DeliveryOutcome, SdkError> {
+        write_client_frame(&mut self.stream, &frame).map_err(SdkError::from)?;
+        match read_server_frame(&mut self.stream).map_err(SdkError::from)? {
+            ServerFrame::DeliveryOutcome(outcome) => Ok(outcome.outcome().clone()),
+            ServerFrame::SendResult(result) => Err(SdkError::from_send_result(result)),
+            ServerFrame::Delivery { .. } => Err(SdkError::new(
+                SdkErrorCode::Protocol,
+                "daemon returned delivery before ACK/NACK outcome",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delivery {
+    delivery_id: String,
     envelope: Envelope,
     attempt: u32,
 }
 
 impl Delivery {
+    pub fn delivery_id(&self) -> &str {
+        &self.delivery_id
+    }
+
     pub const fn envelope(&self) -> &Envelope {
         &self.envelope
     }
@@ -484,15 +598,13 @@ impl From<ProtoError> for SdkError {
 
 impl SdkError {
     fn from_send_result(value: zornmesh_proto::SendResultFrame) -> Self {
-        let code = match value.code() {
-            "E_SUBJECT_VALIDATION" => SdkErrorCode::SubjectValidation,
-            "E_SUBSCRIPTION_CAP" => SdkErrorCode::SubscriptionCap,
-            "E_PAYLOAD_LIMIT" => SdkErrorCode::PayloadLimit,
-            "E_PROTOCOL" => SdkErrorCode::Protocol,
-            "E_DAEMON_UNREACHABLE" => SdkErrorCode::DaemonUnreachable,
-            _ => SdkErrorCode::Io,
-        };
+        let code = sdk_error_code_from_wire(value.code());
         Self::new(code, value.message())
+    }
+
+    fn from_delivery_outcome(value: zornmesh_proto::DeliveryOutcomeFrame) -> Self {
+        let outcome = value.outcome();
+        Self::new(sdk_error_code_from_wire(outcome.code()), outcome.message())
     }
 }
 
@@ -555,5 +667,42 @@ fn wait_for_readiness(options: &ConnectOptions, uid: u32) -> Result<(), SdkError
             }
             Err(error) => return Err(SdkError::from(error)),
         }
+    }
+}
+
+const fn error_category_for_sdk_code(code: SdkErrorCode) -> ErrorCategory {
+    match code {
+        SdkErrorCode::LocalTrustUnsafe
+        | SdkErrorCode::InvalidConfig
+        | SdkErrorCode::SubjectValidation
+        | SdkErrorCode::DeliveryValidation => ErrorCategory::Validation,
+        SdkErrorCode::ElevatedPrivilege => ErrorCategory::Authorization,
+        SdkErrorCode::DaemonUnreachable => ErrorCategory::Reachability,
+        SdkErrorCode::DaemonReadinessTimeout => ErrorCategory::Timeout,
+        SdkErrorCode::PayloadLimit => ErrorCategory::PayloadLimit,
+        SdkErrorCode::Protocol => ErrorCategory::Protocol,
+        SdkErrorCode::PersistenceUnavailable => ErrorCategory::PersistenceUnavailable,
+        SdkErrorCode::SubscriptionCap | SdkErrorCode::Io => ErrorCategory::Internal,
+    }
+}
+
+fn error_category_for_code(code: &str) -> ErrorCategory {
+    error_category_for_sdk_code(sdk_error_code_from_wire(code))
+}
+
+fn sdk_error_code_from_wire(code: &str) -> SdkErrorCode {
+    match code {
+        "E_LOCAL_TRUST_UNSAFE" => SdkErrorCode::LocalTrustUnsafe,
+        "E_ELEVATED_PRIVILEGE" => SdkErrorCode::ElevatedPrivilege,
+        "E_DAEMON_UNREACHABLE" => SdkErrorCode::DaemonUnreachable,
+        "E_DAEMON_READINESS_TIMEOUT" => SdkErrorCode::DaemonReadinessTimeout,
+        "E_INVALID_CONFIG" => SdkErrorCode::InvalidConfig,
+        "E_SUBJECT_VALIDATION" => SdkErrorCode::SubjectValidation,
+        "E_SUBSCRIPTION_CAP" => SdkErrorCode::SubscriptionCap,
+        "E_PAYLOAD_LIMIT" => SdkErrorCode::PayloadLimit,
+        "E_PROTOCOL" => SdkErrorCode::Protocol,
+        "E_PERSISTENCE_UNAVAILABLE" => SdkErrorCode::PersistenceUnavailable,
+        "E_DELIVERY_VALIDATION" => SdkErrorCode::DeliveryValidation,
+        _ => SdkErrorCode::Io,
     }
 }

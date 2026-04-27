@@ -1,0 +1,108 @@
+# generated: 2026-04-27
+# last_updated: 2026-04-27
+# project: zorn-mesh
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-04-27
+last_updated: 2026-04-27
+project: zorn-mesh
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: backlog
+  1-1-create-buildable-workspace-and-command-skeleton: backlog
+  1-2-establish-local-daemon-rendezvous-and-trust-checks: backlog
+  1-3-connect-rust-sdk-to-auto-spawned-daemon: backlog
+  1-4-send-first-local-publish-subscribe-envelope: backlog
+  1-5-add-typescript-sdk-bootstrap-parity: backlog
+  1-6-stabilize-cli-read-outputs-and-exit-contracts: backlog
+  1-7-provide-doctor-shutdown-and-shell-completion-basics: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-establish-coordination-result-and-ack-nack-contract: backlog
+  2-2-send-correlated-request-reply-with-timeout: backlog
+  2-3-fetch-lease-ack-and-nack-pulled-envelopes: backlog
+  2-4-add-idempotency-keys-and-retry-safe-sends: backlog
+  2-5-stream-response-chunks-with-byte-budget-flow-control: backlog
+  2-6-cancel-in-flight-requests-and-streams: backlog
+  2-7-resume-durable-subscriptions-after-daemon-restart: backlog
+  2-8-surface-backpressure-at-queue-and-lease-bounds: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-register-minimal-agentcard-identity: backlog
+  3-2-advertise-and-resolve-symmetric-capabilities: backlog
+  3-3-gate-high-privilege-capabilities-by-local-allowlist: backlog
+  3-4-enforce-local-socket-permission-model-on-agent-connections: backlog
+  3-5-redact-secrets-across-identity-capability-and-delivery-surfaces: backlog
+  3-6-canonicalize-agent-identity-across-multiple-host-connections: backlog
+  3-7-connect-mcp-hosts-through-zornmesh-stdio-as-agent: backlog
+  3-8-degrade-gracefully-for-baseline-mcp-capability-limits: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-persist-envelopes-audit-entries-and-trace-indexes: backlog
+  4-2-propagate-tracecontext-and-emit-opentelemetry-schema: backlog
+  4-3-capture-dead-letters-with-structured-failure-reasons: backlog
+  4-4-inspect-persistence-state-with-structured-filters: backlog
+  4-5-reconstruct-conversation-timeline-by-correlation-id: backlog
+  4-6-reconstruct-span-trees-for-request-reply-and-streaming: backlog
+  4-7-live-tail-envelopes-by-subject-pattern: backlog
+  4-8-redeliver-previously-sent-envelopes-safely: backlog
+  4-9-configure-retention-and-surface-retention-gaps: backlog
+  4-10-verify-audit-log-tamper-evidence-offline: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-produce-and-verify-release-signatures-sboms-and-reproducibility-evidence: backlog
+  5-2-enforce-compliance-traceability-fields-on-envelopes: backlog
+  5-3-export-evidence-bundle-for-a-time-window: backlog
+  5-4-redact-personal-data-while-preserving-audit-integrity: backlog
+  5-5-map-envelopes-to-nist-ai-rmf-functions-and-categories: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog
+  6-1-verify-local-ui-architecture-pin-framework-wording-and-scaffold-local-web-app-shell: backlog
+  6-2-launch-protected-loopback-ui-with-offline-assets: backlog
+  6-3-render-live-agent-roster-and-local-trust-status: backlog
+  6-4-render-daemon-sequence-timeline-and-event-detail-panel: backlog
+  6-5-open-focused-trace-reader-with-cli-handoff-commands: backlog
+  6-6-send-safe-direct-messages-from-the-ui: backlog
+  6-7-confirm-broadcast-scope-and-show-per-recipient-outcomes: backlog
+  6-8-reconnect-backfill-and-preserve-ui-context: backlog
+  6-9-prove-accessibility-responsive-behavior-and-browser-fixture-coverage: backlog
+  epic-6-retrospective: optional

@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-04-27T13:26:26+00:00",
+  "loop_count": 1,
+  "calls_made_this_hour": 0,
+  "max_calls_per_hour": 100,
+  "last_action": "unexpected_exit",
+  "status": "stopped",
+  "exit_reason": "timed out",
+  "next_reset": "14:26:26",
+  "driver_exit_code": 124
+}

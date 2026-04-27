@@ -1,5 +1,42 @@
 export const SDK_BOUNDARY = "zornmesh-typescript-sdk" as const;
 export const CONNECT_STATE_NAMES = ["ready", "draining"] as const;
+export const COORDINATION_CONTRACT_VERSION = "zornmesh.coordination.v1" as const;
+export const ENVELOPE_SCHEMA_VERSION = "zornmesh.envelope.v1" as const;
+export const ERROR_CONTRACT_VERSION = "zornmesh.error.v1" as const;
+export const DELIVERY_STATE_TAXONOMY_VERSION = "zornmesh.delivery-state.v1" as const;
+export const COORDINATION_OUTCOME_KINDS = [
+  "accepted",
+  "durable_accepted",
+  "acknowledged",
+  "rejected",
+  "failed",
+  "timed_out",
+  "retryable",
+  "terminal",
+] as const;
+export const COORDINATION_STAGES = ["transport", "durable", "delivery", "protocol"] as const;
+export const NACK_REASON_CATEGORIES = [
+  "validation",
+  "authorization",
+  "processing",
+  "timeout",
+  "payload_limit",
+  "backpressure",
+  "transient",
+  "policy",
+  "unknown",
+] as const;
+export const ERROR_CATEGORIES = [
+  "validation",
+  "authorization",
+  "reachability",
+  "timeout",
+  "payload_limit",
+  "protocol",
+  "persistence_unavailable",
+  "conflict",
+  "internal",
+] as const;
 export const DEFAULT_CONNECT_TIMEOUT_MS = 1_000;
 export const DEFAULT_RETRY_DELAY_MS = 5;
 export const SDK_ERROR_CODES = [
@@ -12,6 +49,8 @@ export const SDK_ERROR_CODES = [
   "E_SUBSCRIPTION_CAP",
   "E_PAYLOAD_LIMIT",
   "E_PROTOCOL",
+  "E_PERSISTENCE_UNAVAILABLE",
+  "E_DELIVERY_VALIDATION",
   "E_DAEMON_IO",
 ] as const;
 
@@ -22,8 +61,11 @@ const MAX_SUBJECT_BYTES = 256;
 const MAX_SUBJECT_LEVELS = 8;
 const CLIENT_SUBSCRIBE = 1;
 const CLIENT_PUBLISH = 2;
+const CLIENT_ACK = 3;
+const CLIENT_NACK = 4;
 const SERVER_SEND_RESULT = 101;
 const SERVER_DELIVERY = 102;
+const SERVER_DELIVERY_OUTCOME = 103;
 const ENV_SOCKET_PATH = "ZORN_SOCKET_PATH";
 const ENV_NO_AUTOSPAWN = "ZORN_NO_AUTOSPAWN";
 const SOCKET_KIND = 0o140000;
@@ -32,6 +74,10 @@ const FILE_KIND_MASK = 0o170000;
 export type SdkErrorCode = (typeof SDK_ERROR_CODES)[number];
 export type ConnectStateName = (typeof CONNECT_STATE_NAMES)[number];
 export type SendStatus = "accepted" | "rejected" | "daemon_unreachable" | "validation_failed";
+export type CoordinationOutcomeKind = (typeof COORDINATION_OUTCOME_KINDS)[number];
+export type CoordinationStage = (typeof COORDINATION_STAGES)[number];
+export type NackReasonCategory = (typeof NACK_REASON_CATEGORIES)[number];
+export type ErrorCategory = (typeof ERROR_CATEGORIES)[number];
 
 export interface ClientOptions {
   agentId: string;
@@ -118,11 +164,37 @@ export interface SendResult {
   status: SendStatus;
   code: string;
   message: string;
+  outcome: CoordinationOutcome;
+  durable_outcome: CoordinationOutcome | null;
 }
 
 export interface Delivery {
+  delivery_id: string;
   envelope: Envelope;
   attempt: number;
+}
+
+export interface CoordinationOutcome {
+  version: typeof COORDINATION_CONTRACT_VERSION;
+  kind: CoordinationOutcomeKind;
+  stage: CoordinationStage;
+  code: string;
+  message: string;
+  retryable: boolean;
+  terminal: boolean;
+  delivery_attempts: number;
+}
+
+export interface DeliveryOutcome {
+  delivery_id: string;
+  kind: CoordinationOutcomeKind;
+  stage: CoordinationStage;
+  code: string;
+  message: string;
+  retryable: boolean;
+  terminal: boolean;
+  reason: NackReasonCategory | null;
+  outcome: CoordinationOutcome;
 }
 
 interface NormalizedConnectOptions {
@@ -146,7 +218,8 @@ type BunSocket = {
 
 type ServerFrame =
   | { kind: "send_result"; result: SendResult }
-  | { kind: "delivery"; envelope: Envelope; attempt: number };
+  | { kind: "delivery"; delivery_id: string; envelope: Envelope; attempt: number }
+  | { kind: "delivery_outcome"; outcome: DeliveryOutcome };
 
 const managedDaemons = new Map<string, ManagedDaemon>();
 const daemonStartPromises = new Map<string, Promise<boolean>>();
@@ -154,12 +227,16 @@ const daemonStartPromises = new Map<string, Promise<boolean>>();
 export class SdkError extends Error {
   readonly code: SdkErrorCode;
   readonly retryable: boolean;
+  readonly category: ErrorCategory;
+  readonly safe_details: string;
 
   constructor(code: SdkErrorCode, message: string, retryable = isRetryableCode(code)) {
     super(`${code}: ${message}`);
     this.name = "ZornMeshSdkError";
     this.code = code;
     this.retryable = retryable;
+    this.category = errorCategoryForCode(code);
+    this.safe_details = message;
   }
 }
 
@@ -263,18 +340,7 @@ async function publish(socketPath: string, agentId: string, input: PublishInput)
     connection = await FrameConnection.open(socketPath);
   } catch (error) {
     const sdkError = asSdkError(error);
-    if (sdkError.code === "E_DAEMON_UNREACHABLE") {
-      return {
-        status: "daemon_unreachable",
-        code: sdkError.code,
-        message: sdkError.message,
-      };
-    }
-    return {
-      status: "rejected",
-      code: sdkError.code,
-      message: sdkError.message,
-    };
+    return sendResultFromError(sdkError);
   }
 
   try {
@@ -286,11 +352,9 @@ async function publish(socketPath: string, agentId: string, input: PublishInput)
     if (frame.kind === "send_result") {
       return frame.result;
     }
-    return {
-      status: "rejected",
-      code: "E_PROTOCOL",
-      message: "E_PROTOCOL: daemon returned delivery to publisher",
-    };
+    return sendResultFromError(
+      new SdkError("E_PROTOCOL", "E_PROTOCOL: daemon returned delivery to publisher", false),
+    );
   } catch (error) {
     return sendResultFromError(asSdkError(error));
   } finally {
@@ -306,7 +370,7 @@ async function subscribe(socketPath: string, pattern: string): Promise<Subscript
     if (!frame) {
       throw new SdkError("E_PROTOCOL", "daemon closed connection before subscription acceptance", false);
     }
-    if (frame.kind === "delivery") {
+    if (frame.kind !== "send_result") {
       throw new SdkError(
         "E_PROTOCOL",
         "daemon returned delivery before subscription acceptance",
@@ -344,10 +408,44 @@ export class Subscription {
     if (frame.kind === "send_result") {
       throw sdkErrorFromSendResult(frame.result);
     }
+    if (frame.kind === "delivery_outcome") {
+      throw sdkErrorFromDeliveryOutcome(frame.outcome);
+    }
     return {
+      delivery_id: frame.delivery_id,
       envelope: frame.envelope,
       attempt: frame.attempt,
     };
+  }
+
+  async ack(delivery: Delivery | string): Promise<DeliveryOutcome> {
+    return this.deliveryControl({
+      kind: "ack",
+      delivery_id: typeof delivery === "string" ? delivery : delivery.delivery_id,
+    });
+  }
+
+  async nack(delivery: Delivery | string, reason: NackReasonCategory): Promise<DeliveryOutcome> {
+    return this.deliveryControl({
+      kind: "nack",
+      delivery_id: typeof delivery === "string" ? delivery : delivery.delivery_id,
+      reason,
+    });
+  }
+
+  private async deliveryControl(frame: ClientFrame): Promise<DeliveryOutcome> {
+    this.connection.write(encodeClientFrame(frame));
+    const response = await this.connection.nextFrame(DEFAULT_CONNECT_TIMEOUT_MS);
+    if (!response) {
+      throw new SdkError("E_PROTOCOL", "daemon closed connection before ACK/NACK outcome", false);
+    }
+    if (response.kind === "delivery_outcome") {
+      return response.outcome;
+    }
+    if (response.kind === "send_result") {
+      throw sdkErrorFromSendResult(response.result);
+    }
+    throw new SdkError("E_PROTOCOL", "daemon returned delivery before ACK/NACK outcome", false);
   }
 
   close(): void {
@@ -728,15 +826,22 @@ function validateSubject(value: string, allowWildcards: boolean): void {
 
 type ClientFrame =
   | { kind: "subscribe"; pattern: string }
-  | { kind: "publish"; envelope: Envelope };
+  | { kind: "publish"; envelope: Envelope }
+  | { kind: "ack"; delivery_id: string }
+  | { kind: "nack"; delivery_id: string; reason: NackReasonCategory };
 
 function encodeClientFrame(frame: ClientFrame): Uint8Array {
-  const body = frameBody(frame.kind === "subscribe" ? CLIENT_SUBSCRIBE : CLIENT_PUBLISH);
+  const body = frameBody(clientFrameKind(frame));
   if (frame.kind === "subscribe") {
     validateSubject(frame.pattern, true);
     putString(body, frame.pattern);
-  } else {
+  } else if (frame.kind === "publish") {
     putEnvelope(body, frame.envelope);
+  } else if (frame.kind === "ack") {
+    putString(body, frame.delivery_id);
+  } else {
+    putString(body, frame.delivery_id);
+    putString(body, frame.reason);
   }
   if (body.length > MAX_FRAME_BYTES) {
     throw new SdkError(
@@ -746,6 +851,19 @@ function encodeClientFrame(frame: ClientFrame): Uint8Array {
     );
   }
   return withLength(body);
+}
+
+function clientFrameKind(frame: ClientFrame): number {
+  if (frame.kind === "subscribe") {
+    return CLIENT_SUBSCRIBE;
+  }
+  if (frame.kind === "publish") {
+    return CLIENT_PUBLISH;
+  }
+  if (frame.kind === "ack") {
+    return CLIENT_ACK;
+  }
+  return CLIENT_NACK;
 }
 
 function decodeServerFrame(body: Uint8Array): ServerFrame {
@@ -759,15 +877,28 @@ function decodeServerFrame(body: Uint8Array): ServerFrame {
       status: frameStatus(status),
       code: cursor.string("code"),
       message: cursor.string("message"),
+      outcome: cursor.outcome(),
+      durable_outcome: cursor.optionalOutcome(),
     };
     cursor.expectEnd();
     return { kind: "send_result", result };
   }
   if (kind === SERVER_DELIVERY) {
+    const delivery_id = cursor.string("delivery_id");
     const attempt = cursor.u32("attempt");
     const envelope = cursor.envelope();
     cursor.expectEnd();
-    return { kind: "delivery", envelope, attempt };
+    return { kind: "delivery", delivery_id, envelope, attempt };
+  }
+  if (kind === SERVER_DELIVERY_OUTCOME) {
+    const delivery_id = cursor.string("delivery_id");
+    const outcome = cursor.outcome();
+    const reason = cursor.optionalNackReason();
+    cursor.expectEnd();
+    return {
+      kind: "delivery_outcome",
+      outcome: deliveryOutcome(delivery_id, outcome, reason),
+    };
   }
   throw new SdkError("E_PROTOCOL", `unknown zornmesh frame type ${kind}`, false);
 }
@@ -783,6 +914,24 @@ function frameStatus(status: number): SendStatus {
     return "validation_failed";
   }
   throw new SdkError("E_PROTOCOL", `unknown zornmesh result status ${status}`, false);
+}
+
+function deliveryOutcome(
+  delivery_id: string,
+  outcome: CoordinationOutcome,
+  reason: NackReasonCategory | null,
+): DeliveryOutcome {
+  return {
+    delivery_id,
+    kind: outcome.kind,
+    stage: outcome.stage,
+    code: outcome.code,
+    message: outcome.message,
+    retryable: outcome.retryable,
+    terminal: outcome.terminal,
+    reason,
+    outcome,
+  };
 }
 
 function frameBody(kind: number): number[] {
@@ -917,6 +1066,63 @@ class Cursor {
     return this.takeExact(this.u32(field), field);
   }
 
+  bool(field: string): boolean {
+    const value = this.u8(field);
+    if (value === 0) {
+      return false;
+    }
+    if (value === 1) {
+      return true;
+    }
+    throw new SdkError("E_PROTOCOL", `zornmesh frame field ${field} has invalid boolean ${value}`, false);
+  }
+
+  outcome(): CoordinationOutcome {
+    const kind = this.outcomeKind("outcome_kind");
+    const stage = this.outcomeStage("outcome_stage");
+    return {
+      version: COORDINATION_CONTRACT_VERSION,
+      kind,
+      stage,
+      code: this.string("outcome_code"),
+      message: this.string("outcome_message"),
+      retryable: this.bool("outcome_retryable"),
+      terminal: this.bool("outcome_terminal"),
+      delivery_attempts: this.u32("outcome_delivery_attempts"),
+    };
+  }
+
+  optionalOutcome(): CoordinationOutcome | null {
+    return this.bool("has_durable_outcome") ? this.outcome() : null;
+  }
+
+  optionalNackReason(): NackReasonCategory | null {
+    if (!this.bool("has_nack_reason")) {
+      return null;
+    }
+    const reason = this.string("nack_reason");
+    if (!isNackReason(reason)) {
+      throw new SdkError("E_PROTOCOL", `unknown zornmesh NACK reason ${reason}`, false);
+    }
+    return reason;
+  }
+
+  private outcomeKind(field: string): CoordinationOutcomeKind {
+    const kind = this.string(field);
+    if (!isCoordinationOutcomeKind(kind)) {
+      throw new SdkError("E_PROTOCOL", `unknown zornmesh outcome kind ${kind}`, false);
+    }
+    return kind;
+  }
+
+  private outcomeStage(field: string): CoordinationStage {
+    const stage = this.string(field);
+    if (!isCoordinationStage(stage)) {
+      throw new SdkError("E_PROTOCOL", `unknown zornmesh outcome stage ${stage}`, false);
+    }
+    return stage;
+  }
+
   private takeExact(length: number, field: string): Uint8Array {
     const end = this.offset + length;
     if (end > this.bytes.byteLength) {
@@ -952,12 +1158,26 @@ function sdkErrorFromSendResult(result: SendResult): SdkError {
   return new SdkError(codeFromString(result.code), result.message);
 }
 
+function sdkErrorFromDeliveryOutcome(result: DeliveryOutcome): SdkError {
+  return new SdkError(codeFromString(result.code), result.message, result.retryable);
+}
+
 function sendResultFromError(error: SdkError): SendResult {
   if (error.code === "E_DAEMON_UNREACHABLE") {
     return {
       status: "daemon_unreachable",
       code: error.code,
       message: error.message,
+      outcome: coordinationOutcome(
+        "retryable",
+        "transport",
+        error.code,
+        error.message,
+        true,
+        false,
+        0,
+      ),
+      durable_outcome: null,
     };
   }
   if (["E_SUBJECT_VALIDATION", "E_PAYLOAD_LIMIT", "E_PROTOCOL"].includes(error.code)) {
@@ -965,12 +1185,53 @@ function sendResultFromError(error: SdkError): SendResult {
       status: "validation_failed",
       code: error.code,
       message: error.message,
+      outcome: coordinationOutcome(
+        "failed",
+        "protocol",
+        error.code,
+        error.message,
+        false,
+        true,
+        0,
+      ),
+      durable_outcome: null,
     };
   }
   return {
     status: "rejected",
     code: error.code,
     message: error.message,
+    outcome: coordinationOutcome(
+      "rejected",
+      "transport",
+      error.code,
+      error.message,
+      false,
+      true,
+      0,
+    ),
+    durable_outcome: null,
+  };
+}
+
+function coordinationOutcome(
+  kind: CoordinationOutcomeKind,
+  stage: CoordinationStage,
+  code: string,
+  message: string,
+  retryable: boolean,
+  terminal: boolean,
+  delivery_attempts: number,
+): CoordinationOutcome {
+  return {
+    version: COORDINATION_CONTRACT_VERSION,
+    kind,
+    stage,
+    code,
+    message,
+    retryable,
+    terminal,
+    delivery_attempts,
   };
 }
 
@@ -1009,6 +1270,48 @@ function readinessTimeout(timeoutMs: number, lastError: SdkError | undefined): S
 
 function isRetryableCode(code: SdkErrorCode): boolean {
   return code === "E_DAEMON_UNREACHABLE" || code === "E_DAEMON_READINESS_TIMEOUT";
+}
+
+function errorCategoryForCode(code: SdkErrorCode): ErrorCategory {
+  if (
+    code === "E_LOCAL_TRUST_UNSAFE" ||
+    code === "E_INVALID_CONFIG" ||
+    code === "E_SUBJECT_VALIDATION" ||
+    code === "E_DELIVERY_VALIDATION"
+  ) {
+    return "validation";
+  }
+  if (code === "E_ELEVATED_PRIVILEGE") {
+    return "authorization";
+  }
+  if (code === "E_DAEMON_UNREACHABLE") {
+    return "reachability";
+  }
+  if (code === "E_DAEMON_READINESS_TIMEOUT") {
+    return "timeout";
+  }
+  if (code === "E_PAYLOAD_LIMIT") {
+    return "payload_limit";
+  }
+  if (code === "E_PROTOCOL") {
+    return "protocol";
+  }
+  if (code === "E_PERSISTENCE_UNAVAILABLE") {
+    return "persistence_unavailable";
+  }
+  return "internal";
+}
+
+function isCoordinationOutcomeKind(value: string): value is CoordinationOutcomeKind {
+  return COORDINATION_OUTCOME_KINDS.includes(value as CoordinationOutcomeKind);
+}
+
+function isCoordinationStage(value: string): value is CoordinationStage {
+  return COORDINATION_STAGES.includes(value as CoordinationStage);
+}
+
+function isNackReason(value: string): value is NackReasonCategory {
+  return NACK_REASON_CATEGORIES.includes(value as NackReasonCategory);
 }
 
 function autoSpawnFromEnv(value: string | undefined): boolean {

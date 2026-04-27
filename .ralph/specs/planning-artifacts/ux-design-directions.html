@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>zorn-mesh UX Design Directions</title>
+  <style>
+    :root {
+      --bg: #080b10;
+      --panel: #10151d;
+      --panel-2: #151c26;
+      --panel-3: #1b2430;
+      --line: #2a3442;
+      --text: #e6edf5;
+      --muted: #8f9bad;
+      --subtle: #647084;
+      --blue: #2f8cff;
+      --blue-2: #5eb1ff;
+      --cyan: #35d0ff;
+      --green: #38d98c;
+      --amber: #f5b84b;
+      --red: #ff6673;
+      --violet: #9a7cff;
+      --shadow: 0 20px 60px rgba(0, 0, 0, 0.38);
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top left, rgba(47, 140, 255, 0.16), transparent 28rem), var(--bg);
+      color: var(--text);
+    }
+    a { color: inherit; }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 20px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(8, 11, 16, 0.88);
+      backdrop-filter: blur(18px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .mark {
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, var(--blue), var(--cyan));
+      box-shadow: 0 0 28px rgba(47, 140, 255, 0.35);
+    }
+    .topbar nav {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .topbar a, .pill, button {
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 999px;
+      color: var(--text);
+      background: rgba(255,255,255,0.04);
+      padding: 8px 11px;
+      font: inherit;
+      font-size: 12px;
+      text-decoration: none;
+    }
+    .topbar a:hover, button:hover { border-color: rgba(94, 177, 255, 0.6); background: rgba(47, 140, 255, 0.12); }
+    .hero {
+      padding: 64px 24px 30px;
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    .hero h1 {
+      margin: 0 0 12px;
+      font-size: clamp(34px, 5vw, 68px);
+      line-height: 0.95;
+      letter-spacing: -0.07em;
+    }
+    .hero p {
+      max-width: 820px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.65;
+    }
+    .grid {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 20px 24px 80px;
+      display: grid;
+      gap: 28px;
+    }
+    .direction {
+      border: 1px solid rgba(255,255,255,0.09);
+      background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.018));
+      border-radius: 26px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .direction-head {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 20px;
+      align-items: start;
+      padding: 24px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .direction h2 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      letter-spacing: -0.04em;
+    }
+    .direction p { margin: 0; color: var(--muted); line-height: 1.55; }
+    .tags { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .tag {
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(0,0,0,0.18);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 6px 9px;
+      font-size: 11px;
+    }
+    .mock {
+      padding: 18px;
+      min-height: 600px;
+      background: #070a0f;
+    }
+    .app {
+      min-height: 560px;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 18px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .appbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,0.025);
+    }
+    .status-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--green); box-shadow: 0 0 16px currentColor; }
+    .dot.blue { background: var(--blue); }
+    .dot.amber { background: var(--amber); }
+    .dot.red { background: var(--red); }
+    .status {
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: rgba(255,255,255,0.06);
+      color: var(--muted);
+      font-size: 11px;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .status.good { color: var(--green); background: rgba(56,217,140,0.08); }
+    .status.warn { color: var(--amber); background: rgba(245,184,75,0.08); }
+    .status.bad { color: var(--red); background: rgba(255,102,115,0.08); }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+      padding: 7px 10px;
+      font-size: 12px;
+    }
+    .btn.primary { background: linear-gradient(135deg, var(--blue), #1669d9); border-color: rgba(94,177,255,0.7); }
+    .content { display: grid; min-height: 508px; }
+    .three { grid-template-columns: 280px minmax(420px, 1fr) 360px; }
+    .two { grid-template-columns: 360px 1fr; }
+    .side, .main, .detail {
+      min-width: 0;
+      padding: 14px;
+      border-right: 1px solid var(--line);
+    }
+    .detail { border-right: 0; background: rgba(255,255,255,0.018); }
+    .section-title {
+      color: var(--subtle);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 11px;
+      margin: 3px 0 10px;
+    }
+    .agent, .row, .card, .event {
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.035);
+      border-radius: 14px;
+      padding: 10px;
+      margin-bottom: 9px;
+    }
+    .agent.active, .row.active, .event.active {
+      border-color: rgba(47,140,255,0.75);
+      background: rgba(47,140,255,0.09);
+    }
+    .agent-top, .row-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 5px;
+    }
+    .agent strong, .row strong { font-size: 13px; }
+    .meta { color: var(--subtle); font-size: 11px; line-height: 1.45; }
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 10px;
+    }
+    .event {
+      position: relative;
+      display: grid;
+      grid-template-columns: 76px 1fr auto;
+      gap: 12px;
+      align-items: start;
+    }
+    .seq { color: var(--blue-2); font-size: 11px; }
+    .event-title { font-size: 13px; font-weight: 650; margin-bottom: 4px; }
+    .event-copy { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .kv {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 8px 12px;
+      font-size: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .kv span:first-child { color: var(--subtle); }
+    .composer {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid rgba(47,140,255,0.25);
+      border-radius: 14px;
+      background: rgba(47,140,255,0.07);
+    }
+    .input {
+      min-height: 72px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(0,0,0,0.24);
+      padding: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .mini-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .metric {
+      padding: 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.035);
+    }
+    .metric b { display: block; font-size: 22px; margin-bottom: 4px; }
+    .metric span { color: var(--muted); font-size: 12px; }
+    .graph {
+      height: 310px;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background:
+        radial-gradient(circle at 22% 38%, rgba(47,140,255,0.35), transparent 4rem),
+        radial-gradient(circle at 58% 26%, rgba(56,217,140,0.22), transparent 4rem),
+        radial-gradient(circle at 75% 68%, rgba(245,184,75,0.2), transparent 4rem),
+        rgba(255,255,255,0.025);
+      position: relative;
+      overflow: hidden;
+    }
+    .node {
+      position: absolute;
+      min-width: 110px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(16,21,29,0.92);
+      border-radius: 14px;
+      padding: 9px;
+      font-size: 12px;
+      box-shadow: var(--shadow);
+    }
+    .node small { display: block; color: var(--muted); margin-top: 3px; }
+    .line {
+      position: absolute;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(47,140,255,0.25), rgba(47,140,255,0.9));
+      transform-origin: left center;
+    }
+    .compare {
+      max-width: 1180px;
+      margin: 0 auto 70px;
+      padding: 0 24px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    th, td {
+      padding: 14px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      color: var(--muted);
+      font-size: 13px;
+      vertical-align: top;
+    }
+    th { color: var(--text); background: rgba(255,255,255,0.04); }
+    tr:last-child td { border-bottom: 0; }
+    .recommend { color: var(--green); font-weight: 700; }
+    @media (max-width: 1100px) {
+      .three, .two { grid-template-columns: 1fr; }
+      .side, .main, .detail { border-right: 0; border-bottom: 1px solid var(--line); }
+      .direction-head { grid-template-columns: 1fr; }
+      .tags { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="mark"></span><span>zorn-mesh design directions</span></div>
+      <nav>
+        <a href="#d1">01 control room</a>
+        <a href="#d2">02 triage</a>
+        <a href="#d3">03 graph</a>
+        <a href="#d4">04 command</a>
+        <a href="#d5">05 runtime</a>
+        <a href="#d6">06 focus</a>
+        <a href="#compare">compare</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="pill mono">Local web UI · graphite + electric blue · React + Tailwind + Radix-style primitives</p>
+        <h1>Six directions for making agent conversations visible.</h1>
+        <p>These mockups explore different ways to express the zorn-mesh core interaction: open the local UI, see connected agents, click a trace, understand the whole agent conversation, and safely act when needed.</p>
+      </section>
+
+      <section class="grid">
+        <article class="direction" id="d1">
+          <div class="direction-head">
+            <div>
+              <h2>01 · Live Mesh Control Room</h2>
+              <p>Recommended baseline. A three-pane cockpit balances live agent presence, trace chronology, and selected event detail. It prioritizes calm confidence and keeps actions close to context.</p>
+            </div>
+            <div class="tags"><span class="tag recommend">recommended</span><span class="tag">timeline first</span><span class="tag">balanced density</span></div>
+          </div>
+          <div class="mock">
+            <div class="app">
+              <div class="appbar">
+                <div class="status-row">
+                  <strong>zorn-mesh</strong><span class="status good">loopback only</span><span class="status good">daemon healthy</span><span class="status">sequence 019284</span>
+                </div>
+                <div class="status-row"><button class="btn">Copy trace CLI</button><button class="btn primary">Send message</button></div>
+              </div>
+              <div class="content three">
+                <aside class="side">
+                  <div class="section-title">Connected agents</div>
+                  <div class="agent active"><div class="agent-top"><strong>reviewer</strong><span class="status good">busy</span></div><div class="meta mono">agent.reviewer · last 2s · 4 caps</div></div>
+                  <div class="agent"><div class="agent-top"><strong>docs-server</strong><span class="status good">idle</span></div><div class="meta mono">agent.docs.search.&gt; · last 7s</div></div>
+                  <div class="agent"><div class="agent-top"><strong>pytest-runner</strong><span class="status warn">stale</span></div><div class="meta mono">agent.reviewer.test_request · last 3m</div></div>
+                  <div class="section-title">Local state</div>
+                  <div class="card"><div class="meta">UI session protected<br><span class="mono">127.0.0.1:49132</span><br>All assets bundled locally</div></div>
+                </aside>
+                <section class="main">
+                  <div class="section-title">Trace 7c4e9d · conversation timeline</div>
+                  <div class="timeline">
+                    <div class="event"><div class="seq mono">#19281<br>01:34:22</div><div><div class="event-title">reviewer requested context</div><div class="event-copy">reviewer -> docs-server on <span class="mono">agent.docs.search.repo</span></div></div><span class="status good">ack</span></div>
+                    <div class="event active"><div class="seq mono">#19282<br>+03ms</div><div><div class="event-title">docs-server returned 12 snippets</div><div class="event-copy">caused by #19281 · payload redacted safely</div></div><span class="status good">delivered</span></div>
+                    <div class="event"><div class="seq mono">#19283<br>+08ms</div><div><div class="event-title">reviewer requested targeted tests</div><div class="event-copy">reviewer -> pytest-runner · timeout 30s</div></div><span class="status warn">queued</span></div>
+                    <div class="event"><div class="seq mono">#19284<br>+412ms</div><div><div class="event-title">pytest-runner response entered DLQ</div><div class="event-copy">consumer unreachable · retry available</div></div><span class="status bad">dead letter</span></div>
+                  </div>
+                  <div class="composer">
+                    <div class="section-title">Safe composer</div>
+                    <div class="input">Message reviewer only. Broadcast requires recipient preview and confirmation.</div>
+                  </div>
+                </section>
+                <aside class="detail">
+                  <div class="section-title">Selected event detail</div>
+                  <h3>docs-server returned 12 snippets</h3>
+                  <div class="kv"><span>Sender</span><span class="mono">docs-server</span><span>Recipient</span><span class="mono">reviewer</span><span>Sequence</span><span class="mono">019282</span><span>Parent</span><span class="mono">019281</span><span>Status</span><span>delivered + acknowledged</span></div>
+                  <p class="meta">This event completed the context lookup and caused the reviewer to request targeted tests.</p>
+                  <button class="btn">Open raw metadata</button> <button class="btn">Copy zornmesh trace</button>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="direction" id="d2">
+          <div class="direction-head">
+            <div>
+              <h2>02 · Sentry-Style Trace Triage</h2>
+              <p>An issue/event inbox foregrounds failures, dead letters, stale agents, and partial broadcasts. Strong for Daniel-style debugging and recovery workflows.</p>
+            </div>
+            <div class="tags"><span class="tag">triage first</span><span class="tag">failure clarity</span><span class="tag">Sentry inspired</span></div>
+          </div>
+          <div class="mock">
+            <div class="app">
+              <div class="appbar"><strong>Trace triage</strong><div class="status-row"><span class="status bad">3 need attention</span><span class="status good">audit chain valid</span></div></div>
+              <div class="content two">
+                <aside class="side">
+                  <div class="section-title">Needs attention</div>
+                  <div class="row active"><div class="row-top"><strong>consumer_unreachable</strong><span class="status bad">DLQ</span></div><div class="meta mono">7c4e9d · reviewer flow · 4m ago</div></div>
+                  <div class="row"><div class="row-top"><strong>broadcast partial failure</strong><span class="status warn">2/5 failed</span></div><div class="meta mono">b31a20 · all agents · 12m ago</div></div>
+                  <div class="row"><div class="row-top"><strong>pytest-runner stale</strong><span class="status warn">stale</span></div><div class="meta mono">last heartbeat 3m ago</div></div>
+                </aside>
+                <section class="main">
+                  <div class="section-title">Evidence bundle</div>
+                  <div class="mini-grid">
+                    <div class="metric"><b>4</b><span>events in trace</span></div>
+                    <div class="metric"><b>1</b><span>dead letter</span></div>
+                    <div class="metric"><b>412ms</b><span>until failure</span></div>
+                  </div>
+                  <div class="event active"><div class="seq mono">#19284</div><div><div class="event-title">response could not be delivered</div><div class="event-copy">reviewer stale before response arrived. Suggested: restart agent, then replay.</div></div><span class="status bad">failed</span></div>
+                  <button class="btn primary">Replay after restart</button> <button class="btn">Copy runbook CLI</button> <button class="btn">Open full trace</button>
+                </section>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="direction" id="d3">
+          <div class="direction-head">
+            <div>
+              <h2>03 · Agent Graph + Inspector</h2>
+              <p>A topology-first view makes connected agents tangible. Best for understanding who is connected and where messages travel, but weaker as a default trace-reading surface.</p>
+            </div>
+            <div class="tags"><span class="tag">agent graph</span><span class="tag">visual topology</span><span class="tag">exploratory</span></div>
+          </div>
+          <div class="mock">
+            <div class="app">
+              <div class="appbar"><strong>Live mesh graph</strong><div class="status-row"><span class="status good">5 agents</span><span class="status">24 messages/min</span></div></div>
+              <div class="content two">
+                <section class="main">
+                  <div class="graph">
+                    <div class="line" style="left: 28%; top: 43%; width: 220px; transform: rotate(-12deg);"></div>
+                    <div class="line" style="left: 44%; top: 40%; width: 230px; transform: rotate(34deg);"></div>
+                    <div class="line" style="left: 31%; top: 52%; width: 260px; transform: rotate(22deg);"></div>
+                    <div class="node" style="left: 12%; top: 35%;">reviewer<small>busy · 4 caps</small></div>
+                    <div class="node" style="left: 42%; top: 20%;">docs-server<small>idle · 12 subs</small></div>
+                    <div class="node" style="left: 68%; top: 58%;">pytest-runner<small>stale · queued</small></div>
+                  </div>
+                  <div class="event"><div class="seq mono">live</div><div><div class="event-title">reviewer -> docs-server -> pytest-runner</div><div class="event-copy">Click an edge to open the correlated trace.</div></div><span class="status good">flow</span></div>
+                </section>
+                <aside class="detail">
+                  <div class="section-title">Inspector</div>
+                  <h3>pytest-runner</h3>
+                  <div class="kv"><span>Status</span><span class="status warn">stale</span><span>Last seen</span><span>3m 12s ago</span><span>Subscribed</span><span class="mono">agent.reviewer.test_request</span></div>
+                  <button class="btn">Open recent traces</button> <button class="btn">Copy inspect CLI</button>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="direction" id="d4">
+          <div class="direction-head">
+            <div>
+              <h2>04 · Linear-Style Command Workspace</h2>
+              <p>Fast, minimal, keyboard-friendly. Best for daily power use and calm polish, but needs trace affordances to avoid hiding too much evidence.</p>
+            </div>
+            <div class="tags"><span class="tag">keyboard-first</span><span class="tag">calm</span><span class="tag">Linear inspired</span></div>
+          </div>
+          <div class="mock">
+            <div class="app">
+              <div class="appbar"><strong>Command workspace</strong><div class="status-row"><span class="status">Cmd+K trace, send, inspect</span></div></div>
+              <div class="content three">
+                <aside class="side">
+                  <div class="section-title">Navigation</div>
+                  <div class="row active"><strong>Traces</strong><div class="meta">18 recent</div></div>
+                  <div class="row"><strong>Agents</strong><div class="meta">5 connected</div></div>
+                  <div class="row"><strong>Dead letters</strong><div class="meta">1 active</div></div>
+                </aside>
+                <section class="main">
+                  <div class="input mono">Search traces, agents, subjects, commands...</div>
+                  <div class="row active"><div class="row-top"><strong>7c4e9d reviewer flow</strong><span class="status warn">needs review</span></div><div class="meta">reviewer -> docs-server -> pytest-runner · 4 events · 1 dead letter</div></div>
+                  <div class="row"><div class="row-top"><strong>b31a20 broadcast</strong><span class="status good">4/4 ack</span></div><div class="meta">operator message to all agents · completed</div></div>
+                </section>
+                <aside class="detail">
+                  <div class="section-title">Quick actions</div>
+                  <button class="btn primary">Open trace</button> <button class="btn">Send to reviewer</button> <button class="btn">Run doctor</button>
+                  <p class="meta">Every action can be reached by keyboard and mirrored as a CLI command.</p>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="direction" id="d5">
+          <div class="direction-head">
+            <div>
+              <h2>05 · Docker-Style Local Runtime Console</h2>
+              <p>Daemon, socket, database, agents, and bundled UI state become explicit. Strong for trust and troubleshooting; risks making trace comprehension secondary.</p>
+            </div>
+            <div class="tags"><span class="tag">runtime status</span><span class="tag">local trust</span><span class="tag">Docker inspired</span></div>
+          </div>
+          <div class="mock">
+            <div class="app">
+              <div class="appbar"><strong>Local runtime</strong><div class="status-row"><span class="status good">daemon running</span><span class="status good">session protected</span><span class="status good">offline assets</span></div></div>
+              <div class="content two">
+                <aside class="side">
+                  <div class="metric"><b>0600</b><span>socket mode</span></div>
+                  <div class="metric"><b>30d</b><span>audit retention</span></div>
+                  <div class="metric"><b>0</b><span>TCP listeners</span></div>
+                </aside>
+                <section class="main">
+                  <div class="section-title">Runtime resources</div>
+                  <div class="row"><div class="row-top"><strong>Daemon</strong><span class="status good">healthy</span></div><div class="meta mono">pid 48210 · 127.0.0.1:49132 · token session active</div></div>
+                  <div class="row"><div class="row-top"><strong>SQLite store</strong><span class="status good">WAL ok</span></div><div class="meta mono">~/.local/state/zornmesh/mesh.db · last write 2s</div></div>
+                  <div class="row active"><div class="row-top"><strong>Agents</strong><span class="status warn">1 stale</span></div><div class="meta">5 connected, 1 stale heartbeat. Open traces or run doctor.</div></div>
+                  <button class="btn primary">Open trace triage</button> <button class="btn">Copy doctor CLI</button>
+                </section>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="direction" id="d6">
+          <div class="direction-head">
+            <div>
+              <h2>06 · Focus Trace Reader</h2>
+              <p>A distraction-free reader for one trace at a time. Excellent for the defining experience; should likely be a mode inside the recommended control room rather than the home screen.</p>
+            </div>
+            <div class="tags"><span class="tag">trace focus</span><span class="tag">reader mode</span><span class="tag">deep comprehension</span></div>
+          </div>
+          <div class="mock">
+            <div class="app">
+              <div class="appbar"><strong>Trace 7c4e9d</strong><div class="status-row"><span class="status good">complete</span><span class="status">4 events</span><span class="status warn">1 recovery action</span></div></div>
+              <div class="content two">
+                <section class="main">
+                  <div class="event"><div class="seq mono">01</div><div><div class="event-title">reviewer asks docs-server for context</div><div class="event-copy">The reviewer needed repository policy before judging the PR.</div></div><span class="status good">ack</span></div>
+                  <div class="event"><div class="seq mono">02</div><div><div class="event-title">docs-server answers with 12 snippets</div><div class="event-copy">This response caused the test request.</div></div><span class="status good">delivered</span></div>
+                  <div class="event"><div class="seq mono">03</div><div><div class="event-title">reviewer asks pytest-runner for targeted tests</div><div class="event-copy">The request was accepted but the consumer was stale.</div></div><span class="status warn">queued</span></div>
+                  <div class="event active"><div class="seq mono">04</div><div><div class="event-title">test response moved to dead letters</div><div class="event-copy">The response is preserved. Restart agent, then replay.</div></div><span class="status bad">DLQ</span></div>
+                </section>
+                <aside class="detail">
+                  <div class="section-title">Why this happened</div>
+                  <p class="meta">The reviewer heartbeat was stale before the test response arrived. The daemon preserved the response as a dead letter instead of dropping it.</p>
+                  <button class="btn primary">Restart + replay guide</button> <button class="btn">Copy replay CLI</button>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="compare" id="compare">
+        <h2>Direction comparison</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Direction</th>
+              <th>Best at</th>
+              <th>Risk</th>
+              <th>Suggested use</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>01 Live Mesh Control Room</td><td>Balancing agents, traces, details, and actions</td><td>Needs careful density tuning</td><td class="recommend">Use as primary v0.1 direction</td></tr>
+            <tr><td>02 Trace Triage</td><td>Failures, DLQ, incident-like recovery</td><td>Can over-index on broken states</td><td>Use as trace/failure subview</td></tr>
+            <tr><td>03 Agent Graph</td><td>Making topology tangible</td><td>Graphs can become decorative or confusing</td><td>Use as optional exploration view</td></tr>
+            <tr><td>04 Command Workspace</td><td>Speed, keyboard use, calm daily operation</td><td>May hide evidence behind minimalism</td><td>Borrow interactions and command palette</td></tr>
+            <tr><td>05 Runtime Console</td><td>Daemon/local trust transparency</td><td>Can make infrastructure feel like the product</td><td>Use for status/settings/doctor surfaces</td></tr>
+            <tr><td>06 Focus Trace Reader</td><td>Deep trace comprehension</td><td>Too narrow for home screen</td><td>Use as focused trace mode</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

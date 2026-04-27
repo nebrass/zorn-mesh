@@ -5,7 +5,10 @@ use std::{
     sync::{Arc, Mutex, mpsc::Sender},
 };
 
-use zornmesh_core::{Envelope, SubjectValidationError, validate_subject, validate_subject_pattern};
+use zornmesh_core::{
+    CoordinationOutcome, DeliveryOutcome, Envelope, NackReasonCategory, SubjectValidationError,
+    validate_subject, validate_subject_pattern,
+};
 
 pub const CRATE_BOUNDARY: &str = "zornmesh-broker";
 pub const MAX_SUBSCRIBERS_PER_PATTERN: usize = 256;
@@ -75,7 +78,7 @@ impl Broker {
         })
     }
 
-    pub fn publish(&self, envelope: Envelope) -> Result<usize, BrokerError> {
+    pub fn publish(&self, envelope: Envelope) -> Result<PublishReceipt, BrokerError> {
         validate_subject(envelope.subject()).map_err(BrokerError::from)?;
         let inner = self.inner.lock().expect("broker lock is not poisoned");
         let delivery = DeliveryAttempt::new(envelope, 1);
@@ -91,7 +94,9 @@ impl Broker {
             }
         }
 
-        Ok(delivered)
+        let delivery_attempts =
+            u32::try_from(delivered).expect("subscriber caps fit in coordination delivery attempts");
+        Ok(PublishReceipt::new(delivery_attempts))
     }
 
     pub fn subscription_count(&self) -> usize {
@@ -100,6 +105,42 @@ impl Broker {
             .expect("broker lock is not poisoned")
             .subscriptions
             .len()
+    }
+
+    pub fn record_ack(&self, delivery_id: impl Into<String>) -> Result<DeliveryOutcome, BrokerError> {
+        let delivery_id = delivery_id.into();
+        validate_delivery_id(&delivery_id)?;
+        let outcome = DeliveryOutcome::acknowledged(delivery_id);
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .delivery_outcomes
+            .push(outcome.clone());
+        Ok(outcome)
+    }
+
+    pub fn record_nack(
+        &self,
+        delivery_id: impl Into<String>,
+        reason: NackReasonCategory,
+    ) -> Result<DeliveryOutcome, BrokerError> {
+        let delivery_id = delivery_id.into();
+        validate_delivery_id(&delivery_id)?;
+        let outcome = DeliveryOutcome::rejected(delivery_id, reason);
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .delivery_outcomes
+            .push(outcome.clone());
+        Ok(outcome)
+    }
+
+    pub fn delivery_outcomes(&self) -> Vec<DeliveryOutcome> {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .delivery_outcomes
+            .clone()
     }
 }
 
@@ -113,6 +154,7 @@ impl Default for Broker {
 struct BrokerInner {
     next_subscription_id: u64,
     subscriptions: Vec<SubscriptionEntry>,
+    delivery_outcomes: Vec<DeliveryOutcome>,
 }
 
 #[derive(Debug)]
@@ -139,13 +181,23 @@ impl Drop for Subscription {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryAttempt {
+    delivery_id: String,
     envelope: Envelope,
     attempt: u32,
 }
 
 impl DeliveryAttempt {
     pub fn new(envelope: Envelope, attempt: u32) -> Self {
-        Self { envelope, attempt }
+        let delivery_id = format!("{}:{attempt}", envelope.correlation_id());
+        Self {
+            delivery_id,
+            envelope,
+            attempt,
+        }
+    }
+
+    pub fn delivery_id(&self) -> &str {
+        &self.delivery_id
     }
 
     pub const fn envelope(&self) -> &Envelope {
@@ -154,6 +206,44 @@ impl DeliveryAttempt {
 
     pub const fn attempt(&self) -> u32 {
         self.attempt
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishReceipt {
+    transport_outcome: CoordinationOutcome,
+    durable_outcome: CoordinationOutcome,
+    delivery_attempts: u32,
+}
+
+impl PublishReceipt {
+    fn new(delivery_attempts: u32) -> Self {
+        Self {
+            transport_outcome: CoordinationOutcome::accepted(
+                format!("accepted for routing; delivery_attempts={delivery_attempts}"),
+                delivery_attempts,
+            ),
+            durable_outcome: CoordinationOutcome::persistence_unavailable(),
+            delivery_attempts,
+        }
+    }
+
+    pub const fn transport_outcome(&self) -> &CoordinationOutcome {
+        &self.transport_outcome
+    }
+
+    pub const fn durable_outcome(&self) -> &CoordinationOutcome {
+        &self.durable_outcome
+    }
+
+    pub const fn delivery_attempts(&self) -> u32 {
+        self.delivery_attempts
+    }
+}
+
+impl PartialEq<usize> for PublishReceipt {
+    fn eq(&self, other: &usize) -> bool {
+        usize::try_from(self.delivery_attempts) == Ok(*other)
     }
 }
 
@@ -203,6 +293,7 @@ impl SubjectPattern {
 pub enum BrokerErrorCode {
     SubjectValidation,
     SubscriptionCap,
+    DeliveryValidation,
 }
 
 impl BrokerErrorCode {
@@ -210,6 +301,7 @@ impl BrokerErrorCode {
         match self {
             Self::SubjectValidation => "E_SUBJECT_VALIDATION",
             Self::SubscriptionCap => "E_SUBSCRIPTION_CAP",
+            Self::DeliveryValidation => "E_DELIVERY_VALIDATION",
         }
     }
 }
@@ -250,3 +342,13 @@ impl fmt::Display for BrokerError {
 }
 
 impl std::error::Error for BrokerError {}
+
+fn validate_delivery_id(delivery_id: &str) -> Result<(), BrokerError> {
+    if delivery_id.trim().is_empty() {
+        return Err(BrokerError::new(
+            BrokerErrorCode::DeliveryValidation,
+            "delivery ID must not be empty",
+        ));
+    }
+    Ok(())
+}

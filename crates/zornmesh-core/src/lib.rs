@@ -9,8 +9,432 @@ use std::{
 pub const MAX_SUBJECT_BYTES: usize = 256;
 pub const MAX_SUBJECT_LEVELS: usize = 8;
 pub const MAX_ENVELOPE_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const COORDINATION_CONTRACT_VERSION: &str = "zornmesh.coordination.v1";
+pub const ENVELOPE_SCHEMA_VERSION: &str = "zornmesh.envelope.v1";
+pub const ERROR_CONTRACT_VERSION: &str = "zornmesh.error.v1";
+pub const DELIVERY_STATE_TAXONOMY_VERSION: &str = "zornmesh.delivery-state.v1";
 
 static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinationOutcomeKind {
+    Accepted,
+    DurableAccepted,
+    Acknowledged,
+    Rejected,
+    Failed,
+    TimedOut,
+    Retryable,
+    Terminal,
+}
+
+impl CoordinationOutcomeKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::DurableAccepted => "durable_accepted",
+            Self::Acknowledged => "acknowledged",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Retryable => "retryable",
+            Self::Terminal => "terminal",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "durable_accepted" => Some(Self::DurableAccepted),
+            "acknowledged" => Some(Self::Acknowledged),
+            "rejected" => Some(Self::Rejected),
+            "failed" => Some(Self::Failed),
+            "timed_out" => Some(Self::TimedOut),
+            "retryable" => Some(Self::Retryable),
+            "terminal" => Some(Self::Terminal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinationStage {
+    Transport,
+    Durable,
+    Delivery,
+    Protocol,
+}
+
+impl CoordinationStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Durable => "durable",
+            Self::Delivery => "delivery",
+            Self::Protocol => "protocol",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "transport" => Some(Self::Transport),
+            "durable" => Some(Self::Durable),
+            "delivery" => Some(Self::Delivery),
+            "protocol" => Some(Self::Protocol),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinationOutcome {
+    kind: CoordinationOutcomeKind,
+    stage: CoordinationStage,
+    code: String,
+    message: String,
+    retryable: bool,
+    terminal: bool,
+    delivery_attempts: u32,
+}
+
+impl CoordinationOutcome {
+    pub fn new(
+        kind: CoordinationOutcomeKind,
+        stage: CoordinationStage,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+        terminal: bool,
+        delivery_attempts: u32,
+    ) -> Self {
+        Self {
+            kind,
+            stage,
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            terminal,
+            delivery_attempts,
+        }
+    }
+
+    pub fn accepted(message: impl Into<String>, delivery_attempts: u32) -> Self {
+        Self::new(
+            CoordinationOutcomeKind::Accepted,
+            CoordinationStage::Transport,
+            "ACCEPTED",
+            message,
+            false,
+            false,
+            delivery_attempts,
+        )
+    }
+
+    pub fn durable_accepted(message: impl Into<String>, delivery_attempts: u32) -> Self {
+        Self::new(
+            CoordinationOutcomeKind::DurableAccepted,
+            CoordinationStage::Durable,
+            "DURABLE_ACCEPTED",
+            message,
+            false,
+            false,
+            delivery_attempts,
+        )
+    }
+
+    pub fn persistence_unavailable() -> Self {
+        Self::new(
+            CoordinationOutcomeKind::Failed,
+            CoordinationStage::Durable,
+            "E_PERSISTENCE_UNAVAILABLE",
+            "durable coordination state is unavailable for the in-memory broker",
+            false,
+            true,
+            0,
+        )
+    }
+
+    pub fn acknowledged(message: impl Into<String>, delivery_attempts: u32) -> Self {
+        Self::new(
+            CoordinationOutcomeKind::Acknowledged,
+            CoordinationStage::Delivery,
+            "ACKNOWLEDGED",
+            message,
+            false,
+            true,
+            delivery_attempts,
+        )
+    }
+
+    pub fn rejected(message: impl Into<String>, delivery_attempts: u32) -> Self {
+        Self::new(
+            CoordinationOutcomeKind::Rejected,
+            CoordinationStage::Delivery,
+            "REJECTED",
+            message,
+            false,
+            true,
+            delivery_attempts,
+        )
+    }
+
+    pub fn failed(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
+        Self::new(
+            CoordinationOutcomeKind::Failed,
+            CoordinationStage::Delivery,
+            code,
+            message,
+            retryable,
+            true,
+            0,
+        )
+    }
+
+    pub const fn version(&self) -> &'static str {
+        COORDINATION_CONTRACT_VERSION
+    }
+
+    pub const fn kind(&self) -> CoordinationOutcomeKind {
+        self.kind
+    }
+
+    pub const fn stage(&self) -> CoordinationStage {
+        self.stage
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub const fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub const fn terminal(&self) -> bool {
+        self.terminal
+    }
+
+    pub const fn delivery_attempts(&self) -> u32 {
+        self.delivery_attempts
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    Validation,
+    Authorization,
+    Reachability,
+    Timeout,
+    PayloadLimit,
+    Protocol,
+    PersistenceUnavailable,
+    Conflict,
+    Internal,
+}
+
+impl ErrorCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::Authorization => "authorization",
+            Self::Reachability => "reachability",
+            Self::Timeout => "timeout",
+            Self::PayloadLimit => "payload_limit",
+            Self::Protocol => "protocol",
+            Self::PersistenceUnavailable => "persistence_unavailable",
+            Self::Conflict => "conflict",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "validation" => Some(Self::Validation),
+            "authorization" => Some(Self::Authorization),
+            "reachability" => Some(Self::Reachability),
+            "timeout" => Some(Self::Timeout),
+            "payload_limit" => Some(Self::PayloadLimit),
+            "protocol" => Some(Self::Protocol),
+            "persistence_unavailable" => Some(Self::PersistenceUnavailable),
+            "conflict" => Some(Self::Conflict),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductError {
+    code: String,
+    category: ErrorCategory,
+    retryable: bool,
+    safe_details: String,
+}
+
+impl ProductError {
+    pub fn new(
+        code: impl Into<String>,
+        category: ErrorCategory,
+        retryable: bool,
+        safe_details: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            category,
+            retryable,
+            safe_details: safe_details.into(),
+        }
+    }
+
+    pub const fn version(&self) -> &'static str {
+        ERROR_CONTRACT_VERSION
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub const fn category(&self) -> ErrorCategory {
+        self.category
+    }
+
+    pub const fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub fn safe_details(&self) -> &str {
+        &self.safe_details
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NackReasonCategory {
+    Validation,
+    Authorization,
+    Processing,
+    Timeout,
+    PayloadLimit,
+    Backpressure,
+    Transient,
+    Policy,
+    Unknown,
+}
+
+impl NackReasonCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::Authorization => "authorization",
+            Self::Processing => "processing",
+            Self::Timeout => "timeout",
+            Self::PayloadLimit => "payload_limit",
+            Self::Backpressure => "backpressure",
+            Self::Transient => "transient",
+            Self::Policy => "policy",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "validation" => Some(Self::Validation),
+            "authorization" => Some(Self::Authorization),
+            "processing" => Some(Self::Processing),
+            "timeout" => Some(Self::Timeout),
+            "payload_limit" => Some(Self::PayloadLimit),
+            "backpressure" => Some(Self::Backpressure),
+            "transient" => Some(Self::Transient),
+            "policy" => Some(Self::Policy),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryOutcome {
+    delivery_id: String,
+    outcome: CoordinationOutcome,
+    reason: Option<NackReasonCategory>,
+}
+
+impl DeliveryOutcome {
+    pub fn acknowledged(delivery_id: impl Into<String>) -> Self {
+        let delivery_id = delivery_id.into();
+        Self {
+            outcome: CoordinationOutcome::acknowledged(
+                format!("delivery {delivery_id} acknowledged"),
+                1,
+            ),
+            delivery_id,
+            reason: None,
+        }
+    }
+
+    pub fn rejected(delivery_id: impl Into<String>, reason: NackReasonCategory) -> Self {
+        let delivery_id = delivery_id.into();
+        Self {
+            outcome: CoordinationOutcome::rejected(
+                format!("delivery {delivery_id} rejected with reason {}", reason.as_str()),
+                1,
+            ),
+            delivery_id,
+            reason: Some(reason),
+        }
+    }
+
+    pub fn new(
+        delivery_id: impl Into<String>,
+        outcome: CoordinationOutcome,
+        reason: Option<NackReasonCategory>,
+    ) -> Self {
+        Self {
+            delivery_id: delivery_id.into(),
+            outcome,
+            reason,
+        }
+    }
+
+    pub fn delivery_id(&self) -> &str {
+        &self.delivery_id
+    }
+
+    pub const fn kind(&self) -> CoordinationOutcomeKind {
+        self.outcome.kind()
+    }
+
+    pub const fn stage(&self) -> CoordinationStage {
+        self.outcome.stage()
+    }
+
+    pub const fn reason(&self) -> Option<NackReasonCategory> {
+        self.reason
+    }
+
+    pub fn outcome(&self) -> &CoordinationOutcome {
+        &self.outcome
+    }
+
+    pub fn code(&self) -> &str {
+        self.outcome.code()
+    }
+
+    pub fn message(&self) -> &str {
+        self.outcome.message()
+    }
+
+    pub const fn retryable(&self) -> bool {
+        self.outcome.retryable()
+    }
+
+    pub const fn terminal(&self) -> bool {
+        self.outcome.terminal()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {

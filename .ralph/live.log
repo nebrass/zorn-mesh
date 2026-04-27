@@ -1,0 +1,75 @@
+I’ll pick up the next Ralph story, inspect the plan and related coordination code, then drive the change through tests, implementation, and commit.
+
+I’ll load the quick-dev workflow metadata now, then reconcile it with the Ralph loop requirements so the implementation stays autonomous.
+
+The quick-dev customization hook is absent in this checkout, so I’m proceeding with the Ralph loop directly and keeping the workflow autonomous as requested. Next I’m reading the plan, build notes, and repo state, while delegating related-code discovery.
+
+The worktree is already dirty with prior Ralph changes, so I’ll avoid reverting anything and only touch the files needed for Story 2.1. I’m narrowing the large fix plan to the story’s checkbox and acceptance criteria.
+
+I found the Story 2.1 acceptance criteria. I’m now locating the protocol, SDK, broker, and fixture boundaries that need the shared outcome/error contract.
+
+Story 2.1 crosses core/proto/broker/SDK surfaces, not just a new file. I’m going to add failing contract tests first for the shared taxonomy, frames, broker ACK/NACK recording, and Rust/TypeScript SDK observability.
+
+The initial RED tests are in place across Rust core/proto/broker/SDK and TypeScript SDK. I’m running the focused tests now to confirm they fail for the missing contract APIs before implementation.
+
+The RED tests failed on the intended missing APIs, so I’m implementing the shared core contract first, then wiring protocol, broker, daemon, and SDKs to it.
+
+Most relevant spots for Story 2.1:
+
+- `crates/zornmesh-core/src/lib.rs:12-224`
+  - Core contract types:
+    - `COORDINATION_CONTRACT_VERSION`
+    - `CoordinationOutcomeKind` (`Accepted`, `DurableAccepted`, `Acknowledged`, `Rejected`, `Failed`, `TimedOut`, `Retryable`, `Terminal`)
+    - `CoordinationStage`
+    - `CoordinationOutcome` constructors: `accepted`, `durable_accepted`, `acknowledged`, `rejected`, `failed`
+    - `NackReasonCategory`, `ErrorCategory`, `ProductError`
+- `crates/zornmesh-core/tests/coordination_contract.rs:1-165`
+  - Best contract test to mirror/update.
+  - Checks fixture rows for outcome taxonomy + safe nack reasons + stable error categories.
+- `fixtures/coordination/contract.txt:1-28`
+  - Source of truth for outcome / ACK/NACK / error taxonomy:
+    - `outcome|accepted|...`
+    - `outcome|acknowledged|delivery|false|true`
+    - `outcome|rejected|delivery|false|true`
+    - `nack_reason|validation|...`
+- `crates/zornmesh-proto/src/lib.rs:17-248`
+  - Wire contract:
+    - `CLIENT_ACK = 3`, `CLIENT_NACK = 4`
+    - `SERVER_DELIVERY_OUTCOME = 103`
+    - `ClientFrame::{Ack,Nack}`
+    - `ServerFrame::DeliveryOutcome`
+    - `SendResultFrame` carries transport + durable outcomes
+- `crates/zornmesh-proto/tests/coordination_frames.rs:11-118`
+  - Round-trip tests for:
+    - send result with transport/durable outcomes
+    - ACK/NACK client frames
+    - delivery outcome frame
+- `crates/zornmesh-broker/src/lib.rs:81-242`
+  - Main integration point for routing + delivery bookkeeping:
+    - `Broker::publish`
+    - `Broker::record_ack`
+    - `Broker::record_nack`
+    - `PublishReceipt::{transport_outcome,durable_outcome,delivery_attempts}`
+    - `DeliveryAttempt::new` (`delivery_id = correlation_id:attempt`)
+- `crates/zornmesh-broker/tests/coordination_outcomes.rs:8-50`
+  - Existing broker behavior test for:
+    - transport acceptance vs durable failure
+    - ack/nack outcome recording
+    - `NackReasonCategory::Processing`
+- `crates/zornmesh-daemon/src/lib.rs:20-25, 224-260`
+  - Daemon boundary wiring:
+    - uses `Broker`
+    - imports `CoordinationOutcome`, `DeliveryOutcome`
+    - likely place where ACK/NACK frames get routed to broker methods
+- `sdks/typescript/src/index.ts:117-149, 253-355, 751-785`
+  - Current TS SDK only exposes `SendResult` + delivery receive path.
+  - Symbols to inspect for Story 2.1 extension:
+    - `SendResult`, `Delivery`, `ServerFrame`, `decodeServerFrame`, `frameStatus`, `Subscription.recvDelivery`
+- `sdks/typescript/test/sdk.test.ts:154-246`
+  - Important parity test, especially the ACK/NACK expectations already written in the test story.
+
+Likely implementation touchpoints:
+- add/extend ACK/NACK handling in daemon/proto path (`zornmesh-proto`, `zornmesh-daemon`)
+- make broker persist/report delivery outcomes (`record_ack`, `record_nack`)
+- align TS SDK API/tests with the new delivery outcome contract (`ack`, `nack`, `delivery_id`, reason categories).The parallel codebase scan finished after the initial wiring was already underway. I’ll fold in any missed integration points while I continue compiling and fixing the contract implementation.
+

@@ -5,7 +5,10 @@ use std::{
     io::{self, Read, Write},
 };
 
-use zornmesh_core::{Envelope, EnvelopeError};
+use zornmesh_core::{
+    CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome, Envelope,
+    EnvelopeError, NackReasonCategory,
+};
 
 const MAGIC: &[u8; 2] = b"ZM";
 pub const ENVELOPE_WIRE_VERSION: u16 = 1;
@@ -13,19 +16,34 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 const CLIENT_SUBSCRIBE: u8 = 1;
 const CLIENT_PUBLISH: u8 = 2;
+const CLIENT_ACK: u8 = 3;
+const CLIENT_NACK: u8 = 4;
 const SERVER_SEND_RESULT: u8 = 101;
 const SERVER_DELIVERY: u8 = 102;
+const SERVER_DELIVERY_OUTCOME: u8 = 103;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientFrame {
     Subscribe { pattern: String },
     Publish { envelope: Envelope },
+    Ack {
+        delivery_id: String,
+    },
+    Nack {
+        delivery_id: String,
+        reason: NackReasonCategory,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerFrame {
     SendResult(SendResultFrame),
-    Delivery { envelope: Envelope, attempt: u32 },
+    Delivery {
+        delivery_id: String,
+        envelope: Envelope,
+        attempt: u32,
+    },
+    DeliveryOutcome(DeliveryOutcomeFrame),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,14 +51,24 @@ pub struct SendResultFrame {
     status: FrameStatus,
     code: String,
     message: String,
+    outcome: CoordinationOutcome,
+    durable_outcome: Option<CoordinationOutcome>,
 }
 
 impl SendResultFrame {
-    pub fn new(status: FrameStatus, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        status: FrameStatus,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        outcome: CoordinationOutcome,
+        durable_outcome: Option<CoordinationOutcome>,
+    ) -> Self {
         Self {
             status,
             code: code.into(),
             message: message.into(),
+            outcome,
+            durable_outcome,
         }
     }
 
@@ -54,6 +82,47 @@ impl SendResultFrame {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub const fn outcome(&self) -> &CoordinationOutcome {
+        &self.outcome
+    }
+
+    pub const fn durable_outcome(&self) -> Option<&CoordinationOutcome> {
+        self.durable_outcome.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryOutcomeFrame {
+    outcome: DeliveryOutcome,
+}
+
+impl DeliveryOutcomeFrame {
+    pub fn new(
+        delivery_id: impl Into<String>,
+        outcome: CoordinationOutcome,
+        reason: Option<NackReasonCategory>,
+    ) -> Self {
+        Self {
+            outcome: DeliveryOutcome::new(delivery_id, outcome, reason),
+        }
+    }
+
+    pub fn from_delivery_outcome(outcome: DeliveryOutcome) -> Self {
+        Self { outcome }
+    }
+
+    pub const fn outcome(&self) -> &DeliveryOutcome {
+        &self.outcome
+    }
+
+    pub fn delivery_id(&self) -> &str {
+        self.outcome.delivery_id()
+    }
+
+    pub const fn reason(&self) -> Option<NackReasonCategory> {
+        self.outcome.reason()
     }
 }
 
@@ -98,6 +167,18 @@ pub fn write_client_frame<W: Write>(writer: &mut W, frame: &ClientFrame) -> Resu
             body.push(CLIENT_PUBLISH);
             put_envelope_fields(&mut body, envelope);
         }
+        ClientFrame::Ack { delivery_id } => {
+            body.push(CLIENT_ACK);
+            put_bytes(&mut body, delivery_id.as_bytes());
+        }
+        ClientFrame::Nack {
+            delivery_id,
+            reason,
+        } => {
+            body.push(CLIENT_NACK);
+            put_bytes(&mut body, delivery_id.as_bytes());
+            put_bytes(&mut body, reason.as_str().as_bytes());
+        }
     }
     write_frame_body(writer, &body)
 }
@@ -119,6 +200,13 @@ pub fn read_client_frame<R: Read>(reader: &mut R) -> Result<ClientFrame, ProtoEr
         CLIENT_PUBLISH => ClientFrame::Publish {
             envelope: cursor.take_envelope()?,
         },
+        CLIENT_ACK => ClientFrame::Ack {
+            delivery_id: cursor.take_string("delivery_id")?,
+        },
+        CLIENT_NACK => ClientFrame::Nack {
+            delivery_id: cursor.take_string("delivery_id")?,
+            reason: cursor.take_nack_reason("nack_reason")?,
+        },
         other => return Err(ProtoError::UnknownFrameType(other)),
     };
     cursor.expect_end()?;
@@ -139,11 +227,24 @@ pub fn write_server_frame<W: Write>(writer: &mut W, frame: &ServerFrame) -> Resu
             });
             put_bytes(&mut body, result.code.as_bytes());
             put_bytes(&mut body, result.message.as_bytes());
+            put_outcome(&mut body, &result.outcome);
+            put_optional_outcome(&mut body, result.durable_outcome.as_ref());
         }
-        ServerFrame::Delivery { envelope, attempt } => {
+        ServerFrame::Delivery {
+            delivery_id,
+            envelope,
+            attempt,
+        } => {
             body.push(SERVER_DELIVERY);
+            put_bytes(&mut body, delivery_id.as_bytes());
             body.extend_from_slice(&attempt.to_be_bytes());
             put_envelope_fields(&mut body, envelope);
+        }
+        ServerFrame::DeliveryOutcome(outcome) => {
+            body.push(SERVER_DELIVERY_OUTCOME);
+            put_bytes(&mut body, outcome.delivery_id().as_bytes());
+            put_outcome(&mut body, outcome.outcome().outcome());
+            put_optional_nack_reason(&mut body, outcome.reason());
         }
     }
     write_frame_body(writer, &body)
@@ -171,12 +272,21 @@ pub fn read_server_frame<R: Read>(reader: &mut R) -> Result<ServerFrame, ProtoEr
                 status,
                 cursor.take_string("code")?,
                 cursor.take_string("message")?,
+                cursor.take_outcome()?,
+                cursor.take_optional_outcome()?,
             ))
         }
         SERVER_DELIVERY => ServerFrame::Delivery {
+            delivery_id: cursor.take_string("delivery_id")?,
             attempt: cursor.take_u32("attempt")?,
             envelope: cursor.take_envelope()?,
         },
+        SERVER_DELIVERY_OUTCOME => {
+            let delivery_id = cursor.take_string("delivery_id")?;
+            let outcome = cursor.take_outcome()?;
+            let reason = cursor.take_optional_nack_reason()?;
+            ServerFrame::DeliveryOutcome(DeliveryOutcomeFrame::new(delivery_id, outcome, reason))
+        }
         other => return Err(ProtoError::UnknownFrameType(other)),
     };
     cursor.expect_end()?;
@@ -248,6 +358,40 @@ fn put_bytes(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(value);
 }
 
+fn put_bool(output: &mut Vec<u8>, value: bool) {
+    output.push(u8::from(value));
+}
+
+fn put_outcome(output: &mut Vec<u8>, outcome: &CoordinationOutcome) {
+    put_bytes(output, outcome.kind().as_str().as_bytes());
+    put_bytes(output, outcome.stage().as_str().as_bytes());
+    put_bytes(output, outcome.code().as_bytes());
+    put_bytes(output, outcome.message().as_bytes());
+    put_bool(output, outcome.retryable());
+    put_bool(output, outcome.terminal());
+    output.extend_from_slice(&outcome.delivery_attempts().to_be_bytes());
+}
+
+fn put_optional_outcome(output: &mut Vec<u8>, outcome: Option<&CoordinationOutcome>) {
+    match outcome {
+        Some(outcome) => {
+            put_bool(output, true);
+            put_outcome(output, outcome);
+        }
+        None => put_bool(output, false),
+    }
+}
+
+fn put_optional_nack_reason(output: &mut Vec<u8>, reason: Option<NackReasonCategory>) {
+    match reason {
+        Some(reason) => {
+            put_bool(output, true);
+            put_bytes(output, reason.as_str().as_bytes());
+        }
+        None => put_bool(output, false),
+    }
+}
+
 struct Cursor<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -306,6 +450,14 @@ impl<'a> Cursor<'a> {
         ]))
     }
 
+    fn take_bool(&mut self, field: &'static str) -> Result<bool, ProtoError> {
+        match self.take_u8(field)? {
+            0 => Ok(false),
+            1 => Ok(true),
+            other => Err(ProtoError::InvalidBoolean(field, other)),
+        }
+    }
+
     fn take_string(&mut self, field: &'static str) -> Result<String, ProtoError> {
         let bytes = self.take_bytes(field)?;
         String::from_utf8(bytes).map_err(|_| ProtoError::InvalidUtf8(field))
@@ -314,6 +466,59 @@ impl<'a> Cursor<'a> {
     fn take_bytes(&mut self, field: &'static str) -> Result<Vec<u8>, ProtoError> {
         let len = self.take_u32(field)? as usize;
         Ok(self.take_exact(len, field)?.to_vec())
+    }
+
+    fn take_outcome(&mut self) -> Result<CoordinationOutcome, ProtoError> {
+        let kind = self.take_outcome_kind("outcome_kind")?;
+        let stage = self.take_stage("outcome_stage")?;
+        let code = self.take_string("outcome_code")?;
+        let message = self.take_string("outcome_message")?;
+        let retryable = self.take_bool("outcome_retryable")?;
+        let terminal = self.take_bool("outcome_terminal")?;
+        let delivery_attempts = self.take_u32("outcome_delivery_attempts")?;
+        Ok(CoordinationOutcome::new(
+            kind,
+            stage,
+            code,
+            message,
+            retryable,
+            terminal,
+            delivery_attempts,
+        ))
+    }
+
+    fn take_optional_outcome(&mut self) -> Result<Option<CoordinationOutcome>, ProtoError> {
+        if self.take_bool("has_durable_outcome")? {
+            Ok(Some(self.take_outcome()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn take_outcome_kind(
+        &mut self,
+        field: &'static str,
+    ) -> Result<CoordinationOutcomeKind, ProtoError> {
+        let value = self.take_string(field)?;
+        CoordinationOutcomeKind::from_wire(&value).ok_or(ProtoError::UnknownOutcomeKind(value))
+    }
+
+    fn take_stage(&mut self, field: &'static str) -> Result<CoordinationStage, ProtoError> {
+        let value = self.take_string(field)?;
+        CoordinationStage::from_wire(&value).ok_or(ProtoError::UnknownOutcomeStage(value))
+    }
+
+    fn take_nack_reason(&mut self, field: &'static str) -> Result<NackReasonCategory, ProtoError> {
+        let value = self.take_string(field)?;
+        NackReasonCategory::from_wire(&value).ok_or(ProtoError::UnknownNackReason(value))
+    }
+
+    fn take_optional_nack_reason(&mut self) -> Result<Option<NackReasonCategory>, ProtoError> {
+        if self.take_bool("has_nack_reason")? {
+            Ok(Some(self.take_nack_reason("nack_reason")?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn take_exact(&mut self, len: usize, field: &'static str) -> Result<&'a [u8], ProtoError> {
@@ -344,6 +549,10 @@ pub enum ProtoError {
     UnsupportedVersion(u16),
     UnknownFrameType(u8),
     UnknownStatus(u8),
+    UnknownOutcomeKind(String),
+    UnknownOutcomeStage(String),
+    UnknownNackReason(String),
+    InvalidBoolean(&'static str, u8),
     Truncated(&'static str),
     LengthOverflow(&'static str),
     InvalidUtf8(&'static str),
@@ -384,6 +593,16 @@ impl fmt::Display for ProtoError {
             }
             Self::UnknownFrameType(kind) => write!(f, "unknown zornmesh frame type {kind}"),
             Self::UnknownStatus(status) => write!(f, "unknown zornmesh result status {status}"),
+            Self::UnknownOutcomeKind(kind) => write!(f, "unknown zornmesh outcome kind {kind}"),
+            Self::UnknownOutcomeStage(stage) => {
+                write!(f, "unknown zornmesh outcome stage {stage}")
+            }
+            Self::UnknownNackReason(reason) => {
+                write!(f, "unknown zornmesh NACK reason {reason}")
+            }
+            Self::InvalidBoolean(field, value) => {
+                write!(f, "zornmesh frame field {field} has invalid boolean {value}")
+            }
             Self::Truncated(field) => write!(f, "truncated zornmesh frame field {field}"),
             Self::LengthOverflow(field) => {
                 write!(f, "zornmesh frame field {field} length overflowed")

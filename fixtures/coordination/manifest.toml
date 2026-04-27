@@ -1,0 +1,5 @@
+[fixtures]
+owner = "cross-surface coordination contract"
+scope = "coordination outcomes, delivery states, ACK/NACK reasons, and stable error categories"
+status = "active"
+version = "zornmesh.coordination.v1"

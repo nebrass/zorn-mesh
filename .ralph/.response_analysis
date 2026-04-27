@@ -1,0 +1,25 @@
+{
+  "loop_number": 1,
+  "timestamp": "2026-04-27T12:44:59+00:00",
+  "output_file": ".ralph/logs/claude_output_2026-04-27_12-34-39.log",
+  "output_format": "text",
+  "analysis": {
+    "has_completion_signal": false,
+    "is_test_only": false,
+    "is_stuck": false,
+    "has_progress": true,
+    "files_modified": 30,
+    "format_confidence": 30,
+    "confidence_score": 45,
+    "exit_signal": false,
+    "tasks_completed_this_loop": 0,
+    "tests_status": "UNKNOWN",
+    "fix_plan_completed_delta": 1,
+    "has_progress_tracking_mismatch": true,
+    "work_summary": "No work remaining",
+    "output_length": 6641,
+    "has_permission_denials": false,
+    "permission_denial_count": 0,
+    "denied_commands": []
+  }
+}
