@@ -11,8 +11,9 @@ use std::{
 };
 
 use zornmesh_core::{
-    CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome, Envelope,
-    NackReasonCategory, SubjectValidationError, validate_subject, validate_subject_pattern,
+    AgentCard, CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome,
+    Envelope, NackReasonCategory, SubjectValidationError, validate_subject,
+    validate_subject_pattern,
 };
 
 pub const CRATE_BOUNDARY: &str = "zornmesh-broker";
@@ -605,6 +606,36 @@ impl Broker {
             .len()
     }
 
+    pub fn register_agent_card(
+        &self,
+        card: AgentCard,
+    ) -> Result<AgentRegistrationOutcome, BrokerError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let canonical_id = card.canonical_stable_id().to_owned();
+        if let Some(existing) = inner.agent_cards.get(&canonical_id) {
+            if existing.is_compatible_with(&card) {
+                return Ok(AgentRegistrationOutcome::Compatible {
+                    canonical: existing.clone(),
+                });
+            }
+            return Ok(AgentRegistrationOutcome::Conflict {
+                existing: existing.clone(),
+                attempted: card,
+            });
+        }
+        inner.agent_cards.insert(canonical_id, card.clone());
+        Ok(AgentRegistrationOutcome::Registered { canonical: card })
+    }
+
+    pub fn lookup_agent_card(&self, canonical_stable_id: &str) -> Option<AgentCard> {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .agent_cards
+            .get(canonical_stable_id)
+            .cloned()
+    }
+
     pub fn configure_queue_bounds(
         &self,
         queue: impl Into<String>,
@@ -1100,6 +1131,17 @@ struct BrokerInner {
     cancelled_correlations: HashSet<String>,
     queue_bounds: HashMap<String, QueueBoundsConfig>,
     consumer_health: HashMap<String, ConsumerHealthRecord>,
+    agent_cards: HashMap<String, AgentCard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRegistrationOutcome {
+    Registered { canonical: AgentCard },
+    Compatible { canonical: AgentCard },
+    Conflict {
+        existing: AgentCard,
+        attempted: AgentCard,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -23,20 +23,10 @@
 - [x] Story 2.6: Cancel In-Flight Requests and Streams
 - [x] Story 2.7: Resume Durable Subscriptions After Daemon Restart
 - [x] Story 2.8: Surface Backpressure at Queue and Lease Bounds
-  > As an agent author
-  > I want publishers to receive clear backpressure feedback when consumers fall behind
-  > So that agents can slow down, retry later, or route work safely instead of losing messages silently.
-  > AC: Given a subscription reaches its configured queue bound, When a publisher sends additional matching envelopes, Then the broker surfaces a publisher-visible backpressure outcome within 100 ms, And no envelope is silently dropped unless an explicit policy says so and the result reports that policy.
-  > AC: Given a consumer repeatedly misses acknowledgement or lease budgets, When the broker evaluates delivery health, Then the consumer or subscription is marked backpressured, retrying, or failed according to stable state names, And those states are visible through SDK results and diagnostic events.
-  > AC: Given a publisher receives a backpressure outcome, When it inspects the result, Then the result includes safe details: subject/subscription scope, queue bound, lease/ACK threshold, exceeded limit, retryability, suggested delay or remediation category, and whether the send was accepted, rejected, or deferred, And it does not expose secret payload data.
-  > AC: Given routing and memory benchmark tests run under nominal load, When sustained publish/subscribe traffic executes with persistence enabled, Then throughput is >= 5,000 envelopes/sec and daemon resident memory remains <= 256 MiB on the v0.1 reference platform, And benchmark fixtures fail on regressions beyond the documented tolerance.
-  > AC: Given backpressure clears after the consumer catches up or bounds are increased, When new matching envelopes are published, Then delivery resumes without requiring daemon restart, And the state transition is observable for downstream trace/UI surfaces.
-  > AC: Given backpressure conformance tests run, When queue-bound, lease-missed, recovery, explicit-drop-policy, and publisher-timeout scenarios execute, Then outcomes are deterministic, fixture-covered, and compatible with the shared delivery-state taxonomy.
-  > Spec: specs/planning-artifacts/epics.md#story-2-8
 ### Agent Identity, Capabilities, and Host Bridges
 > Goal: Developers can see who is on the mesh, what each agent can do, safely gate high-privilege capabilities, and bridge existing MCP hosts without modifying those hosts.
 
-- [ ] Story 3.1: Register Minimal AgentCard Identity
+- [x] Story 3.1: Register Minimal AgentCard Identity
   > As an agent author
   > I want my agent to register a stable AgentCard-compatible identity with the local mesh
   > So that routing, trace, audit, and future UI surfaces can consistently identify who sent and received work.

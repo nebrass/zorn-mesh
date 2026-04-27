@@ -6,6 +6,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub const AGENT_CARD_PROFILE_VERSION: &str = "agentcard.v1";
+pub const MAX_AGENT_CARD_DISPLAY_NAME_BYTES: usize = 256;
+pub const MAX_AGENT_CARD_STABLE_ID_BYTES: usize = 256;
+
 pub const MAX_SUBJECT_BYTES: usize = 256;
 pub const MAX_SUBJECT_LEVELS: usize = 8;
 pub const MAX_ENVELOPE_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -734,3 +738,227 @@ fn current_unix_ms() -> u64 {
         .as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCardInput {
+    pub profile_version: String,
+    pub stable_id: String,
+    pub display_name: String,
+    pub transport: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCardTransport {
+    Unix,
+    Tcp,
+    InProcess,
+}
+
+impl AgentCardTransport {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unix => "unix",
+            Self::Tcp => "tcp",
+            Self::InProcess => "in_process",
+        }
+    }
+
+    fn from_canonical(value: &str) -> Option<Self> {
+        match value {
+            "unix" => Some(Self::Unix),
+            "tcp" => Some(Self::Tcp),
+            "in_process" => Some(Self::InProcess),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCard {
+    profile_version: String,
+    stable_id: String,
+    canonical_stable_id: String,
+    display_name: String,
+    raw_display_name: String,
+    transport: AgentCardTransport,
+    raw_transport: String,
+    source: String,
+}
+
+impl AgentCard {
+    pub fn from_input(input: AgentCardInput) -> Result<Self, AgentCardError> {
+        let AgentCardInput {
+            profile_version,
+            stable_id,
+            display_name,
+            transport,
+            source,
+        } = input;
+
+        if profile_version.trim() != AGENT_CARD_PROFILE_VERSION {
+            return Err(AgentCardError::new(
+                AgentCardErrorCode::UnsupportedVersion,
+                format!(
+                    "AgentCard profile version '{}' is not supported (expected '{AGENT_CARD_PROFILE_VERSION}')",
+                    profile_version
+                ),
+            ));
+        }
+        if stable_id.trim().is_empty() {
+            return Err(AgentCardError::new(
+                AgentCardErrorCode::MissingStableId,
+                "AgentCard stable_id must not be empty",
+            ));
+        }
+        if stable_id.len() > MAX_AGENT_CARD_STABLE_ID_BYTES {
+            return Err(AgentCardError::new(
+                AgentCardErrorCode::MissingStableId,
+                format!(
+                    "AgentCard stable_id is {} bytes; maximum is {MAX_AGENT_CARD_STABLE_ID_BYTES}",
+                    stable_id.len()
+                ),
+            ));
+        }
+        let trimmed_display = display_name.trim();
+        if trimmed_display.is_empty() {
+            return Err(AgentCardError::new(
+                AgentCardErrorCode::MissingDisplayName,
+                "AgentCard display_name must not be empty",
+            ));
+        }
+        if trimmed_display.len() > MAX_AGENT_CARD_DISPLAY_NAME_BYTES {
+            return Err(AgentCardError::new(
+                AgentCardErrorCode::MissingDisplayName,
+                format!(
+                    "AgentCard display_name is {} bytes; maximum is {MAX_AGENT_CARD_DISPLAY_NAME_BYTES}",
+                    trimmed_display.len()
+                ),
+            ));
+        }
+        let canonical_transport = transport.trim().to_ascii_lowercase();
+        if canonical_transport.is_empty() {
+            return Err(AgentCardError::new(
+                AgentCardErrorCode::MissingTransport,
+                "AgentCard transport must not be empty",
+            ));
+        }
+        let Some(transport_kind) = AgentCardTransport::from_canonical(&canonical_transport) else {
+            return Err(AgentCardError::new(
+                AgentCardErrorCode::UnsupportedTransport,
+                format!("AgentCard transport '{transport}' is not supported"),
+            ));
+        };
+        if source.trim().is_empty() {
+            return Err(AgentCardError::new(
+                AgentCardErrorCode::MissingSource,
+                "AgentCard source must not be empty",
+            ));
+        }
+
+        Ok(Self {
+            profile_version: AGENT_CARD_PROFILE_VERSION.to_owned(),
+            canonical_stable_id: stable_id.to_ascii_lowercase(),
+            stable_id,
+            display_name: trimmed_display.to_owned(),
+            raw_display_name: display_name,
+            transport: transport_kind,
+            raw_transport: transport,
+            source,
+        })
+    }
+
+    pub fn profile_version(&self) -> &str {
+        &self.profile_version
+    }
+
+    pub fn stable_id(&self) -> &str {
+        &self.stable_id
+    }
+
+    pub fn canonical_stable_id(&self) -> &str {
+        &self.canonical_stable_id
+    }
+
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    pub fn raw_display_name(&self) -> &str {
+        &self.raw_display_name
+    }
+
+    pub const fn transport(&self) -> AgentCardTransport {
+        self.transport
+    }
+
+    pub fn raw_transport(&self) -> &str {
+        &self.raw_transport
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn is_compatible_with(&self, other: &AgentCard) -> bool {
+        self.canonical_stable_id == other.canonical_stable_id
+            && self.profile_version == other.profile_version
+            && self.transport == other.transport
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCardErrorCode {
+    UnsupportedVersion,
+    MissingStableId,
+    MissingDisplayName,
+    MissingTransport,
+    MissingSource,
+    UnsupportedTransport,
+    Conflict,
+}
+
+impl AgentCardErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedVersion => "E_AGENT_CARD_UNSUPPORTED_VERSION",
+            Self::MissingStableId => "E_AGENT_CARD_MISSING_STABLE_ID",
+            Self::MissingDisplayName => "E_AGENT_CARD_MISSING_DISPLAY_NAME",
+            Self::MissingTransport => "E_AGENT_CARD_MISSING_TRANSPORT",
+            Self::MissingSource => "E_AGENT_CARD_MISSING_SOURCE",
+            Self::UnsupportedTransport => "E_AGENT_CARD_UNSUPPORTED_TRANSPORT",
+            Self::Conflict => "E_AGENT_CARD_CONFLICT",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCardError {
+    code: AgentCardErrorCode,
+    message: String,
+}
+
+impl AgentCardError {
+    pub fn new(code: AgentCardErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> AgentCardErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for AgentCardError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for AgentCardError {}
