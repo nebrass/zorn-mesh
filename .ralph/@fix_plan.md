@@ -28,17 +28,7 @@
 
 - [x] Story 3.1: Register Minimal AgentCard Identity
 - [x] Story 3.2: Advertise and Resolve Symmetric Capabilities
-  > As an adopter
-  > I want agents to advertise both offered and consumed capabilities
-  > So that I can understand what each agent can do and how agents may interact.
-  > AC: Given an agent registers identity metadata, When it submits offered and consumed capability descriptors, Then the daemon validates capability IDs, versions, schema references, and declared direction, And invalid or unsupported capability descriptors are rejected with stable typed errors.
-  > AC: Given capabilities are accepted, When an adopter lists agents or inspects one agent, Then the output includes the agent identity, offered capabilities, consumed capabilities, versions, and safe summaries, And the output is available through SDK and CLI structured formats.
-  > AC: Given capability schemas are provided for capability input/output contracts, When the daemon stores or resolves the capability, Then schema metadata is associated with the capability without generating the canonical internal envelope model from it, And TypeBox/JSON Schema ownership remains distinct from Protobuf internal model ownership.
-  > AC: Given an agent updates its capability declaration during a session, When the update is valid, Then the registry updates deterministically and emits an observable capability-change event, And invalid updates do not partially mutate the registry.
-  > AC: Given capability schema support is introduced, When capability fixtures are created, Then the supported schema dialect, allowed annotation subset, secret-field annotation form, versioning rules, and unsupported-schema errors are pinned in the central capability fixture manifest, And schema fixtures run in the daemon, Rust SDK, TypeScript SDK, CLI, and bridge CI matrix.
-  > AC: Given capability resolution conformance tests run, When offered-only, consumed-only, both-directions, invalid-schema-reference, and update scenarios execute, Then resolved capability output is deterministic across Rust SDK, TypeScript SDK, CLI, and fixture expectations.
-  > Spec: specs/planning-artifacts/epics.md#story-3-2
-- [ ] Story 3.3: Gate High-Privilege Capabilities by Local Allowlist
+- [x] Story 3.3: Gate High-Privilege Capabilities by Local Allowlist
   > As an operator
   > I want high-privilege capabilities to be denied unless explicitly allow-listed
   > So that one local agent cannot silently advertise or invoke dangerous actions.

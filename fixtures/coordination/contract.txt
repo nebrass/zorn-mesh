@@ -118,3 +118,9 @@ capability|error|E_CAPABILITY_INVALID_ID
 capability|error|E_CAPABILITY_INVALID_VERSION
 capability|error|E_CAPABILITY_INVALID_SCHEMA
 capability|error|E_CAPABILITY_AGENT_NOT_FOUND
+authorization|decision|allowed
+authorization|decision|denied
+authorization|decision|revoked
+authorization|reason|not_allowlisted
+authorization|reason|capability_revoked
+authorization|error|E_AUTHORIZATION_DENIED

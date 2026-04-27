@@ -641,7 +641,42 @@ impl Broker {
         }
         let mut offered = Vec::new();
         let mut consumed = Vec::new();
+        let mut denied = Vec::new();
+        let mut authorization_events = Vec::new();
         for descriptor in descriptors {
+            let cap_id = descriptor.capability_id().to_owned();
+            let cap_version = descriptor.version().to_owned();
+            let high_priv = inner
+                .high_privilege_capabilities
+                .contains(&(cap_id.clone(), cap_version.clone()));
+            if high_priv {
+                let allowlisted = inner.high_privilege_allowlist.contains(&(
+                    agent_canonical_id.to_owned(),
+                    cap_id.clone(),
+                    cap_version.clone(),
+                ));
+                if !allowlisted {
+                    denied.push(DeniedCapability {
+                        descriptor,
+                        reason: AuthorizationDenialReason::NotAllowlisted,
+                    });
+                    authorization_events.push(AuthorizationEvent {
+                        agent_canonical_id: agent_canonical_id.to_owned(),
+                        capability_id: cap_id,
+                        capability_version: cap_version,
+                        decision: AuthorizationDecision::Denied {
+                            reason: AuthorizationDenialReason::NotAllowlisted,
+                        },
+                    });
+                    continue;
+                }
+                authorization_events.push(AuthorizationEvent {
+                    agent_canonical_id: agent_canonical_id.to_owned(),
+                    capability_id: cap_id.clone(),
+                    capability_version: cap_version.clone(),
+                    decision: AuthorizationDecision::Allowed,
+                });
+            }
             match descriptor.direction() {
                 CapabilityDirection::Offered => offered.push(descriptor),
                 CapabilityDirection::Consumed => consumed.push(descriptor),
@@ -670,11 +705,93 @@ impl Broker {
             offered_count: offered.len(),
             consumed_count: consumed.len(),
         });
+        inner.authorization_events.extend(authorization_events);
         Ok(CapabilityDeclarationOutcome::Updated {
             offered,
             consumed,
+            denied,
             change_kind,
         })
+    }
+
+    pub fn mark_capability_high_privilege(&self, capability_id: &str, version: &str) {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        inner
+            .high_privilege_capabilities
+            .insert((capability_id.to_owned(), version.to_owned()));
+    }
+
+    pub fn allowlist_high_privilege(&self, entry: HighPrivilegeAllowlistEntry) {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        inner.high_privilege_allowlist.insert((
+            entry.agent_canonical_id,
+            entry.capability_id,
+            entry.capability_version,
+        ));
+    }
+
+    pub fn revoke_high_privilege(
+        &self,
+        agent_canonical_id: &str,
+        capability_id: &str,
+        version: &str,
+    ) {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let key = (
+            agent_canonical_id.to_owned(),
+            capability_id.to_owned(),
+            version.to_owned(),
+        );
+        if inner.high_privilege_allowlist.remove(&key) {
+            inner.authorization_events.push(AuthorizationEvent {
+                agent_canonical_id: agent_canonical_id.to_owned(),
+                capability_id: capability_id.to_owned(),
+                capability_version: version.to_owned(),
+                decision: AuthorizationDecision::Revoked,
+            });
+        }
+    }
+
+    pub fn authorize_invocation(
+        &self,
+        agent_canonical_id: &str,
+        capability_id: &str,
+        version: &str,
+    ) -> AuthorizationDecision {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let high_priv = inner
+            .high_privilege_capabilities
+            .contains(&(capability_id.to_owned(), version.to_owned()));
+        if !high_priv {
+            return AuthorizationDecision::Allowed;
+        }
+        let allowlisted = inner.high_privilege_allowlist.contains(&(
+            agent_canonical_id.to_owned(),
+            capability_id.to_owned(),
+            version.to_owned(),
+        ));
+        let decision = if allowlisted {
+            AuthorizationDecision::Allowed
+        } else {
+            AuthorizationDecision::Denied {
+                reason: AuthorizationDenialReason::NotAllowlisted,
+            }
+        };
+        inner.authorization_events.push(AuthorizationEvent {
+            agent_canonical_id: agent_canonical_id.to_owned(),
+            capability_id: capability_id.to_owned(),
+            capability_version: version.to_owned(),
+            decision: decision.clone(),
+        });
+        decision
+    }
+
+    pub fn authorization_events(&self) -> Vec<AuthorizationEvent> {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .authorization_events
+            .clone()
     }
 
     pub fn inspect_agent_capabilities(
@@ -1222,6 +1339,9 @@ struct BrokerInner {
     agent_cards: HashMap<String, AgentCard>,
     capabilities: HashMap<String, AgentCapabilities>,
     capability_change_events: Vec<CapabilityChangeEvent>,
+    high_privilege_capabilities: HashSet<(String, String)>,
+    high_privilege_allowlist: HashSet<(String, String, String)>,
+    authorization_events: Vec<AuthorizationEvent>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1242,8 +1362,104 @@ pub enum CapabilityDeclarationOutcome {
     Updated {
         offered: Vec<CapabilityDescriptor>,
         consumed: Vec<CapabilityDescriptor>,
+        denied: Vec<DeniedCapability>,
         change_kind: CapabilityChangeKind,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeniedCapability {
+    descriptor: CapabilityDescriptor,
+    reason: AuthorizationDenialReason,
+}
+
+impl DeniedCapability {
+    pub const fn descriptor(&self) -> &CapabilityDescriptor {
+        &self.descriptor
+    }
+
+    pub const fn reason(&self) -> AuthorizationDenialReason {
+        self.reason
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HighPrivilegeAllowlistEntry {
+    agent_canonical_id: String,
+    capability_id: String,
+    capability_version: String,
+}
+
+impl HighPrivilegeAllowlistEntry {
+    pub fn new(
+        agent_canonical_id: impl Into<String>,
+        capability_id: impl Into<String>,
+        capability_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            agent_canonical_id: agent_canonical_id.into(),
+            capability_id: capability_id.into(),
+            capability_version: capability_version.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizationDecision {
+    Allowed,
+    Denied { reason: AuthorizationDenialReason },
+    Revoked,
+}
+
+impl AuthorizationDecision {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Denied { .. } => "denied",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorizationDenialReason {
+    NotAllowlisted,
+    CapabilityRevoked,
+}
+
+impl AuthorizationDenialReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAllowlisted => "not_allowlisted",
+            Self::CapabilityRevoked => "capability_revoked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationEvent {
+    agent_canonical_id: String,
+    capability_id: String,
+    capability_version: String,
+    decision: AuthorizationDecision,
+}
+
+impl AuthorizationEvent {
+    pub fn agent_canonical_id(&self) -> &str {
+        &self.agent_canonical_id
+    }
+
+    pub fn capability_id(&self) -> &str {
+        &self.capability_id
+    }
+
+    pub fn capability_version(&self) -> &str {
+        &self.capability_version
+    }
+
+    pub const fn decision(&self) -> &AuthorizationDecision {
+        &self.decision
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

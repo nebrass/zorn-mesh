@@ -53,6 +53,7 @@ fn declaring_offered_and_consumed_capabilities_associates_with_agent() {
         offered,
         consumed,
         change_kind,
+        ..
     } = outcome;
     assert_eq!(offered.len(), 1);
     assert_eq!(consumed.len(), 1);
