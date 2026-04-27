@@ -1,0 +1,15 @@
+[package]
+name = "zornmesh-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zornmesh-core = { path = "../zornmesh-core" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

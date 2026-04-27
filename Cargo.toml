@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/zornmesh-core",
+    "crates/zornmesh-proto",
+    "crates/zornmesh-store",
+    "crates/zornmesh-broker",
+    "crates/zornmesh-rpc",
+    "crates/zornmesh-sdk",
+    "crates/zornmesh-daemon",
+    "crates/zornmesh-cli",
+    "crates/zornmesh-xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/nebrass/zorn-mesh"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

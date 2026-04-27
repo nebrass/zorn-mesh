@@ -1,0 +1,19 @@
+[package]
+name = "zornmesh-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zornmesh-sdk = { path = "../zornmesh-sdk" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "zornmesh"
+path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,4 @@
+[fixtures]
+owner = "cross-surface error contract"
+scope = "stable error-code and diagnostic fixtures"
+status = "scaffold"

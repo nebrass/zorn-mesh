@@ -1,0 +1,10 @@
+zornmesh trace
+Inspect trace and fixture scaffolding.
+
+Usage: zornmesh trace <COMMAND>
+
+Commands:
+  help    Print trace help
+
+Options:
+  -h, --help  Print help

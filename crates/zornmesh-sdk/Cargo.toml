@@ -1,0 +1,17 @@
+[package]
+name = "zornmesh-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zornmesh-core = { path = "../zornmesh-core" }
+zornmesh-proto = { path = "../zornmesh-proto" }
+zornmesh-rpc = { path = "../zornmesh-rpc" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,4 @@
+[conformance]
+owner = "cross-language contract tests"
+scope = "fixture manifests and smoke validation"
+status = "scaffold"

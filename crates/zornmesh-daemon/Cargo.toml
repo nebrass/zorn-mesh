@@ -1,0 +1,17 @@
+[package]
+name = "zornmesh-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zornmesh-broker = { path = "../zornmesh-broker" }
+zornmesh-rpc = { path = "../zornmesh-rpc" }
+zornmesh-store = { path = "../zornmesh-store" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,4 @@
+[test_infra]
+owner = "shared workspace test harness"
+scope = "smoke validation and future integration helpers"
+status = "scaffold"

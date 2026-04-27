@@ -1,0 +1,12 @@
+zornmesh 0.1.0
+Local-first agent mesh coordination.
+
+Usage: zornmesh [OPTIONS] <COMMAND>
+
+Commands:
+  trace    Inspect trace and fixture scaffolding
+  help     Print command help
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
