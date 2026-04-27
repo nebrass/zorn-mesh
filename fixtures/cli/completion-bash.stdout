@@ -1,0 +1,37 @@
+_zornmesh()
+{
+    local cur prev commands global_opts daemon_commands shells formats
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="daemon doctor agents trace completion help"
+    daemon_commands="status shutdown help"
+    shells="bash zsh fish"
+    formats="human json ndjson"
+    global_opts="--config --socket --output --non-interactive --help -h --version -V"
+
+    case "${prev}" in
+        --output)
+            COMPREPLY=( $(compgen -W "${formats}" -- "${cur}") )
+            return 0
+            ;;
+        --config|--socket)
+            COMPREPLY=( $(compgen -f -- "${cur}") )
+            return 0
+            ;;
+        completion)
+            COMPREPLY=( $(compgen -W "${shells}" -- "${cur}") )
+            return 0
+            ;;
+    esac
+
+    case "${COMP_WORDS[1]}" in
+        daemon)
+            COMPREPLY=( $(compgen -W "${daemon_commands} ${global_opts}" -- "${cur}") )
+            ;;
+        *)
+            COMPREPLY=( $(compgen -W "${commands} ${global_opts}" -- "${cur}") )
+            ;;
+    esac
+}
+complete -F _zornmesh zornmesh

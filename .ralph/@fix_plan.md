@@ -63,7 +63,7 @@
   > AC: Given any current or future subcommand is added after this story, When global CLI contract tests run, Then the subcommand honors global flag parsing, stdout/stderr separation, non-interactive fail-fast, `NO_COLOR`/TTY behavior, and stable exit-code mapping, And unsupported output formats fail with typed errors rather than falling back silently.
   > AC: Given the same setting is provided by defaults, config file, environment variable, and CLI flag, When effective configuration is resolved for any subcommand, Then precedence is deterministic and fixture-covered as defaults < config file < environment < CLI flag, And human, JSON, and error outputs report the effective value source only when safe.
   > Spec: specs/planning-artifacts/epics.md#story-1-6
-- [ ] Story 1.7: Provide Doctor, Shutdown, and Shell Completion Basics
+- [x] Story 1.7: Provide Doctor, Shutdown, and Shell Completion Basics
   > As an operator
   > I want first-day diagnostics, graceful shutdown behavior, and shell completions
   > So that I can understand and operate the local mesh without inspecting runtime files by hand.

@@ -47,6 +47,7 @@ cd sdks/typescript && bun test
 - Story 1.4 adds first local pub/sub routing: Rust SDK clients use `Mesh::subscribe()` and `Mesh::publish()` over the trusted UDS, with shared subject-routing fixtures under `fixtures/pubsub`.
 - Story 1.5 adds Bun TypeScript SDK parity: `connect()`, `publish()`, and `subscribe()` use the same local UDS frame contract, connect taxonomy, and first-message expectations as the Rust SDK.
 - Story 1.6 stabilizes CLI read contracts: read commands keep success on stdout, failures on stderr with product error codes, JSON under `zornmesh.cli.read.v1`, and streaming events as NDJSON under `zornmesh.cli.event.v1`.
+- Story 1.7 adds first-day operator basics: `zornmesh doctor` reports required diagnostic evidence with stable degraded/unavailable statuses, `daemon shutdown --non-interactive` reports documented outcomes, and `completion <bash|zsh|fish>` emits shell completions.
 
 ## Feature Development Quality Standards
 

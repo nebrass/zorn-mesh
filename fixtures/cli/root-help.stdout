@@ -8,6 +8,7 @@ Commands:
   agents   List and inspect registered agents
   doctor   Run first-day local mesh diagnostics
   trace    Inspect trace and fixture scaffolding
+  completion  Generate shell completions
   help     Print command help
 
 Options:

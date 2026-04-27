@@ -1,5 +1,7 @@
 use std::{
     fs,
+    os::unix::{fs::PermissionsExt, net::UnixListener},
+    path::PathBuf,
     process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -65,6 +67,29 @@ fn assert_read_json_contract(value: &serde_json::Value, command: &str) {
     assert_eq!(value["status"], "ok");
     assert!(value["data"].is_object(), "data must be an object");
     assert!(value["warnings"].is_array(), "warnings must be an array");
+}
+
+fn unique_socket(name: &str) -> PathBuf {
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    std::env::temp_dir()
+        .join(format!(
+            "zornmesh-cli-contract-{name}-{}-{id}",
+            std::process::id()
+        ))
+        .join("zorn.sock")
+}
+
+fn healthy_socket(name: &str) -> (UnixListener, PathBuf) {
+    let path = unique_socket(name);
+    let parent = path.parent().expect("socket path has parent");
+    fs::create_dir_all(parent).expect("socket parent created");
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).expect("socket parent secured");
+    let listener = UnixListener::bind(&path).expect("socket listener binds");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("socket secured");
+    (listener, path)
 }
 
 fn temp_config(contents: &str) -> std::path::PathBuf {
@@ -154,7 +179,7 @@ fn read_commands_emit_stable_human_stdout() {
         (
             vec!["doctor", "--socket", TEST_SOCKET],
             format!(
-                "zornmesh doctor\nstatus: degraded\ndaemon: unreachable\nsocket: {TEST_SOCKET}\nsocket_source: cli\nagent_registry: unavailable\nremediation: start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\n"
+                "zornmesh doctor\nstatus: degraded\ndaemon: unreachable\nversion: 0.1.0\nsocket: {TEST_SOCKET}\nsocket_source: cli\nsocket_ownership: unavailable\nsocket_permissions: unavailable\nschema: available (zornmesh.cli.doctor.v1)\notel: unavailable\nsignature: unverifiable\nsbom: unavailable\ntrust: degraded\nshutdown: unavailable\nremediation: start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\n"
             ),
         ),
     ];
@@ -185,7 +210,7 @@ fn json_read_commands_emit_only_stable_json_stdout() {
         (
             vec!["doctor", "--socket", TEST_SOCKET, "--output", "json"],
             format!(
-                "{{\"schema_version\":\"zornmesh.cli.read.v1\",\"command\":\"doctor\",\"status\":\"ok\",\"data\":{{\"health\":\"degraded\",\"daemon_state\":\"unreachable\",\"socket_path\":\"{TEST_SOCKET}\",\"socket_source\":\"cli\",\"agent_registry\":\"unavailable\"}},\"warnings\":[{{\"code\":\"W_AGENT_REGISTRY_UNAVAILABLE\",\"message\":\"agent registry is not available in this scaffold\"}}]}}\n"
+                "{{\"schema_version\":\"zornmesh.cli.read.v1\",\"command\":\"doctor\",\"status\":\"ok\",\"data\":{{\"health\":\"degraded\",\"diagnostics_schema\":\"zornmesh.cli.doctor.v1\",\"daemon\":{{\"status\":\"unreachable\",\"version\":\"0.1.0\",\"socket_path\":\"{TEST_SOCKET}\",\"socket_source\":\"cli\",\"remediation\":\"start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\"}},\"socket\":{{\"ownership\":\"unavailable\",\"permissions\":\"unavailable\"}},\"schema\":{{\"status\":\"available\",\"version\":\"zornmesh.cli.doctor.v1\"}},\"otel\":{{\"status\":\"unavailable\",\"endpoint\":\"unconfigured\"}},\"signature\":{{\"status\":\"unverifiable\",\"identity\":\"unavailable\"}},\"sbom\":{{\"status\":\"unavailable\",\"identity\":\"unavailable\"}},\"trust\":{{\"status\":\"degraded\",\"posture\":\"daemon-unreachable\"}},\"shutdown\":{{\"status\":\"unavailable\",\"in_flight_work\":\"unavailable\"}}}},\"warnings\":[{{\"code\":\"W_DAEMON_UNREACHABLE\",\"message\":\"daemon is unreachable; start the daemon or choose another socket\"}},{{\"code\":\"W_OTEL_UNAVAILABLE\",\"message\":\"OTel reachability evidence is not configured for this build\"}},{{\"code\":\"W_SIGNATURE_UNVERIFIABLE\",\"message\":\"build signature evidence is unavailable for this build\"}},{{\"code\":\"W_SBOM_UNAVAILABLE\",\"message\":\"SBOM identity evidence is unavailable for this build\"}}]}}\n"
             ),
         ),
     ];
@@ -225,14 +250,128 @@ fn streaming_json_mode_emits_ndjson_events() {
 }
 
 #[test]
-fn non_interactive_prompt_fail_fast_has_stable_stderr() {
-    let output = zornmesh(&["daemon", "shutdown", "--non-interactive"]);
+fn doctor_healthy_json_reports_required_diagnostic_categories() {
+    let (_listener, path) = healthy_socket("doctor-healthy");
+    let socket = path.to_str().expect("socket path is utf8");
+    let output = zornmesh(&["doctor", "--socket", socket, "--output", "json"]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "doctor");
+    let data = &value["data"];
+    assert_eq!(data["health"], "degraded");
+    assert_eq!(data["diagnostics_schema"], "zornmesh.cli.doctor.v1");
+    assert_eq!(data["daemon"]["status"], "ready");
+    assert_eq!(data["daemon"]["version"], "0.1.0");
+    assert_eq!(data["daemon"]["socket_path"], socket);
+    assert_eq!(data["socket"]["ownership"], "current-user");
+    assert_eq!(data["socket"]["permissions"], "private");
+    assert_eq!(data["schema"]["status"], "available");
+    assert_eq!(data["otel"]["status"], "unavailable");
+    assert_eq!(data["signature"]["status"], "unverifiable");
+    assert_eq!(data["sbom"]["status"], "unavailable");
+    assert_eq!(data["trust"]["status"], "trusted");
+    assert_eq!(data["shutdown"]["status"], "idle");
+    assert_eq!(
+        value["warnings"].as_array().expect("warnings array").len(),
+        3
+    );
+}
+
+#[test]
+fn doctor_unsafe_socket_reports_blocked_trust_status() {
+    let (_listener, path) = healthy_socket("doctor-unsafe");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).expect("socket made unsafe");
+    let socket = path.to_str().expect("socket path is utf8");
+    let output = zornmesh(&["doctor", "--socket", socket, "--output", "json"]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    let data = &value["data"];
+    assert_eq!(data["daemon"]["status"], "blocked");
+    assert_eq!(data["socket"]["ownership"], "current-user");
+    assert_eq!(data["socket"]["permissions"], "unsafe");
+    assert_eq!(data["trust"]["status"], "unsafe");
+    assert_eq!(data["trust"]["posture"], "unsafe-socket");
+    assert_eq!(value["warnings"][0]["code"], "W_LOCAL_TRUST_UNSAFE");
+}
+
+#[test]
+fn daemon_shutdown_non_interactive_reports_unreachable_status() {
+    let output = zornmesh(&[
+        "daemon",
+        "shutdown",
+        "--socket",
+        TEST_SOCKET,
+        "--non-interactive",
+    ]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "zornmesh daemon shutdown\nstate: unreachable\noutcome: not-running\nsocket: {TEST_SOCKET}\nshutdown_budget_ms: 10000\nin_flight_work: unavailable\nremediation: start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\n"
+        )
+    );
+    assert_no_ansi(&stdout(&output));
+}
+
+#[test]
+fn daemon_shutdown_json_reports_stable_outcome() {
+    let output = zornmesh(&[
+        "daemon",
+        "shutdown",
+        "--socket",
+        TEST_SOCKET,
+        "--non-interactive",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "{{\"schema_version\":\"zornmesh.cli.read.v1\",\"command\":\"daemon shutdown\",\"status\":\"ok\",\"data\":{{\"daemon_state\":\"unreachable\",\"outcome\":\"not-running\",\"socket_path\":\"{TEST_SOCKET}\",\"shutdown_budget_ms\":10000,\"in_flight_work\":\"unavailable\",\"remediation\":\"start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\"}},\"warnings\":[]}}\n"
+        )
+    );
+}
+
+#[test]
+fn supported_shell_completion_contains_initial_commands_and_flags() {
+    for shell in ["bash", "zsh", "fish"] {
+        let output = zornmesh(&["completion", shell]);
+
+        assert_success(&output);
+        let text = stdout(&output);
+        assert_no_ansi(&text);
+        assert!(text.contains("zornmesh"), "completion names binary");
+        for token in [
+            "daemon",
+            "doctor",
+            "agents",
+            "help",
+            "--output",
+            "--socket",
+            "--non-interactive",
+        ] {
+            assert!(
+                text.contains(token),
+                "{shell} completion must include {token}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_shell_completion_fails_without_stdout() {
+    let output = zornmesh(&["completion", "powershell"]);
 
     assert_eq!(output.status.code(), Some(64));
     assert!(output.stdout.is_empty());
     assert_eq!(
         stderr(&output),
-        "E_NON_INTERACTIVE_PROMPT_REQUIRED: daemon shutdown requires confirmation; rerun interactively or wait for Story 1.7 shutdown support\n"
+        "E_UNSUPPORTED_SHELL: unsupported shell 'powershell'; supported shells: bash, zsh, fish\n"
     );
 }
 

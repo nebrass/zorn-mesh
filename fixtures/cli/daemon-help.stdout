@@ -5,7 +5,7 @@ Usage: zornmesh daemon [OPTIONS] [COMMAND]
 
 Commands:
   status    Inspect daemon reachability without starting it
-  shutdown  Stop the daemon after confirmation (Story 1.7)
+  shutdown  Request graceful daemon shutdown
   help      Print daemon help
 
 Options:
