@@ -1008,6 +1008,7 @@ pub struct CapabilityDescriptor {
     summary: String,
     schema_dialect: CapabilitySchemaDialect,
     schema_ref: String,
+    secret_fields: Vec<String>,
 }
 
 impl CapabilityDescriptor {
@@ -1023,6 +1024,7 @@ impl CapabilityDescriptor {
             summary: String::new(),
             schema_dialect: CapabilitySchemaDialect::TypeBox,
             schema_ref: String::new(),
+            secret_fields: Vec::new(),
         }
     }
 
@@ -1049,6 +1051,26 @@ impl CapabilityDescriptor {
     pub fn schema_ref(&self) -> &str {
         &self.schema_ref
     }
+
+    pub fn secret_fields(&self) -> &[String] {
+        &self.secret_fields
+    }
+
+    pub fn safe_summary_pairs(
+        &self,
+        values: &[(&str, &str)],
+    ) -> Vec<(String, String)> {
+        values
+            .iter()
+            .map(|(k, v)| {
+                if self.secret_fields.iter().any(|f| f == k) {
+                    ((*k).to_owned(), REDACTION_MARKER.to_owned())
+                } else {
+                    ((*k).to_owned(), (*v).to_owned())
+                }
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1059,6 +1081,7 @@ pub struct CapabilityDescriptorBuilder {
     summary: String,
     schema_dialect: CapabilitySchemaDialect,
     schema_ref: String,
+    secret_fields: Vec<String>,
 }
 
 impl CapabilityDescriptorBuilder {
@@ -1074,6 +1097,11 @@ impl CapabilityDescriptorBuilder {
     ) -> Self {
         self.schema_dialect = dialect;
         self.schema_ref = schema_ref.into();
+        self
+    }
+
+    pub fn with_secret_field(mut self, field: impl Into<String>) -> Self {
+        self.secret_fields.push(field.into());
         self
     }
 
@@ -1133,6 +1161,14 @@ impl CapabilityDescriptorBuilder {
                 ),
             ));
         }
+        for field in &self.secret_fields {
+            if field.trim().is_empty() {
+                return Err(CapabilityDescriptorError::new(
+                    CapabilityDescriptorErrorCode::InvalidSchema,
+                    "capability secret field annotations must not be empty",
+                ));
+            }
+        }
         Ok(CapabilityDescriptor {
             capability_id: self.capability_id,
             version: self.version,
@@ -1140,6 +1176,7 @@ impl CapabilityDescriptorBuilder {
             summary: self.summary,
             schema_dialect: self.schema_dialect,
             schema_ref: self.schema_ref,
+            secret_fields: self.secret_fields,
         })
     }
 }
@@ -1191,3 +1228,154 @@ impl fmt::Display for CapabilityDescriptorError {
 }
 
 impl std::error::Error for CapabilityDescriptorError {}
+
+pub const REDACTION_MARKER: &str = "[REDACTED]";
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretValue(String);
+
+impl SecretValue {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SecretValue({REDACTION_MARKER})")
+    }
+}
+
+impl fmt::Display for SecretValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(REDACTION_MARKER)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactionPolicy {
+    secret_fields: Vec<String>,
+}
+
+impl RedactionPolicy {
+    pub fn new<S, I>(fields: I) -> Result<Self, RedactionError>
+    where
+        S: Into<String>,
+        I: IntoIterator<Item = S>,
+    {
+        let collected: Vec<String> = fields.into_iter().map(Into::into).collect();
+        if collected.is_empty() {
+            return Err(RedactionError::new(
+                RedactionErrorCode::EmptyFieldList,
+                "redaction policy must list at least one secret field",
+            ));
+        }
+        for field in &collected {
+            if field.trim().is_empty() {
+                return Err(RedactionError::new(
+                    RedactionErrorCode::InvalidField,
+                    "redaction policy entries must not be empty",
+                ));
+            }
+        }
+        Ok(Self {
+            secret_fields: collected,
+        })
+    }
+
+    pub fn secret_fields(&self) -> &[String] {
+        &self.secret_fields
+    }
+
+    pub fn is_secret(&self, field: &str) -> bool {
+        self.secret_fields.iter().any(|s| s == field)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Redactor {
+    policy: RedactionPolicy,
+}
+
+impl Redactor {
+    pub const fn new(policy: RedactionPolicy) -> Self {
+        Self { policy }
+    }
+
+    pub fn policy(&self) -> &RedactionPolicy {
+        &self.policy
+    }
+
+    pub fn redact_pairs(&self, pairs: &[(String, String)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| {
+                if self.policy.is_secret(k) {
+                    (k.clone(), REDACTION_MARKER.to_owned())
+                } else {
+                    (k.clone(), v.clone())
+                }
+            })
+            .collect()
+    }
+
+    pub fn redact_text(&self, text: &str, secret_pairs: &[(&str, &str)]) -> String {
+        let mut output = text.to_owned();
+        for (field, value) in secret_pairs {
+            if self.policy.is_secret(field) && !value.is_empty() {
+                output = output.replace(value, REDACTION_MARKER);
+            }
+        }
+        output
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactionErrorCode {
+    EmptyFieldList,
+    InvalidField,
+}
+
+impl RedactionErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyFieldList => "E_REDACTION_EMPTY_FIELD_LIST",
+            Self::InvalidField => "E_REDACTION_INVALID_FIELD",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactionError {
+    code: RedactionErrorCode,
+    message: String,
+}
+
+impl RedactionError {
+    pub fn new(code: RedactionErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> RedactionErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for RedactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for RedactionError {}

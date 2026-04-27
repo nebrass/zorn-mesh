@@ -30,16 +30,7 @@
 - [x] Story 3.2: Advertise and Resolve Symmetric Capabilities
 - [x] Story 3.3: Gate High-Privilege Capabilities by Local Allowlist
 - [x] Story 3.4: Enforce Local Socket Permission Model on Agent Connections
-  > As an operator
-  > I want the mesh to reject agent connections that do not satisfy the local socket trust model
-  > So that cross-user or unsafe local processes cannot join the bus by accident.
-  > AC: Given an agent connects over the local IPC transport, When the daemon evaluates peer credentials and socket ownership, Then the connection is accepted only when it matches the invoking user/session trust boundary, And accepted connection metadata is associated with the registered agent identity.
-  > AC: Given socket file mode, ownership, or peer credentials do not satisfy the trust model, When an agent attempts to connect or register, Then the daemon rejects the connection or registration with a stable permission error, And no agent identity or capability state is created from that attempt.
-  > AC: Given an unsupported or unsafe socket form is used, When the daemon detects the unsafe form during startup or connection handling, Then it refuses the unsafe path with remediation text, And the refusal is visible through CLI/doctor diagnostics.
-  > AC: Given a valid connection later loses its trusted transport state or disconnects unexpectedly, When the daemon observes the disconnect, Then agent presence is updated deterministically, And future routing does not treat the disconnected agent as connected.
-  > AC: Given local trust conformance tests run, When valid user, wrong user, unsafe permission, unsupported socket form, and disconnect scenarios execute, Then accepted/rejected outcomes are deterministic and no unauthorized agent receives mesh traffic.
-  > Spec: specs/planning-artifacts/epics.md#story-3-4
-- [ ] Story 3.5: Redact Secrets Across Identity, Capability, and Delivery Surfaces
+- [x] Story 3.5: Redact Secrets Across Identity, Capability, and Delivery Surfaces
   > As an adopter
   > I want fields marked secret to stay redacted across all observable surfaces
   > So that agent coordination does not leak credentials or sensitive payload fragments.
