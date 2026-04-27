@@ -31,17 +31,7 @@
 - [x] Story 3.3: Gate High-Privilege Capabilities by Local Allowlist
 - [x] Story 3.4: Enforce Local Socket Permission Model on Agent Connections
 - [x] Story 3.5: Redact Secrets Across Identity, Capability, and Delivery Surfaces
-  > As an adopter
-  > I want fields marked secret to stay redacted across all observable surfaces
-  > So that agent coordination does not leak credentials or sensitive payload fragments.
-  > AC: Given an SDK caller marks a field or value as secret using the supported language mechanism, When the field flows through identity metadata, capability payloads, delivery results, errors, logs, traces, audit records, dead letters, inspect output, or CLI output, Then the raw secret value never appears, And a stable redaction marker is used where display is necessary.
-  > AC: Given a secret appears inside nested payload data or structured safe details, When serialization, validation, logging, or error mapping occurs, Then redaction is applied before the value reaches any external or persisted diagnostic surface, And redaction does not break schema validation of the non-secret surrounding structure.
-  > AC: Given a capability schema declares secret fields, When the daemon validates and stores capability metadata, Then the schema's secret annotations are preserved for downstream redaction decisions, And safe summaries omit or redact those fields.
-  > AC: Given an unsupported or ambiguous secret marker is used, When the SDK or daemon encounters it, Then the system returns a stable validation error or treats the value as secret according to the documented safe default, And the behavior is fixture-covered.
-  > AC: Given the shared redaction contract is introduced, When identity, capability, delivery, trace, audit, inspect, error, and CLI fixtures are created, Then supported secret markers, stable replacement text, nested redaction behavior, and ambiguous-marker defaults are pinned centrally, And every surface test consumes the same redaction fixture values and fails on raw secret emission.
-  > AC: Given redaction conformance tests run, When Rust SDK, TypeScript SDK, daemon logs, audit records, CLI inspect, metrics/traces, and dead-letter scenarios execute, Then no raw fixture secret appears in captured outputs, And tests fail on any unredacted emission.
-  > Spec: specs/planning-artifacts/epics.md#story-3-5
-- [ ] Story 3.6: Canonicalize Agent Identity Across Multiple Host Connections
+- [x] Story 3.6: Canonicalize Agent Identity Across Multiple Host Connections
   > As an adopter
   > I want repeated connections from the same logical agent or host to resolve to one canonical mesh identity
   > So that routing and trace history do not fragment across duplicate connection records.

@@ -138,3 +138,6 @@ redaction|annotation|sensitive
 redaction|default|secret_on_ambiguity
 redaction|error|E_REDACTION_EMPTY_FIELD_LIST
 redaction|error|E_REDACTION_INVALID_FIELD
+session|routing|earliest_session_wins
+session|disconnect|partial_keeps_present
+session|disconnect|last_marks_disconnected

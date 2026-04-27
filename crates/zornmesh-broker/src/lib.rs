@@ -813,37 +813,92 @@ impl Broker {
             });
         }
 
-        inner.agent_presence.insert(
-            agent_canonical_id.to_owned(),
-            AgentPresenceRecord {
-                state: AgentPresenceState::Connected,
-                credentials: Some(credentials.clone()),
-            },
-        );
-        inner.agent_presence_events.push(AgentPresenceEvent {
-            agent_canonical_id: agent_canonical_id.to_owned(),
-            state: AgentPresenceState::Connected,
+        inner.next_session_id += 1;
+        let session_id = format!("session-{}", inner.next_session_id);
+        let acquired_at = inner.next_session_id;
+        let was_disconnected = inner
+            .agent_presence
+            .get(agent_canonical_id)
+            .map(|r| r.state == AgentPresenceState::Disconnected)
+            .unwrap_or(true);
+        let record = inner
+            .agent_presence
+            .entry(agent_canonical_id.to_owned())
+            .or_insert(AgentPresenceRecord {
+                state: AgentPresenceState::Disconnected,
+                sessions: Vec::new(),
+            });
+        record.state = AgentPresenceState::Connected;
+        record.sessions.push(SessionDescriptor {
+            session_id: session_id.clone(),
+            credentials: credentials.clone(),
+            acquired_at,
         });
+        if was_disconnected {
+            inner.agent_presence_events.push(AgentPresenceEvent {
+                agent_canonical_id: agent_canonical_id.to_owned(),
+                state: AgentPresenceState::Connected,
+            });
+        }
         Ok(ConnectionAcceptanceOutcome::Accepted { credentials })
     }
 
     pub fn record_disconnect(&self, agent_canonical_id: &str) {
         let mut inner = self.inner.lock().expect("broker lock is not poisoned");
-        let entry = inner
-            .agent_presence
-            .entry(agent_canonical_id.to_owned())
-            .or_insert(AgentPresenceRecord {
-                state: AgentPresenceState::Disconnected,
-                credentials: None,
-            });
+        let Some(entry) = inner.agent_presence.get_mut(agent_canonical_id) else {
+            return;
+        };
         if entry.state != AgentPresenceState::Disconnected {
             entry.state = AgentPresenceState::Disconnected;
-            entry.credentials = None;
+            entry.sessions.clear();
             inner.agent_presence_events.push(AgentPresenceEvent {
                 agent_canonical_id: agent_canonical_id.to_owned(),
                 state: AgentPresenceState::Disconnected,
             });
         }
+    }
+
+    pub fn record_session_disconnect(
+        &self,
+        agent_canonical_id: &str,
+        session_id: &str,
+    ) {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let Some(entry) = inner.agent_presence.get_mut(agent_canonical_id) else {
+            return;
+        };
+        let before = entry.sessions.len();
+        entry.sessions.retain(|s| s.session_id != session_id);
+        if entry.sessions.is_empty() && before > 0 {
+            entry.state = AgentPresenceState::Disconnected;
+            inner.agent_presence_events.push(AgentPresenceEvent {
+                agent_canonical_id: agent_canonical_id.to_owned(),
+                state: AgentPresenceState::Disconnected,
+            });
+        }
+    }
+
+    pub fn active_sessions(&self, agent_canonical_id: &str) -> Vec<SessionDescriptor> {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .agent_presence
+            .get(agent_canonical_id)
+            .map(|record| record.sessions.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn routing_session(
+        &self,
+        agent_canonical_id: &str,
+    ) -> Option<SessionDescriptor> {
+        let inner = self.inner.lock().expect("broker lock is not poisoned");
+        let record = inner.agent_presence.get(agent_canonical_id)?;
+        record
+            .sessions
+            .iter()
+            .min_by_key(|s| s.acquired_at)
+            .cloned()
     }
 
     pub fn agent_presence_state(&self, agent_canonical_id: &str) -> AgentPresenceState {
@@ -1456,13 +1511,34 @@ struct BrokerInner {
     authorization_events: Vec<AuthorizationEvent>,
     agent_presence: HashMap<String, AgentPresenceRecord>,
     agent_presence_events: Vec<AgentPresenceEvent>,
+    next_session_id: u64,
 }
 
 #[derive(Debug, Clone)]
 struct AgentPresenceRecord {
     state: AgentPresenceState,
-    #[allow(dead_code)]
-    credentials: Option<PeerCredentials>,
+    sessions: Vec<SessionDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionDescriptor {
+    session_id: String,
+    credentials: PeerCredentials,
+    acquired_at: u64,
+}
+
+impl SessionDescriptor {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub const fn credentials(&self) -> &PeerCredentials {
+        &self.credentials
+    }
+
+    pub const fn acquired_at(&self) -> u64 {
+        self.acquired_at
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
