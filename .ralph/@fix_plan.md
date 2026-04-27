@@ -12,33 +12,11 @@
 - [x] Story 1.5: Add TypeScript SDK Bootstrap Parity
 - [x] Story 1.6: Stabilize CLI Read Outputs and Exit Contracts
 - [x] Story 1.7: Provide Doctor, Shutdown, and Shell Completion Basics
-  > As an operator
-  > I want first-day diagnostics, graceful shutdown behavior, and shell completions
-  > So that I can understand and operate the local mesh without inspecting runtime files by hand.
-  > AC: Given a healthy local daemon, When the operator runs `zornmesh doctor`, Then the command reports daemon status, version, socket path/ownership, schema version, OTel reachability, signature verification status, SBOM identity/status, and local trust posture, And the same information is available in JSON mode.
-  > AC: Given signature, SBOM, OTel, schema, or trust evidence is missing, unverifiable, or unavailable for the current build, When the operator runs `zornmesh doctor`, Then each missing evidence source is reported as degraded, unavailable, or unverifiable with a stable status, And no required diagnostic category is omitted because evidence is not yet produced.
-  > AC: Given the daemon is unreachable, unhealthy, draining, or blocked by unsafe socket permissions, When the operator runs `zornmesh doctor`, Then the command returns a stable status and remediation hint, And it does not require the operator to know or inspect internal runtime directories.
-  > AC: Given the operator requests daemon shutdown, When shutdown is initiated from CLI or signal handling, Then the daemon reports draining, stops accepting new work, honors the configured shutdown budget, and exits with a documented outcome, And any uncompleted in-flight work is surfaced through a stable diagnostic status.
-  > AC: Given a supported shell is requested, When the developer runs the shell-completion command, Then the CLI emits valid completions for that shell, And the generated completions include the initial daemon, doctor, agents, help, and output-mode flags.
-  > AC: Given an unsupported shell is requested, When the developer runs the shell-completion command, Then the CLI returns `E_UNSUPPORTED_SHELL` with the supported-shell list, And no partial completion script is written to stdout.
-  > AC: Given first-day operator workflows are fixture-covered, When CLI golden tests run, Then doctor healthy JSON, doctor daemon-unreachable output, daemon help, and completion generation fixtures pass, And output remains stable across TTY and non-TTY execution.
-  > Spec: specs/planning-artifacts/epics.md#story-1-7
 ### Reliable Agent Coordination
 > Goal: Agents can coordinate beyond the first message using request/reply, pull leases, streaming, ACK/NACK, cancellation, idempotency, durable subscriptions, backpressure, and per-call context. **Durability contract:** Stories 2.1-2.8 may claim durable ACK, lease, idempotency, subscription, retry, or backpressure state only after the relevant SQLite/sqlx commit succeeds. In-memory-only state must return typed persistence-unavailable or unsupported outcomes and must never claim durable success.
 
 - [x] Story 2.1: Establish Coordination Result and ACK/NACK Contract
-  > As an agent author
-  > I want every send-side and receive-side operation to return stable coordination outcomes
-  > So that my agent can distinguish accepted, rejected, durable, delivered, retryable, and terminal failure states without parsing logs.
-  > AC: Given an agent sends an envelope through the SDK, When the daemon syntactically accepts the frame for processing, Then the SDK can observe a transport-level accepted outcome, And that outcome is distinct from durable persistence and consumer delivery outcomes.
-  > AC: Given a sent envelope is durably accepted by the broker/store path available in this story, When the relevant state is committed or recorded according to the current persistence contract, Then the SDK can observe a durable-accepted outcome, And retries do not treat transport acceptance alone as durable success.
-  > AC: Given a consumer processes or rejects a delivered envelope, When it returns ACK or NACK, Then the broker records delivery outcome using stable accepted, acknowledged, rejected, failed, timed-out, retryable, or terminal categories, And NACK results include a safe structured reason category.
-  > AC: Given a coordination operation fails validation, authorization, daemon reachability, timeout, or payload limit checks, When the SDK returns an error, Then the error exposes stable code, category, retryable flag, and safe details, And equivalent semantics are available through the versioned envelope/error contract shared by the Rust SDK, TypeScript SDK, CLI, and daemon.
-  > AC: Given ACK/NACK behavior is implemented, When conformance tests exercise transport ACK, durable ACK, delivery ACK, and NACK paths, Then each outcome is fixture-covered and observable through SDK results or structured daemon events, And no outcome requires string-matching human log output.
-  > AC: Given the coordination contract is versioned, When envelope and error fixtures are created, Then the canonical envelope schema, internal frame definitions, delivery-state taxonomy, and product error registry are pinned by explicit versions under the `zornmesh-core` and `zornmesh-proto` contract boundaries, And breaking changes require migration notes, compatibility fixtures, and an explicit release-process decision.
-  > AC: Given a wire frame has an invalid length, unknown frame type, truncated payload, malformed payload encoding, or unsupported schema version, When the daemon parses the frame, Then parsing fails before unbounded allocation or state mutation, And the connection receives a stable protocol error or close reason covered by negative fixtures.
-  > Spec: specs/planning-artifacts/epics.md#story-2-1
-- [ ] Story 2.2: Send Correlated Request/Reply with Timeout
+- [x] Story 2.2: Send Correlated Request/Reply with Timeout
   > As an agent author
   > I want one agent to request work from another and receive one correlated reply or typed timeout
   > So that agents can coordinate task handoffs without ad-hoc files, ports, or polling.

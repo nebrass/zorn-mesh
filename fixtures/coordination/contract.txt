@@ -26,3 +26,9 @@ error|E_DAEMON_UNREACHABLE|reachability|true
 error|E_DAEMON_READINESS_TIMEOUT|timeout|true
 error|E_PERSISTENCE_UNAVAILABLE|persistence_unavailable|false
 error|E_PROTOCOL|protocol|false
+request_reply|resolution|replied
+request_reply|resolution|rejected
+request_reply|resolution|timed_out
+request_reply|late_event|duplicate_after_terminal
+request_reply|late_event|late_after_timeout
+request_reply|late_event|unknown_correlation
