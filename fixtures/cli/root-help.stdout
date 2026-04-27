@@ -11,6 +11,7 @@ Commands:
   inspect  Inspect persisted messages, dead letters, audit entries, and metadata
   trace    Reconstruct conversation timelines by correlation ID
   tail     Live-tail envelope flow by subject pattern
+  replay   Redeliver a previously sent envelope by message ID
   completion  Generate shell completions
   help     Print command help
 

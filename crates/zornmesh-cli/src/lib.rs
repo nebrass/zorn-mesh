@@ -18,13 +18,14 @@ use std::{
 use zornmesh_broker::SubjectPattern;
 use zornmesh_store::{
     DeadLetterFailureCategory, DeadLetterQuery, EvidenceAuditEntry, EvidenceEnvelopeRecord,
-    EvidenceQuery, EvidenceStore, FileEvidenceStore,
+    EvidenceQuery, EvidenceStateTransitionInput, EvidenceStore, FileEvidenceStore,
 };
 
 pub const ROOT_HELP: &str = include_str!("../../../fixtures/cli/root-help.stdout");
 pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.stdout");
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
+pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
 pub const VERSION: &str = "zornmesh 0.1.0\n";
 const READ_SCHEMA_VERSION: &str = "zornmesh.cli.read.v1";
 const EVENT_SCHEMA_VERSION: &str = "zornmesh.cli.event.v1";
@@ -44,7 +45,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -80,7 +81,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -100,7 +101,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -476,6 +477,8 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "trace" => run_trace(rest, &invocation),
         [command] if command == "tail" => print_help("tail help", TAIL_HELP, invocation.output),
         [command, rest @ ..] if command == "tail" => run_tail(rest, &invocation),
+        [command] if command == "replay" => print_help("replay help", REPLAY_HELP, invocation.output),
+        [command, rest @ ..] if command == "replay" => run_replay(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2559,6 +2562,321 @@ fn io_error(err: io::Error) -> CliError {
         format!("tail output failed: {err}"),
         ExitKind::Io,
     )
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReplayOptions {
+    evidence_path: Option<PathBuf>,
+    preview: bool,
+    yes: bool,
+    confirmation_token: Option<String>,
+}
+
+fn parse_replay_options(args: &[String]) -> Result<ReplayOptions, CliError> {
+    let mut options = ReplayOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = arg.strip_prefix("--evidence=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence", value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--evidence-path=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence-path", value)?);
+            index += 1;
+        } else if matches!(arg.as_str(), "--evidence" | "--evidence-path") {
+            let value = inspect_option_value(args, index, arg)?;
+            options.evidence_path = Some(parse_non_empty_path(arg, value)?);
+            index += 2;
+        } else if let Some(value) = arg.strip_prefix("--confirmation-token=") {
+            options.confirmation_token =
+                Some(parse_non_empty_string("--confirmation-token", value)?);
+            index += 1;
+        } else if arg == "--confirmation-token" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.confirmation_token = Some(parse_non_empty_string(arg, value)?);
+            index += 2;
+        } else if arg == "--preview" {
+            options.preview = true;
+            index += 1;
+        } else if arg == "--yes" {
+            options.yes = true;
+            index += 1;
+        } else {
+            return Err(CliError::new(
+                "E_UNSUPPORTED_COMMAND",
+                format!("unsupported zornmesh replay argument '{arg}'"),
+                ExitKind::UserError,
+            ));
+        }
+    }
+    if options.preview && (options.yes || options.confirmation_token.is_some()) {
+        return Err(CliError::new(
+            "E_REPLAY_INVALID_FLAGS",
+            "--preview cannot be combined with --yes or --confirmation-token".to_owned(),
+            ExitKind::UserError,
+        ));
+    }
+    if options.yes && options.confirmation_token.is_some() {
+        return Err(CliError::new(
+            "E_REPLAY_INVALID_FLAGS",
+            "--yes cannot be combined with --confirmation-token".to_owned(),
+            ExitKind::UserError,
+        ));
+    }
+    Ok(options)
+}
+
+fn run_replay(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("replay help", REPLAY_HELP, invocation.output),
+        [flag] if is_help(flag) => print_help("replay help", REPLAY_HELP, invocation.output),
+        [message_id, rest @ ..] => {
+            let message_id = parse_non_empty_string("message id", message_id)?;
+            let options = parse_replay_options(rest)?;
+            replay_message(&message_id, options, invocation.output)
+        }
+    }
+}
+
+fn replay_message(
+    message_id: &str,
+    options: ReplayOptions,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("replay"));
+    }
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?;
+    let path = evidence_path.ok_or_else(|| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            ),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+    let store = FileEvidenceStore::open_evidence(&path).map_err(|error| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!("evidence store is unavailable: {error}"),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+    let record = store
+        .get_envelope(message_id)
+        .map_err(|error| {
+            CliError::new(
+                "E_EVIDENCE_STORE_UNAVAILABLE",
+                format!("evidence store cannot be queried: {error}"),
+                ExitKind::TemporaryUnavailable,
+            )
+        })?
+        .ok_or_else(|| {
+            CliError::new(
+                "E_REPLAY_NOT_FOUND",
+                format!("no envelope evidence matched message id '{message_id}'"),
+                ExitKind::NotFound,
+            )
+        })?;
+
+    let (eligibility, ineligible_reason) = evaluate_replay_eligibility(&record);
+    let token = replay_confirmation_token(&record);
+    let lineage = serde_json::json!({
+        "replayed_from": record.message_id(),
+        "original_correlation_id": record.correlation_id(),
+        "original_trace_id": record.trace_id(),
+    });
+    let safe_payload = payload_summary(record.payload_len(), record.payload_content_type());
+
+    if eligibility != "eligible" {
+        let data = serde_json::json!({
+            "mode": if options.preview { "preview" } else { "commit" },
+            "eligibility": eligibility,
+            "refusal_reason": ineligible_reason,
+            "side_effect": false,
+            "original_message_id": record.message_id(),
+            "subject": record.subject(),
+            "target": record.target_or_subject(),
+            "replay_lineage": lineage,
+            "safe_payload_summary": safe_payload,
+        });
+        return emit_replay_response(
+            output,
+            data,
+            Some(DiagnosticWarning::new(
+                "W_REPLAY_INELIGIBLE",
+                format!(
+                    "replay refused: {}",
+                    ineligible_reason.unwrap_or("ineligible")
+                ),
+            )),
+        );
+    }
+
+    if options.preview {
+        let data = serde_json::json!({
+            "mode": "preview",
+            "eligibility": "eligible",
+            "side_effect": false,
+            "confirmation_token": token,
+            "original_message_id": record.message_id(),
+            "subject": record.subject(),
+            "target": record.target_or_subject(),
+            "replay_lineage": lineage,
+            "safe_payload_summary": safe_payload,
+            "expected_effect": "creates a new replay audit entry linked to the original message",
+            "policy_checks": ["evidence_store_available", "record_exists", "redaction_safe"],
+            "required_confirmation": "rerun with --yes or --confirmation-token <TOKEN>",
+        });
+        return emit_replay_response(output, data, None);
+    }
+
+    if !options.yes {
+        match options.confirmation_token.as_deref() {
+            None => {
+                return Err(CliError::new(
+                    "E_REPLAY_CONFIRMATION_REQUIRED",
+                    format!(
+                        "replay '{message_id}' requires confirmation; rerun with --preview, --yes, or --confirmation-token <TOKEN>"
+                    ),
+                    ExitKind::Validation,
+                ));
+            }
+            Some(provided) if provided != token => {
+                return Err(CliError::new(
+                    "E_REPLAY_STALE_CONFIRMATION",
+                    format!(
+                        "confirmation token does not match preview for '{message_id}'; rerun --preview to obtain a fresh token"
+                    ),
+                    ExitKind::Validation,
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let transition = EvidenceStateTransitionInput::new(
+        record.daemon_sequence(),
+        record.message_id(),
+        record.source_agent(),
+        "replay_requested",
+        record.subject(),
+        record.correlation_id(),
+        record.trace_id(),
+        record.delivery_state(),
+        "replayed",
+        format!("replayed from {}", record.message_id()),
+    )
+    .map_err(|error| {
+        CliError::new(
+            "E_REPLAY_INVALID_INPUT",
+            format!("replay state transition input invalid: {error}"),
+            ExitKind::Validation,
+        )
+    })?;
+    let audit = store.persist_state_transition(transition).map_err(|error| {
+        CliError::new(
+            "E_REPLAY_PERSIST_FAILED",
+            format!("replay audit entry could not be persisted: {error}"),
+            ExitKind::Io,
+        )
+    })?;
+
+    let data = serde_json::json!({
+        "mode": "commit",
+        "eligibility": "eligible",
+        "side_effect": true,
+        "confirmation_source": if options.yes { "yes_flag" } else { "confirmation_token" },
+        "confirmation_token": token,
+        "original_message_id": record.message_id(),
+        "subject": record.subject(),
+        "target": record.target_or_subject(),
+        "replay_lineage": lineage,
+        "safe_payload_summary": safe_payload,
+        "audit_daemon_sequence": audit.daemon_sequence(),
+        "audit_action": audit.action(),
+        "state_to": audit.state_to(),
+    });
+    emit_replay_response(output, data, None)
+}
+
+fn emit_replay_response(
+    output: OutputFormat,
+    data: serde_json::Value,
+    warning: Option<DiagnosticWarning>,
+) -> Result<(), CliError> {
+    let warnings: Vec<DiagnosticWarning> = warning.into_iter().collect();
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "replay: mode={} eligibility={} side_effect={}",
+                data["mode"].as_str().unwrap_or(""),
+                data["eligibility"].as_str().unwrap_or(""),
+                data["side_effect"].as_bool().unwrap_or(false),
+            );
+            println!(
+                "  original_message_id={}",
+                data["original_message_id"].as_str().unwrap_or("")
+            );
+            println!("  subject={}", data["subject"].as_str().unwrap_or(""));
+            println!("  target={}", data["target"].as_str().unwrap_or(""));
+            if let Some(token) = data["confirmation_token"].as_str() {
+                println!("  confirmation_token={token}");
+            }
+            if let Some(reason) = data["refusal_reason"].as_str() {
+                println!("  refusal_reason={reason}");
+            }
+            for warning in &warnings {
+                eprintln!("{}: {}", warning.code, warning.message);
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "replay",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before replay rendering"),
+    }
+}
+
+fn evaluate_replay_eligibility(
+    record: &EvidenceEnvelopeRecord,
+) -> (&'static str, Option<&'static str>) {
+    const MAX_REPLAY_BYTES: usize = 1_048_576;
+    if record.payload_len() > MAX_REPLAY_BYTES {
+        return ("ineligible", Some("payload_too_large"));
+    }
+    if record.source_agent() == "[REDACTED]" || record.target_or_subject() == "[REDACTED]" {
+        return ("ineligible", Some("redaction_blocks_replay"));
+    }
+    ("eligible", None)
+}
+
+fn replay_confirmation_token(record: &EvidenceEnvelopeRecord) -> String {
+    let parts = format!(
+        "{}|{}|{}|{}|{}",
+        record.message_id(),
+        record.correlation_id(),
+        record.trace_id(),
+        record.subject(),
+        record.daemon_sequence(),
+    );
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in parts.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("zmpv-{hash:016x}")
 }
 
 #[derive(Debug, Clone, Default)]

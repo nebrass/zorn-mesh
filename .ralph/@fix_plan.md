@@ -43,27 +43,8 @@
 - [x] Story 4.4: Inspect Persistence State with Structured Filters
 - [x] Story 4.5: Reconstruct Conversation Timeline by Correlation ID
 - [x] Story 4.6: Reconstruct Span Trees for Request/Reply and Streaming
-  > As a developer debugging causality
-  > I want trace output to show parent/child span relationships for request/reply and streaming exchanges
-  > So that I can see which agent action caused each downstream message or stream chunk.
-  > AC: Given a request/reply exchange persists trace IDs, span IDs, parent IDs, correlation IDs, and agent references, When the developer requests span-tree reconstruction, Then the output shows parent/child relationships from initial request through reply, And missing or invalid parent references are explicitly marked.
-  > AC: Given a streaming exchange emits multiple chunks, When the span tree is reconstructed, Then stream chunks are grouped under the correct stream/request context in sequence order, And final, cancelled, failed, or gap states are represented explicitly.
-  > AC: Given a trace includes fan-out, retry, replay, or dead-letter branches, When the span tree is rendered, Then branches are labeled by relationship type such as caused-by, responds-to, replayed-from, retry-of, or dead-letter-terminal, And relationship labels are stable for future UI accessibility semantics.
-  > AC: Given persisted span relationships contain a self-parent, duplicate edge, or cycle, When span-tree reconstruction runs, Then the cycle is detected, traversal terminates deterministically, and the affected nodes are marked invalid/partial, And output does not recurse forever, drop unrelated valid branches, or invent corrected causality.
-  > AC: Given partial trace data is available, When parent/child reconstruction cannot be completed, Then the output reports partial reconstruction with safe diagnostics, And it does not invent or infer missing causality edges as facts.
-  > AC: Given span-tree tests run, When request/reply, streaming, fan-out, retry, replay, self-parent, cycle, duplicate edge, missing-parent, and partial-data scenarios execute, Then reconstructed causality is deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-4-6
 - [x] Story 4.7: Live-Tail Envelopes by Subject Pattern
-  > As a developer
-  > I want to live-tail envelope flow by subject pattern
-  > So that I can watch the mesh in real time while agents coordinate.
-  > AC: Given a daemon is receiving envelopes, When the developer runs `zornmesh tail <subject-pattern>`, Then matching envelopes are streamed in daemon sequence order, And non-matching envelopes are not emitted.
-  > AC: Given the tail command runs in human mode, When matching events arrive, Then stdout shows readable event summaries with timestamp, subject, source, target or subscriber, delivery state, and correlation ID, And no secret payload values are displayed.
-  > AC: Given the tail command runs with JSON output, When matching events arrive, Then stdout emits NDJSON with one stable structured event per line, And human prose, progress text, and ANSI escape codes are not mixed into the stream.
-  > AC: Given the daemon disconnects, restarts, or falls behind during tailing, When the tail command detects the condition, Then it emits a stable disconnected/stale/backfill status according to output mode, And exits or reconnects according to documented behavior.
-  > AC: Given live-tail tests run, When matching, non-matching, JSON/NDJSON, redacted payload, daemon disconnect, and backfill scenarios execute, Then output ordering and mode separation match fixtures.
-  > Spec: specs/planning-artifacts/epics.md#story-4-7
-- [ ] Story 4.8: Redeliver Previously Sent Envelopes Safely
+- [x] Story 4.8: Redeliver Previously Sent Envelopes Safely
   > As a developer recovering from a failed workflow
   > I want to redeliver a previously sent envelope from the audit log
   > So that I can recover work without manually reconstructing payloads or hiding that replay occurred.

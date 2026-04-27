@@ -2099,6 +2099,182 @@ fn tail_disconnected_when_evidence_store_missing_emits_status_event() {
     assert_eq!(last["data"]["matched"], 0);
 }
 
+fn seed_replay_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("replay evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/source",
+                    "mesh.replay.original",
+                    "corr-replay",
+                    1_700_000_000_111,
+                ),
+                "msg-replay-original",
+                "trace-replay",
+                "accepted",
+            )
+            .expect("replay envelope input")
+            .with_target("agent.local/target"),
+        )
+        .expect("replay envelope persists");
+}
+
+#[test]
+fn replay_preview_emits_eligibility_and_confirmation_token_without_side_effect() {
+    let path = temp_evidence_path("replay-preview");
+    seed_replay_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+    let baseline_count = {
+        let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+        store.audit_entries().len()
+    };
+
+    let output = zornmesh(&[
+        "replay",
+        "msg-replay-original",
+        "--evidence",
+        &path_str,
+        "--preview",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "replay");
+    assert_eq!(value["data"]["mode"], "preview");
+    assert_eq!(value["data"]["eligibility"], "eligible");
+    assert_eq!(value["data"]["side_effect"], false);
+    assert_eq!(value["data"]["original_message_id"], "msg-replay-original");
+    assert_eq!(value["data"]["replay_lineage"]["replayed_from"], "msg-replay-original");
+    let token = value["data"]["confirmation_token"]
+        .as_str()
+        .expect("preview emits confirmation token");
+    assert!(token.starts_with("zmpv-"));
+    assert_eq!(value["data"]["target"], "agent.local/target");
+    assert_eq!(value["data"]["subject"], "mesh.replay.original");
+
+    let post_count = {
+        let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+        store.audit_entries().len()
+    };
+    assert_eq!(
+        post_count, baseline_count,
+        "preview must not persist new audit evidence"
+    );
+}
+
+#[test]
+fn replay_without_confirmation_refuses_with_stable_reason() {
+    let path = temp_evidence_path("replay-refuse");
+    seed_replay_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+    let baseline_count = {
+        let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+        store.audit_entries().len()
+    };
+
+    let output = zornmesh(&[
+        "replay",
+        "msg-replay-original",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success(), "missing confirmation refuses replay");
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_REPLAY_CONFIRMATION_REQUIRED"));
+
+    let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+    assert_eq!(
+        store.audit_entries().len(),
+        baseline_count,
+        "refused replay must not persist new audit evidence"
+    );
+}
+
+#[test]
+fn replay_with_yes_persists_replay_lineage_audit_entry() {
+    let path = temp_evidence_path("replay-yes");
+    seed_replay_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+    let baseline_count = {
+        let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+        store.audit_entries().len()
+    };
+
+    let output = zornmesh(&[
+        "replay",
+        "msg-replay-original",
+        "--evidence",
+        &path_str,
+        "--yes",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "replay");
+    assert_eq!(value["data"]["mode"], "commit");
+    assert_eq!(value["data"]["side_effect"], true);
+    assert_eq!(value["data"]["replay_lineage"]["replayed_from"], "msg-replay-original");
+
+    let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+    let audit = store.audit_entries();
+    assert_eq!(
+        audit.len(),
+        baseline_count + 1,
+        "commit persists exactly one new audit entry"
+    );
+    let last = audit.last().expect("trailing audit entry");
+    assert_eq!(last.action(), "replay_requested");
+    assert_eq!(last.state_to(), "replayed");
+    assert_eq!(last.message_id(), "msg-replay-original");
+    assert!(last.outcome_details().contains("replayed from msg-replay-original"));
+}
+
+#[test]
+fn replay_with_stale_confirmation_token_refuses() {
+    let path = temp_evidence_path("replay-stale");
+    seed_replay_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "replay",
+        "msg-replay-original",
+        "--evidence",
+        &path_str,
+        "--confirmation-token",
+        "zmpv-deadbeefdeadbeef",
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success(), "stale token refuses replay");
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_REPLAY_STALE_CONFIRMATION"));
+}
+
+#[test]
+fn replay_missing_message_returns_not_found_refusal() {
+    let path = temp_evidence_path("replay-missing");
+    FileEvidenceStore::open_evidence(&path).expect("empty evidence store opens");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "replay",
+        "missing-msg",
+        "--evidence",
+        &path_str,
+        "--preview",
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success(), "missing record cannot be replayed");
+    assert_eq!(output.status.code(), Some(66));
+    assert!(stderr(&output).contains("E_REPLAY_NOT_FOUND"));
+}
+
 #[test]
 fn tail_invalid_subject_pattern_returns_validation_error() {
     let path = temp_evidence_path("tail-invalid");
