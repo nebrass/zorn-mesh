@@ -41,3 +41,13 @@ lease|audit|acknowledged
 lease|audit|nacked
 lease|audit|renewed
 lease|audit|expired
+idempotency|decision|first_attempt
+idempotency|decision|deduplicated
+idempotency|decision|conflict
+idempotency|decision|unknown
+idempotency|conflict|subject_mismatch
+idempotency|conflict|payload_fingerprint_mismatch
+idempotency|conflict|operation_kind_mismatch
+idempotency|error|E_IDEMPOTENCY_VALIDATION
+idempotency|error|E_IDEMPOTENCY_UNKNOWN
+idempotency|error|E_IDEMPOTENCY_ALREADY_COMMITTED

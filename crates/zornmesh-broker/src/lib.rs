@@ -612,6 +612,86 @@ impl Broker {
             .lease_audit
             .clone()
     }
+
+    pub fn register_send(
+        &self,
+        request: IdempotencyRequest,
+        _now: SystemTime,
+    ) -> Result<IdempotencyDecision, IdempotencyError> {
+        request.validate()?;
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let scope = (request.sender_agent.clone(), request.key.clone());
+        if let Some(record) = inner.idempotency.get(&scope) {
+            if record.subject != request.subject {
+                return Ok(IdempotencyDecision::Conflict {
+                    reason: IdempotencyConflictReason::SubjectMismatch,
+                });
+            }
+            if record.payload_fingerprint != request.payload_fingerprint {
+                return Ok(IdempotencyDecision::Conflict {
+                    reason: IdempotencyConflictReason::PayloadFingerprintMismatch,
+                });
+            }
+            if record.operation_kind != request.operation_kind {
+                return Ok(IdempotencyDecision::Conflict {
+                    reason: IdempotencyConflictReason::OperationKindMismatch,
+                });
+            }
+            return Ok(match &record.state {
+                IdempotencyState::Pending => IdempotencyDecision::Unknown {
+                    correlation_id: record.correlation_id.clone(),
+                    trace_context: record.trace_context.clone(),
+                },
+                IdempotencyState::Committed(outcome) => IdempotencyDecision::Deduplicated {
+                    original_outcome: outcome.clone(),
+                    correlation_id: record.correlation_id.clone(),
+                    trace_context: record.trace_context.clone(),
+                },
+            });
+        }
+        inner.idempotency.insert(
+            scope,
+            IdempotencyRecord {
+                subject: request.subject,
+                payload_fingerprint: request.payload_fingerprint,
+                operation_kind: request.operation_kind,
+                correlation_id: request.correlation_id,
+                trace_context: request.trace_context,
+                state: IdempotencyState::Pending,
+            },
+        );
+        Ok(IdempotencyDecision::FirstAttempt)
+    }
+
+    pub fn commit_send(
+        &self,
+        sender_agent: &str,
+        key: &str,
+        outcome: IdempotencySendOutcome,
+    ) -> Result<(), IdempotencyError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let scope = (sender_agent.to_owned(), key.to_owned());
+        let Some(record) = inner.idempotency.get_mut(&scope) else {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::Unknown,
+                format!("idempotency record for sender '{sender_agent}' key '{key}' is unknown"),
+            ));
+        };
+        if matches!(record.state, IdempotencyState::Committed(_)) {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::AlreadyCommitted,
+                format!(
+                    "idempotency record for sender '{sender_agent}' key '{key}' is already committed"
+                ),
+            ));
+        }
+        let coord = match outcome {
+            IdempotencySendOutcome::Accepted(coord) => coord,
+            IdempotencySendOutcome::Rejected(coord) => coord,
+        };
+        record.state = IdempotencyState::Committed(coord);
+        Ok(())
+    }
 }
 
 impl Default for Broker {
@@ -635,7 +715,239 @@ struct BrokerInner {
     terminal_lease_ids: HashSet<String>,
     expired_lease_ids: HashSet<String>,
     lease_audit: Vec<LeaseAuditEvent>,
+    idempotency: HashMap<(String, String), IdempotencyRecord>,
 }
+
+#[derive(Debug, Clone)]
+struct IdempotencyRecord {
+    subject: String,
+    payload_fingerprint: String,
+    operation_kind: String,
+    correlation_id: String,
+    trace_context: Option<String>,
+    state: IdempotencyState,
+}
+
+#[derive(Debug, Clone)]
+enum IdempotencyState {
+    Pending,
+    Committed(CoordinationOutcome),
+}
+
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyRequest {
+    sender_agent: String,
+    key: String,
+    subject: String,
+    payload_fingerprint: String,
+    operation_kind: String,
+    correlation_id: String,
+    trace_context: Option<String>,
+    timeout: Option<Duration>,
+}
+
+impl IdempotencyRequest {
+    pub fn new(
+        sender_agent: impl Into<String>,
+        key: impl Into<String>,
+        subject: impl Into<String>,
+        payload_fingerprint: impl Into<String>,
+        operation_kind: impl Into<String>,
+        correlation_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            sender_agent: sender_agent.into(),
+            key: key.into(),
+            subject: subject.into(),
+            payload_fingerprint: payload_fingerprint.into(),
+            operation_kind: operation_kind.into(),
+            correlation_id: correlation_id.into(),
+            trace_context: None,
+            timeout: None,
+        }
+    }
+
+    pub fn with_trace_context(mut self, trace_context: impl Into<String>) -> Self {
+        self.trace_context = Some(trace_context.into());
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn sender_agent(&self) -> &str {
+        &self.sender_agent
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    pub fn payload_fingerprint(&self) -> &str {
+        &self.payload_fingerprint
+    }
+
+    pub fn operation_kind(&self) -> &str {
+        &self.operation_kind
+    }
+
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
+    }
+
+    pub fn trace_context(&self) -> Option<&str> {
+        self.trace_context.as_deref()
+    }
+
+    pub const fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    fn validate(&self) -> Result<(), IdempotencyError> {
+        if self.sender_agent.trim().is_empty() {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::Validation,
+                "sender agent must not be empty",
+            ));
+        }
+        if self.key.trim().is_empty() {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::Validation,
+                "idempotency key must not be empty",
+            ));
+        }
+        if self.key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::Validation,
+                format!(
+                    "idempotency key is {} bytes; maximum is {MAX_IDEMPOTENCY_KEY_BYTES}",
+                    self.key.len()
+                ),
+            ));
+        }
+        if self.subject.trim().is_empty() {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::Validation,
+                "subject must not be empty",
+            ));
+        }
+        if self.payload_fingerprint.trim().is_empty() {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::Validation,
+                "payload fingerprint must not be empty",
+            ));
+        }
+        if self.operation_kind.trim().is_empty() {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::Validation,
+                "operation kind must not be empty",
+            ));
+        }
+        if self.correlation_id.trim().is_empty() {
+            return Err(IdempotencyError::new(
+                IdempotencyErrorCode::Validation,
+                "correlation ID must not be empty",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencyDecision {
+    FirstAttempt,
+    Deduplicated {
+        original_outcome: CoordinationOutcome,
+        correlation_id: String,
+        trace_context: Option<String>,
+    },
+    Conflict {
+        reason: IdempotencyConflictReason,
+    },
+    Unknown {
+        correlation_id: String,
+        trace_context: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdempotencyConflictReason {
+    SubjectMismatch,
+    PayloadFingerprintMismatch,
+    OperationKindMismatch,
+}
+
+impl IdempotencyConflictReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SubjectMismatch => "subject_mismatch",
+            Self::PayloadFingerprintMismatch => "payload_fingerprint_mismatch",
+            Self::OperationKindMismatch => "operation_kind_mismatch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencySendOutcome {
+    Accepted(CoordinationOutcome),
+    Rejected(CoordinationOutcome),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdempotencyErrorCode {
+    Validation,
+    Unknown,
+    AlreadyCommitted,
+}
+
+impl IdempotencyErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "E_IDEMPOTENCY_VALIDATION",
+            Self::Unknown => "E_IDEMPOTENCY_UNKNOWN",
+            Self::AlreadyCommitted => "E_IDEMPOTENCY_ALREADY_COMMITTED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyError {
+    code: IdempotencyErrorCode,
+    message: String,
+}
+
+impl IdempotencyError {
+    fn new(code: IdempotencyErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> IdempotencyErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for IdempotencyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for IdempotencyError {}
 
 #[derive(Debug, Clone)]
 struct QueuedEnvelope {

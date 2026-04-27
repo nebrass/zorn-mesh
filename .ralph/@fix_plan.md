@@ -18,18 +18,7 @@
 - [x] Story 2.1: Establish Coordination Result and ACK/NACK Contract
 - [x] Story 2.2: Send Correlated Request/Reply with Timeout
 - [x] Story 2.3: Fetch, Lease, ACK, and NACK Pulled Envelopes
-  > As an agent author
-  > I want consumers to fetch work with explicit leases and acknowledge or reject each envelope
-  > So that agents can process work safely without losing or duplicating delivery state invisibly.
-  > AC: Given envelopes are available for a pull-based consumer, When the consumer calls fetch with a batch size and lease duration, Then the daemon returns only envelopes assigned to that consumer with lease IDs and expiry metadata, And fetched envelopes are not simultaneously leased to another consumer.
-  > AC: Given a consumer calls fetch with zero, negative, over-maximum, or unsupported batch size or lease duration, When fetch validation runs, Then the daemon returns a stable fetch-validation error, And no lease, delivery attempt, or cursor state is created.
-  > AC: Given a consumer successfully processes a leased envelope, When it sends ACK for the lease, Then the broker records delivery acknowledgement, And the envelope is not returned by subsequent fetch calls for the same subscription.
-  > AC: Given a consumer cannot process a leased envelope, When it sends NACK with a safe structured reason, Then the broker records the failure category and makes the envelope eligible for retry, backoff, or terminal handling according to policy, And the NACK result maps to the shared outcome contract from Story 2.1.
-  > AC: Given ACK or NACK references an expired, unknown, already-acknowledged, already-nacked, or foreign lease, When the daemon evaluates the acknowledgement, Then it returns a stable lease-not-owned, lease-expired, or already-terminal result, And no unrelated delivery state is mutated.
-  > AC: Given a consumer is still processing before lease expiry, When it renews the lease within the allowed window, Then the lease expiry is extended without duplicating delivery, And renewal failures return stable typed errors.
-  > AC: Given a lease expires without ACK, NACK, or renewal, When another fetch is issued after expiry, Then the envelope can be leased again according to at-least-once delivery semantics, And retry attempts are visible through structured event/audit metadata for downstream trace work.
-  > Spec: specs/planning-artifacts/epics.md#story-2-3
-- [ ] Story 2.4: Add Idempotency Keys and Retry-Safe Sends
+- [x] Story 2.4: Add Idempotency Keys and Retry-Safe Sends
   > As an agent author
   > I want send operations to carry idempotency keys and preserve per-call context
   > So that retries do not create duplicate work or lose traceability.
