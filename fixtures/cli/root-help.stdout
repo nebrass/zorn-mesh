@@ -10,6 +10,7 @@ Commands:
   stdio    Bridge an MCP-compatible host over stdio
   inspect  Inspect persisted messages, dead letters, audit entries, and metadata
   trace    Reconstruct conversation timelines by correlation ID
+  tail     Live-tail envelope flow by subject pattern
   completion  Generate shell completions
   help     Print command help
 

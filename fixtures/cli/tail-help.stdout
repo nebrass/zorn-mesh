@@ -1,0 +1,18 @@
+zornmesh tail
+Live-tail envelope flow by subject pattern.
+
+Usage: zornmesh tail <SUBJECT_PATTERN> [OPTIONS]
+
+Options:
+      --evidence <PATH>  Read this evidence log
+      --output <FORMAT>  Select human, json, or ndjson output
+  -h, --help  Print help
+
+Pattern syntax follows the daemon subscription contract:
+  *   matches a single subject level
+  >   matches one or more trailing subject levels (last position only)
+
+Output modes:
+  human  Readable one-event-per-line summaries on stdout.
+  json   NDJSON event stream with one structured event per line.
+  ndjson Identical to json mode for tail.

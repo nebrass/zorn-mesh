@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use zornmesh_broker::SubjectPattern;
 use zornmesh_store::{
     DeadLetterFailureCategory, DeadLetterQuery, EvidenceAuditEntry, EvidenceEnvelopeRecord,
     EvidenceQuery, EvidenceStore, FileEvidenceStore,
@@ -23,6 +24,7 @@ use zornmesh_store::{
 pub const ROOT_HELP: &str = include_str!("../../../fixtures/cli/root-help.stdout");
 pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.stdout");
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
+pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const VERSION: &str = "zornmesh 0.1.0\n";
 const READ_SCHEMA_VERSION: &str = "zornmesh.cli.read.v1";
 const EVENT_SCHEMA_VERSION: &str = "zornmesh.cli.event.v1";
@@ -42,7 +44,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace completion help"
+    commands="daemon doctor agents stdio inspect trace tail completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -78,7 +80,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace completion help)
+  commands=(daemon doctor agents stdio inspect trace tail completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -98,7 +100,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -472,6 +474,8 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "completion" => run_completion(rest, &invocation),
         [command] if command == "trace" => print_help("trace help", TRACE_HELP, invocation.output),
         [command, rest @ ..] if command == "trace" => run_trace(rest, &invocation),
+        [command] if command == "tail" => print_help("tail help", TAIL_HELP, invocation.output),
+        [command, rest @ ..] if command == "tail" => run_tail(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2334,6 +2338,227 @@ fn run_trace(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
             trace_correlation(&correlation_id, options, invocation.output)
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TailOptions {
+    evidence_path: Option<PathBuf>,
+}
+
+fn parse_tail_options(args: &[String]) -> Result<TailOptions, CliError> {
+    let mut options = TailOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = arg.strip_prefix("--evidence=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence", value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--evidence-path=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence-path", value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--store=") {
+            options.evidence_path = Some(parse_non_empty_path("--store", value)?);
+            index += 1;
+        } else if matches!(arg.as_str(), "--evidence" | "--evidence-path" | "--store") {
+            let value = inspect_option_value(args, index, arg)?;
+            options.evidence_path = Some(parse_non_empty_path(arg, value)?);
+            index += 2;
+        } else {
+            return Err(CliError::new(
+                "E_UNSUPPORTED_COMMAND",
+                format!("unsupported zornmesh tail argument '{arg}'"),
+                ExitKind::UserError,
+            ));
+        }
+    }
+    Ok(options)
+}
+
+fn run_tail(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("tail help", TAIL_HELP, invocation.output),
+        [flag] if is_help(flag) => print_help("tail help", TAIL_HELP, invocation.output),
+        [pattern, rest @ ..] => {
+            let pattern_raw = parse_non_empty_string("subject pattern", pattern)?;
+            let pattern = SubjectPattern::new(pattern_raw.clone()).map_err(|error| {
+                CliError::new(
+                    "E_SUBJECT_VALIDATION",
+                    format!("invalid subject pattern '{pattern_raw}': {}", error.message()),
+                    ExitKind::Validation,
+                )
+            })?;
+            let options = parse_tail_options(rest)?;
+            tail_pattern(&pattern, options, invocation.output)
+        }
+    }
+}
+
+fn tail_pattern(
+    pattern: &SubjectPattern,
+    options: TailOptions,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?;
+    let mut warnings = Vec::new();
+    let (availability, envelopes, unavailable_reason) = match evidence_path.as_ref() {
+        Some(path) => match fs::metadata(path) {
+            Ok(_) => match FileEvidenceStore::open_evidence(path) {
+                Ok(store) => {
+                    let mut records = store.query_envelopes(EvidenceQuery::new());
+                    records.retain(|record| pattern.matches(record.subject()));
+                    records.sort_by(|left, right| {
+                        (left.daemon_sequence(), left.message_id())
+                            .cmp(&(right.daemon_sequence(), right.message_id()))
+                    });
+                    ("available", records, None)
+                }
+                Err(error) => {
+                    let message = format!("evidence store is unavailable: {error}");
+                    warnings.push(DiagnosticWarning::new(
+                        "W_EVIDENCE_STORE_UNAVAILABLE",
+                        message.clone(),
+                    ));
+                    ("unavailable", Vec::new(), Some(message))
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let message = "evidence store does not exist".to_owned();
+                warnings.push(DiagnosticWarning::new(
+                    "W_EVIDENCE_STORE_UNAVAILABLE",
+                    message.clone(),
+                ));
+                ("unavailable", Vec::new(), Some(message))
+            }
+            Err(error) => {
+                let message = format!("evidence store cannot be inspected: {error}");
+                warnings.push(DiagnosticWarning::new(
+                    "W_EVIDENCE_STORE_UNAVAILABLE",
+                    message.clone(),
+                ));
+                ("unavailable", Vec::new(), Some(message))
+            }
+        },
+        None => {
+            let message = format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            );
+            warnings.push(DiagnosticWarning::new(
+                "W_EVIDENCE_STORE_UNAVAILABLE",
+                message.clone(),
+            ));
+            ("unavailable", Vec::new(), Some(message))
+        }
+    };
+
+    match output {
+        OutputFormat::Human => {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            for record in &envelopes {
+                let line = format_tail_human_line(record);
+                writeln!(handle, "{line}").map_err(io_error)?;
+            }
+            if availability != "available" {
+                if let Some(reason) = unavailable_reason.as_deref() {
+                    eprintln!("W_TAIL_DISCONNECTED: {reason}");
+                }
+            } else if envelopes.is_empty() {
+                eprintln!(
+                    "W_TAIL_EMPTY: no envelopes matched subject pattern '{}'",
+                    pattern.as_str()
+                );
+            }
+            Ok(())
+        }
+        OutputFormat::Json | OutputFormat::Ndjson => {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            writeln!(
+                handle,
+                "{}",
+                serde_json::json!({
+                    "schema_version": EVENT_SCHEMA_VERSION,
+                    "command": "tail",
+                    "kind": "status",
+                    "data": {
+                        "status": if availability == "available" { "backfill" } else { "disconnected" },
+                        "subject_pattern": pattern.as_str(),
+                        "ordering": "daemon_sequence",
+                        "reason": unavailable_reason,
+                    },
+                })
+            )
+            .map_err(io_error)?;
+            for record in &envelopes {
+                writeln!(handle, "{}", tail_event_json(pattern.as_str(), record))
+                    .map_err(io_error)?;
+            }
+            writeln!(
+                handle,
+                "{}",
+                serde_json::json!({
+                    "schema_version": EVENT_SCHEMA_VERSION,
+                    "command": "tail",
+                    "kind": "status",
+                    "data": {
+                        "status": if availability == "available" { "stale" } else { "disconnected" },
+                        "subject_pattern": pattern.as_str(),
+                        "matched": envelopes.len(),
+                        "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                    },
+                })
+            )
+            .map_err(io_error)?;
+            Ok(())
+        }
+    }
+}
+
+fn format_tail_human_line(record: &EvidenceEnvelopeRecord) -> String {
+    format!(
+        "seq={seq} ts={ts} subject={subject} from={source} to={target} state={state} corr={corr}",
+        seq = record.daemon_sequence(),
+        ts = record.timestamp_unix_ms(),
+        subject = record.subject(),
+        source = record.source_agent(),
+        target = record.target_or_subject(),
+        state = record.delivery_state(),
+        corr = record.correlation_id(),
+    )
+}
+
+fn tail_event_json(pattern: &str, record: &EvidenceEnvelopeRecord) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": EVENT_SCHEMA_VERSION,
+        "command": "tail",
+        "kind": "event",
+        "data": {
+            "subject_pattern": pattern,
+            "daemon_sequence": record.daemon_sequence(),
+            "timestamp_unix_ms": record.timestamp_unix_ms(),
+            "message_id": record.message_id(),
+            "subject": record.subject(),
+            "source_agent": record.source_agent(),
+            "target_or_subject": record.target_or_subject(),
+            "delivery_state": record.delivery_state(),
+            "correlation_id": record.correlation_id(),
+            "trace_id": record.trace_id(),
+            "span_id": record.span_id(),
+            "parent_message_id": record.parent_message_id(),
+            "safe_payload_summary": payload_summary(
+                record.payload_len(),
+                record.payload_content_type(),
+            ),
+        },
+    })
+}
+
+fn io_error(err: io::Error) -> CliError {
+    CliError::new(
+        "E_IO",
+        format!("tail output failed: {err}"),
+        ExitKind::Io,
+    )
 }
 
 #[derive(Debug, Clone, Default)]

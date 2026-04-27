@@ -1925,3 +1925,188 @@ fn configuration_precedence_is_deterministic() {
     assert!(stdout(&cli_output).contains("\"socket_path\":\"/tmp/zorn-cli.sock\""));
     assert!(stdout(&cli_output).contains("\"socket_source\":\"cli\""));
 }
+
+fn seed_tail_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("tail evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/source",
+                    "mesh.tail.created",
+                    "corr-tail-1",
+                    1_700_000_000_001,
+                ),
+                "msg-tail-1",
+                "trace-tail-1",
+                "accepted",
+            )
+            .expect("first envelope input")
+            .with_target("agent.local/target"),
+        )
+        .expect("first tail envelope persists");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/source",
+                    "mesh.tail.completed",
+                    "corr-tail-2",
+                    1_700_000_000_002,
+                ),
+                "msg-tail-2",
+                "trace-tail-2",
+                "accepted",
+            )
+            .expect("second envelope input")
+            .with_target("agent.local/target"),
+        )
+        .expect("second tail envelope persists");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/source",
+                    "mesh.other.created",
+                    "corr-other",
+                    1_700_000_000_003,
+                ),
+                "msg-other",
+                "trace-other",
+                "accepted",
+            )
+            .expect("other envelope input"),
+        )
+        .expect("non-matching envelope persists");
+}
+
+#[test]
+fn tail_json_emits_ndjson_events_in_daemon_sequence_order() {
+    let path = temp_evidence_path("tail-json");
+    seed_tail_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&[
+        "tail",
+        "mesh.tail.*",
+        "--evidence",
+        path,
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let text = stdout(&output);
+    assert_no_ansi(&text);
+    assert!(!text.contains("must-not-leak"));
+
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "status + 2 events + status");
+
+    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("first line is JSON");
+    assert_eq!(first["schema_version"], "zornmesh.cli.event.v1");
+    assert_eq!(first["command"], "tail");
+    assert_eq!(first["kind"], "status");
+    assert_eq!(first["data"]["status"], "backfill");
+    assert_eq!(first["data"]["subject_pattern"], "mesh.tail.*");
+    assert_eq!(first["data"]["ordering"], "daemon_sequence");
+
+    let event_one: serde_json::Value = serde_json::from_str(lines[1]).expect("event line 1");
+    assert_eq!(event_one["kind"], "event");
+    assert_eq!(event_one["data"]["message_id"], "msg-tail-1");
+    assert_eq!(event_one["data"]["subject"], "mesh.tail.created");
+    assert_eq!(event_one["data"]["correlation_id"], "corr-tail-1");
+    assert_eq!(event_one["data"]["delivery_state"], "accepted");
+    assert_eq!(
+        event_one["data"]["safe_payload_summary"]["payload_content_type"],
+        "[REDACTED]"
+    );
+
+    let event_two: serde_json::Value = serde_json::from_str(lines[2]).expect("event line 2");
+    assert_eq!(event_two["data"]["message_id"], "msg-tail-2");
+    assert_eq!(event_two["data"]["subject"], "mesh.tail.completed");
+    assert!(
+        event_one["data"]["daemon_sequence"].as_u64()
+            < event_two["data"]["daemon_sequence"].as_u64(),
+        "events ordered by daemon sequence"
+    );
+
+    let last: serde_json::Value = serde_json::from_str(lines[3]).expect("trailing status JSON");
+    assert_eq!(last["kind"], "status");
+    assert_eq!(last["data"]["status"], "stale");
+    assert_eq!(last["data"]["matched"], 2);
+}
+
+#[test]
+fn tail_human_emits_redacted_lines_and_skips_non_matching() {
+    let path = temp_evidence_path("tail-human");
+    seed_tail_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&["tail", "mesh.tail.*", "--evidence", path]);
+
+    assert_success(&output);
+    let text = stdout(&output);
+    assert_no_ansi(&text);
+    assert!(!text.contains("must-not-leak"));
+    assert!(!text.contains("mesh.other"));
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "only matching envelopes appear in tail");
+    assert!(lines[0].contains("subject=mesh.tail.created"));
+    assert!(lines[0].contains("from=agent.local/source"));
+    assert!(lines[0].contains("to=agent.local/target"));
+    assert!(lines[0].contains("state=accepted"));
+    assert!(lines[0].contains("corr=corr-tail-1"));
+    assert!(lines[1].contains("subject=mesh.tail.completed"));
+}
+
+#[test]
+fn tail_disconnected_when_evidence_store_missing_emits_status_event() {
+    let dir = std::env::temp_dir().join(format!(
+        "zornmesh-tail-missing-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos(),
+    ));
+    let missing_path = dir.join("evidence.log");
+    let path = missing_path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&[
+        "tail",
+        "mesh.tail.*",
+        "--evidence",
+        path,
+        "--output",
+        "ndjson",
+    ]);
+
+    assert!(output.status.success(), "tail exits successfully when daemon evidence is missing");
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "disconnected backfill + disconnected status");
+    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("first JSON line");
+    assert_eq!(first["data"]["status"], "disconnected");
+    assert!(
+        first["data"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("evidence store does not exist")
+    );
+    let last: serde_json::Value = serde_json::from_str(lines[1]).expect("last JSON line");
+    assert_eq!(last["data"]["status"], "disconnected");
+    assert_eq!(last["data"]["matched"], 0);
+}
+
+#[test]
+fn tail_invalid_subject_pattern_returns_validation_error() {
+    let path = temp_evidence_path("tail-invalid");
+    FileEvidenceStore::open_evidence(&path).expect("empty evidence store opens");
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&["tail", "zorn.reserved", "--evidence", path]);
+    assert!(!output.status.success(), "reserved prefix is rejected");
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_SUBJECT_VALIDATION"));
+}

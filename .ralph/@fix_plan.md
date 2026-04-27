@@ -33,89 +33,15 @@
 - [x] Story 3.5: Redact Secrets Across Identity, Capability, and Delivery Surfaces
 - [x] Story 3.6: Canonicalize Agent Identity Across Multiple Host Connections
 - [x] Story 3.7: Connect MCP Hosts Through `zornmesh stdio --as-agent`
-  > As a developer using an existing MCP host
-  > I want to connect that host to zorn-mesh through `zornmesh stdio --as-agent`
-  > So that existing tools can join the local mesh without host modification.
-  > AC: Given an MCP-compatible host launches `zornmesh stdio --as-agent <id>`, When the host performs MCP initialize using the supported protocol version, Then the bridge completes initialization and registers the host as a mesh agent, And the registered identity uses the AgentCard, capability-resolution, allowlist, socket-permission, and secret-redaction contracts established by Stories 3.1-3.5.
-  > AC: Given the MCP host sends requests before successful initialize, repeats initialize, or sends messages out of the supported bridge sequence, When the stdio bridge validates MCP sequencing, Then it returns stable protocol/sequence errors without registering mesh identity or capabilities prematurely, And no mesh operation is dispatched until initialize and identity registration both complete.
-  > AC: Given the MCP host initializes with an unsupported protocol version, When the bridge validates the initialize request, Then it returns a stable unsupported-protocol-version error using safe MCP-compatible error details, And no agent identity, capability, or presence state is created.
-  > AC: Given the bridge receives MCP requests or tool calls supported by the mesh bridge, When it maps them into internal mesh operations, Then request identity, correlation ID, trace context, and capability metadata are preserved where representable, And unsupported mappings are not silently dropped.
-  > AC: Given the daemon is unavailable when the stdio bridge starts, When bridge initialization attempts mesh connection, Then the bridge follows the same daemon connect/auto-spawn policy as other CLI/SDK surfaces, And failures are reported to the host with stable, safe error information.
-  > AC: Given the host process exits or stdio closes, When the bridge detects closure, Then the corresponding mesh connection and presence state are cleaned up deterministically, And no orphaned agent remains visible as connected.
-  > AC: Given MCP bridge conformance tests run, When initialize success, out-of-sequence MCP input, duplicate initialize, unsupported protocol version, daemon unavailable, supported request mapping, policy-denied capability, redacted secret field, host exit, and malformed MCP input scenarios execute, Then bridge behavior is deterministic and pinned to the supported MCP version fixture set.
-  > Spec: specs/planning-artifacts/epics.md#story-3-7
 - [x] Story 3.8: Degrade Gracefully for Baseline MCP Capability Limits
-  > As a developer bridging an MCP host
-  > I want unsupported mesh capabilities to return explicit unsupported-capability results
-  > So that baseline MCP hosts fail clearly instead of appearing broken or silently losing behavior.
-  > AC: Given a connected MCP host supports only baseline MCP capability shapes, When the bridge exposes mesh capabilities to that host, Then only capabilities representable on the MCP wire are exposed, And non-representable capabilities are withheld or marked unsupported according to documented rules.
-  > AC: Given the host invokes a mesh capability that cannot be represented on baseline MCP, When the bridge evaluates the invocation, Then it returns a named unsupported-capability result, And the result includes safe remediation text or equivalent CLI/SDK handoff where available.
-  > AC: Given a mesh operation partially maps to MCP but loses required semantics such as streaming, delivery ACK, trace context, or high-privilege policy, When the bridge evaluates the mapping, Then it refuses or degrades explicitly according to fixture-backed rules, And it does not pretend full mesh semantics were preserved.
-  > AC: Given unsupported-capability results occur, When the daemon and CLI surfaces observe them, Then they are visible as structured events and stable errors, And secret payload data remains redacted.
-  > AC: Given MCP graceful-degradation tests run, When supported capability, unsupported capability, partial mapping, policy-denied, and trace-context-limited scenarios execute, Then the bridge produces deterministic results pinned to the MCP version fixture set.
-  > Spec: specs/planning-artifacts/epics.md#story-3-8
 ### Forensic Persistence, Trace, and Recovery
 > Goal: Developers can reconstruct, inspect, tail, replay, and recover multi-agent conversations from durable local evidence when something breaks.
 
 - [x] Story 4.1: Persist Envelopes, Audit Entries, and Trace Indexes
-  > As a developer
-  > I want every accepted envelope to become durable local evidence
-  > So that I can later inspect, trace, replay, and audit what agents actually did.
-  > AC: Given the daemon accepts an envelope for durable processing, When the persistence writer commits it, Then the envelope record includes daemon sequence, message ID, source agent, target or subject, timestamp, correlation ID, trace ID, parent/lineage metadata, delivery state, and safe payload metadata, And durable ACK is emitted only after the relevant SQLite/sqlx transaction commits; temporary memory, queue buffering, WAL intent, or process-local cache state never counts as durable success.
-  > AC: Given the accepted envelope changes delivery or authorization state, When the state transition occurs, Then an audit entry is written with actor/agent identity, action, capability or subject, correlation ID, trace ID, prior-message lineage where available, and safe outcome details, And secret fields are redacted before persistence.
-  > AC: Given an envelope, delivery-state change, or authorization decision is persisted, When its audit entry is written, Then the audit row links to the relevant envelope/message ID, daemon sequence, previous audit hash, current audit hash, actor, action, state transition, and safe outcome details, And the envelope record, trace indexes, audit entry, and daemon sequence assignment are committed atomically or not visible as durable.
-  > AC: Given trace and correlation lookup are required by downstream trace/UI stories, When messages and audit entries are persisted, Then queryable indexes exist for correlation ID, trace ID, agent ID, subject, delivery state, and time window, And index naming follows the architecture conventions.
-  > AC: Given persistence is unavailable, migration state is invalid, or disk-full behavior is encountered, When the daemon tries to persist accepted work, Then the operation fails with stable typed persistence errors or enters the documented read-degraded posture, And no durable ACK is emitted for uncommitted work.
-  > AC: Given the daemon opens a corrupt, partially migrated, future-schema, or unreadable store, When startup or recovery validation runs, Then the daemon refuses unsafe writes or enters the documented read-degraded posture with stable typed diagnostics, And no durable ACK is emitted until store integrity and migration state are safe.
-  > AC: Given two daemon starts or migration workers race while schema migration is required, When migration locking runs, Then exactly one migrator applies forward-only migrations atomically, And failures leave pre-migration state intact while losing processes refuse startup with stable diagnostics.
-  > AC: Given the daemon crashes before, during, or after a persistence transaction, When it restarts, Then fully committed records, daemon sequences, audit hashes, and trace indexes are recovered exactly once, And partially committed or ambiguous work is not reported as durable and is surfaced through stable recovery diagnostics.
-  > AC: Given SQLite WAL recovery benchmarks run against the reference 7-day default-retention audit database, When the daemon performs startup recovery, Then recovery completes in <= 2 seconds on the v0.1 reference platform, And benchmark failures block release readiness.
-  > AC: Given persistence conformance tests run, When accepted envelope, commit failure, audit-hash-linkage, atomic-sequence-assignment, corrupt-store-open, redaction, indexed query, daemon restart, crash-before-after-commit, and daemon crash scenarios execute, Then accepted records are recoverable after restart and failed records are not reported as durable.
-  > Spec: specs/planning-artifacts/epics.md#story-4-1
 - [x] Story 4.2: Propagate Tracecontext and Emit OpenTelemetry Schema
-  > As a developer
-  > I want every mesh operation to carry trace context and emit documented telemetry
-  > So that I can follow causality across agents without instrumenting each hop by hand.
-  > AC: Given an envelope enters the mesh with W3C `traceparent` and `tracestate` values, When the daemon routes, persists, delivers, retries, or dead-letters the envelope, Then trace context is propagated to downstream operations without adopter intervention, And missing trace context is generated according to documented rules.
-  > AC: Given an envelope enters with malformed `traceparent` or `tracestate`, When trace context is validated, Then malformed context is rejected or normalized according to one documented rule before routing, And malformed values are never propagated downstream or emitted as valid telemetry.
-  > AC: Given request/reply, streaming, publish/subscribe, fetch/lease, ACK/NACK, and cancellation operations occur, When telemetry is enabled for local observation or test capture, Then spans and metrics follow the documented `zornmesh.*` schema, And high-cardinality values such as correlation IDs and subjects are not emitted as metric labels.
-  > AC: Given trace data is recorded for a mesh operation, When the operation crosses agents or delivery states, Then parent/child span relationships preserve causality across the full path, And late, retry, replay, dead-letter, and cancellation states are represented as explicit events or attributes.
-  > AC: Given telemetry export is not configured, When normal daemon operations run, Then no outbound telemetry network connection is made, And local trace/audit evidence remains available for CLI and future UI surfaces.
-  > AC: Given an OpenTelemetry exporter is configured but unreachable, slow, or returning errors, When mesh operations emit telemetry, Then broker delivery, persistence, and ACK paths are not blocked beyond the documented budget, And exporter failures are bounded, observable through health/diagnostic events, and do not drop local audit or trace evidence.
-  > AC: Given metrics include labels derived from agents, subjects, capability IDs, error categories, or delivery states, When label values exceed the documented cardinality cap, Then excess values are bucketed or suppressed according to the telemetry schema, And correlation IDs, trace IDs, message IDs, raw subjects, and payload fragments never become metric labels.
-  > AC: Given observability conformance tests run, When trace propagation, schema validation, malformed traceparent, malformed tracestate, no-export-default, exporter unreachable, exporter slow, high-cardinality, cardinality cap, and multi-hop causality scenarios execute, Then output matches the documented telemetry schema and fixture expectations.
-  > Spec: specs/planning-artifacts/epics.md#story-4-2
 - [x] Story 4.3: Capture Dead Letters with Structured Failure Reasons
-  > As a developer
-  > I want undeliverable or exhausted envelopes to land in a dead-letter queue with clear causes
-  > So that failures remain inspectable and recoverable instead of disappearing.
-  > AC: Given an envelope cannot be delivered because no eligible recipient exists, a TTL expires, retry budget is exhausted, validation fails after acceptance, or delivery repeatedly fails, When terminal failure is reached, Then the broker writes a dead-letter record with message ID, source, intended target/subject, correlation ID, trace ID, terminal state, failure category, and safe details, And the dead-letter record is persisted through the SQLite/sqlx durable store before the original envelope is considered terminal.
-  > AC: Given a dead-letter record includes payload metadata, When it is persisted or displayed, Then secret fields are redacted according to the shared redaction contract, And the record preserves enough metadata for trace, inspect, and future UI recovery flows.
-  > AC: Given multiple delivery attempts occurred before dead-lettering, When the DLQ record is created, Then attempt count, last failure category, and relevant timing metadata are captured, And retry history can be correlated to audit/trace entries.
-  > AC: Given a developer queries dead letters by subject, agent, correlation ID, failure category, or time window, When matching records exist, Then the CLI/API returns structured results with stable schema and clear empty-state behavior.
-  > AC: Given DLQ conformance tests run, When no-recipient, TTL-expired, retry-exhausted, validation-terminal, redaction, corrupt-store, restart-recovery, and filtered-query scenarios execute, Then each terminal failure creates exactly one inspectable dead-letter record.
-  > Spec: specs/planning-artifacts/epics.md#story-4-3
 - [x] Story 4.4: Inspect Persistence State with Structured Filters
-  > As a developer
-  > I want to inspect persisted messages, dead letters, audit entries, and runtime metadata with filters
-  > So that I can answer "what happened?" without opening SQLite by hand.
-  > AC: Given persisted messages, dead letters, audit entries, schema metadata, and release-integrity metadata exist or are unavailable, When the developer runs the inspect command or SDK/API equivalent, Then the response clearly distinguishes available data, unavailable data, empty states, and unsupported placeholders, And output is available in human and JSON modes.
-  > AC: Given the developer filters by correlation ID, trace ID, agent ID, subject, delivery state, failure category, or time window, When matching records exist, Then only matching records are returned in deterministic order, And filter chips/metadata in structured output explain which filters were applied.
-  > AC: Given no matching records exist, When an inspect query returns empty, Then the output explains the empty state and suggests relevant next actions such as trace, tail, doctor, or retention checks, And JSON mode returns an explicit empty data collection, not omitted fields.
-  > AC: Given persisted records contain redacted payloads or secret markers, When inspect output is rendered, Then raw secret values are never emitted, And redaction markers remain understandable in both human and JSON modes.
-  > AC: Given an inspect query could return more records than the documented default or maximum page size, When the CLI/API renders results, Then output is paginated with deterministic ordering, explicit limit metadata, and a stable next-cursor or completion marker, And over-limit requests return a stable validation error or are clamped according to documented rules.
-  > AC: Given inspect conformance tests run, When filtered message, DLQ, audit, empty, redacted, huge result set, pagination cursor, over-limit request, and unavailable-metadata scenarios execute, Then output shapes, ordering, stdout/stderr separation, and exit codes match fixtures.
-  > Spec: specs/planning-artifacts/epics.md#story-4-4
 - [x] Story 4.5: Reconstruct Conversation Timeline by Correlation ID
-  > As a developer debugging a broken multi-agent workflow
-  > I want `zornmesh trace <correlation_id>` to rebuild the ordered conversation timeline
-  > So that I can understand every participating agent, message, and delivery state without stitching logs by hand.
-  > AC: Given persisted messages and audit entries share a correlation ID, When the developer runs `zornmesh trace <correlation_id>`, Then the command returns an ordered timeline containing every available envelope, hop, participating agent, delivery state, timestamp, and safe payload summary, And ordering is based on daemon sequence/persisted chronology, not browser or client receipt time.
-  > AC: Given the trace includes retries, late arrivals, replays, dead letters, or cancellations, When the timeline is rendered, Then each exceptional state is explicitly marked in human and JSON output, And the timeline does not collapse partial failure into success.
-  > AC: Given no records exist for the requested correlation ID, When the trace command runs, Then it returns a stable not-found result with remediation hints, And JSON output preserves the stable top-level schema with empty data and warnings.
-  > AC: Given records are missing because of retention, corruption, or partial message loss, When the trace command detects a gap, Then the output marks the trace as partial/gap detected, And points to inspect, doctor, retention, or audit verification next steps.
-  > AC: Given trace reconstruction tests run, When complete, missing, partial, retry, replay, dead-letter, and cancellation timelines execute, Then timeline output is deterministic and fixture-covered for both human and JSON modes.
-  > Spec: specs/planning-artifacts/epics.md#story-4-5
 - [x] Story 4.6: Reconstruct Span Trees for Request/Reply and Streaming
   > As a developer debugging causality
   > I want trace output to show parent/child span relationships for request/reply and streaming exchanges
@@ -127,7 +53,7 @@
   > AC: Given partial trace data is available, When parent/child reconstruction cannot be completed, Then the output reports partial reconstruction with safe diagnostics, And it does not invent or infer missing causality edges as facts.
   > AC: Given span-tree tests run, When request/reply, streaming, fan-out, retry, replay, self-parent, cycle, duplicate edge, missing-parent, and partial-data scenarios execute, Then reconstructed causality is deterministic and fixture-covered.
   > Spec: specs/planning-artifacts/epics.md#story-4-6
-- [ ] Story 4.7: Live-Tail Envelopes by Subject Pattern
+- [x] Story 4.7: Live-Tail Envelopes by Subject Pattern
   > As a developer
   > I want to live-tail envelope flow by subject pattern
   > So that I can watch the mesh in real time while agents coordinate.
