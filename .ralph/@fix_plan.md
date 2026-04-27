@@ -22,16 +22,7 @@
 - [x] Story 2.5: Stream Response Chunks with Byte-Budget Flow Control
 - [x] Story 2.6: Cancel In-Flight Requests and Streams
 - [x] Story 2.7: Resume Durable Subscriptions After Daemon Restart
-  > As an agent author
-  > I want a durable subscription to resume from its last acknowledged position after daemon restart
-  > So that my agent can continue processing without manually tracking offsets.
-  > AC: Given an agent creates a durable subscription with a stable subscription identity, When envelopes are delivered and acknowledged, Then the daemon records durable subscription identity, scope, last acknowledged sequence, lease state, retry counters, and retention-gap markers through SQLite/sqlx, And the recorded position is persisted through the SQLite/sqlx durability model rather than in-memory state and is isolated from other subscriptions.
-  > AC: Given the daemon restarts after acknowledged and unacknowledged deliveries, When the agent reconnects with the same durable subscription identity, Then acknowledged envelopes are not redelivered, And unacknowledged or expired-lease envelopes become eligible for redelivery according to at-least-once semantics.
-  > AC: Given a durable subscription identity is missing, duplicated incorrectly, or conflicts with an existing subscription scope, When the subscription is created or resumed, Then the daemon returns a stable validation/conflict error, And no subscription state is silently overwritten.
-  > AC: Given retention policy removes data required by a durable subscription, When the subscription attempts to resume before or after the retained range, Then the daemon reports a structured retention-gap condition, And the agent receives remediation guidance rather than an empty success.
-  > AC: Given durable subscription conformance tests run, When restart with cleared memory caches, crash, reconnect, acknowledged, unacknowledged, conflicting identity, corrupt durable state, and retention-gap scenarios execute, Then resume behavior is deterministic and leaves observable state for downstream trace/recovery stories.
-  > Spec: specs/planning-artifacts/epics.md#story-2-7
-- [ ] Story 2.8: Surface Backpressure at Queue and Lease Bounds
+- [x] Story 2.8: Surface Backpressure at Queue and Lease Bounds
   > As an agent author
   > I want publishers to receive clear backpressure feedback when consumers fall behind
   > So that agents can slow down, retry later, or route work safely instead of losing messages silently.

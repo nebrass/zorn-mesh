@@ -605,6 +605,142 @@ impl Broker {
             .len()
     }
 
+    pub fn configure_queue_bounds(
+        &self,
+        queue: impl Into<String>,
+        config: QueueBoundsConfig,
+    ) -> Result<(), BrokerError> {
+        let queue = queue.into();
+        if queue.trim().is_empty() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::DeliveryValidation,
+                "queue name must not be empty",
+            ));
+        }
+        if config.max_depth == 0 {
+            return Err(BrokerError::new(
+                BrokerErrorCode::DeliveryValidation,
+                "queue max_depth must be greater than zero",
+            ));
+        }
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        inner.queue_bounds.insert(queue, config);
+        Ok(())
+    }
+
+    pub fn publish_with_backpressure(
+        &self,
+        queue: impl Into<String>,
+        envelope: Envelope,
+    ) -> Result<BackpressureOutcome, BrokerError> {
+        let queue = queue.into();
+        if queue.trim().is_empty() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::DeliveryValidation,
+                "queue name must not be empty",
+            ));
+        }
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let config = inner.queue_bounds.get(&queue).copied();
+        let queued = inner.queues.entry(queue.clone()).or_default();
+        let depth = queued.len();
+        let Some(config) = config else {
+            queued.push_back(QueuedEnvelope {
+                envelope,
+                attempt: 1,
+            });
+            return Ok(BackpressureOutcome::Accepted);
+        };
+        if depth < config.max_depth {
+            queued.push_back(QueuedEnvelope {
+                envelope,
+                attempt: 1,
+            });
+            return Ok(BackpressureOutcome::Accepted);
+        }
+        let details = BackpressureDetails {
+            subject_scope: queue.clone(),
+            queue_bound: config.max_depth,
+            exceeded_limit: depth,
+            retryable: true,
+            suggested_delay: Duration::from_millis(50),
+            remediation: format!(
+                "queue '{queue}' at bound {} envelopes; reduce publish rate or grow consumer capacity",
+                config.max_depth
+            ),
+        };
+        match config.drop_policy {
+            QueueDropPolicy::Reject => Ok(BackpressureOutcome::RejectedBackpressure { details }),
+            QueueDropPolicy::DropOldest => {
+                let dropped = queued.pop_front();
+                queued.push_back(QueuedEnvelope {
+                    envelope,
+                    attempt: 1,
+                });
+                Ok(BackpressureOutcome::DroppedByPolicy {
+                    policy: QueueDropPolicy::DropOldest,
+                    details,
+                    dropped_correlation_id: dropped
+                        .map(|item| item.envelope.correlation_id().to_owned()),
+                })
+            }
+            QueueDropPolicy::DropNewest => Ok(BackpressureOutcome::DroppedByPolicy {
+                policy: QueueDropPolicy::DropNewest,
+                details,
+                dropped_correlation_id: Some(envelope.correlation_id().to_owned()),
+            }),
+        }
+    }
+
+    pub fn record_consumer_health_signal(
+        &self,
+        consumer_id: &str,
+        signal: ConsumerHealthSignal,
+    ) -> Result<ConsumerHealthState, BrokerError> {
+        if consumer_id.trim().is_empty() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::DeliveryValidation,
+                "consumer ID must not be empty",
+            ));
+        }
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let entry = inner
+            .consumer_health
+            .entry(consumer_id.to_owned())
+            .or_insert_with(|| ConsumerHealthRecord {
+                state: ConsumerHealthState::Healthy,
+                strikes: 0,
+            });
+        entry.strikes = entry.strikes.saturating_add(match signal {
+            ConsumerHealthSignal::MissedAck | ConsumerHealthSignal::MissedLease => 1,
+        });
+        entry.state = match entry.strikes {
+            0 => ConsumerHealthState::Healthy,
+            1 => ConsumerHealthState::Backpressured,
+            2 => ConsumerHealthState::Retrying,
+            _ => ConsumerHealthState::Failed,
+        };
+        Ok(entry.state)
+    }
+
+    pub fn consumer_health_state(&self, consumer_id: &str) -> ConsumerHealthState {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .consumer_health
+            .get(consumer_id)
+            .map(|record| record.state)
+            .unwrap_or(ConsumerHealthState::Healthy)
+    }
+
+    pub fn clear_consumer_backpressure(&self, consumer_id: &str) {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        if let Some(record) = inner.consumer_health.get_mut(consumer_id) {
+            record.state = ConsumerHealthState::Healthy;
+            record.strikes = 0;
+        }
+    }
+
     pub fn lease_audit_events(&self) -> Vec<LeaseAuditEvent> {
         self.inner
             .lock()
@@ -962,6 +1098,140 @@ struct BrokerInner {
     streams: HashMap<String, StreamRecord>,
     stream_correlation_index: HashMap<String, String>,
     cancelled_correlations: HashSet<String>,
+    queue_bounds: HashMap<String, QueueBoundsConfig>,
+    consumer_health: HashMap<String, ConsumerHealthRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueBoundsConfig {
+    max_depth: usize,
+    drop_policy: QueueDropPolicy,
+}
+
+impl QueueBoundsConfig {
+    pub const fn new(max_depth: usize, drop_policy: QueueDropPolicy) -> Self {
+        Self {
+            max_depth,
+            drop_policy,
+        }
+    }
+
+    pub const fn max_depth(&self) -> usize {
+        self.max_depth
+    }
+
+    pub const fn drop_policy(&self) -> QueueDropPolicy {
+        self.drop_policy
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueDropPolicy {
+    Reject,
+    DropOldest,
+    DropNewest,
+}
+
+impl QueueDropPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::DropOldest => "drop_oldest",
+            Self::DropNewest => "drop_newest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackpressureOutcome {
+    Accepted,
+    Deferred {
+        details: BackpressureDetails,
+    },
+    RejectedBackpressure {
+        details: BackpressureDetails,
+    },
+    DroppedByPolicy {
+        policy: QueueDropPolicy,
+        details: BackpressureDetails,
+        dropped_correlation_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackpressureDetails {
+    subject_scope: String,
+    queue_bound: usize,
+    exceeded_limit: usize,
+    retryable: bool,
+    suggested_delay: Duration,
+    remediation: String,
+}
+
+impl BackpressureDetails {
+    pub fn subject_scope(&self) -> &str {
+        &self.subject_scope
+    }
+
+    pub const fn queue_bound(&self) -> usize {
+        self.queue_bound
+    }
+
+    pub const fn exceeded_limit(&self) -> usize {
+        self.exceeded_limit
+    }
+
+    pub const fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub const fn suggested_delay(&self) -> Duration {
+        self.suggested_delay
+    }
+
+    pub fn remediation(&self) -> &str {
+        &self.remediation
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerHealthState {
+    Healthy,
+    Backpressured,
+    Retrying,
+    Failed,
+}
+
+impl ConsumerHealthState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Backpressured => "backpressured",
+            Self::Retrying => "retrying",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerHealthSignal {
+    MissedAck,
+    MissedLease,
+}
+
+impl ConsumerHealthSignal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissedAck => "missed_ack",
+            Self::MissedLease => "missed_lease",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConsumerHealthRecord {
+    state: ConsumerHealthState,
+    strikes: u32,
 }
 
 #[derive(Debug, Clone)]

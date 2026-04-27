@@ -79,3 +79,16 @@ durable_subscription|error|E_SUBSCRIPTION_NOT_FOUND
 durable_subscription|error|E_SUBSCRIPTION_CONFLICT
 durable_subscription|error|E_SUBSCRIPTION_IO
 durable_subscription|error|E_SUBSCRIPTION_CORRUPT
+backpressure|outcome|accepted
+backpressure|outcome|deferred
+backpressure|outcome|rejected_backpressure
+backpressure|outcome|dropped_by_policy
+backpressure|policy|reject
+backpressure|policy|drop_oldest
+backpressure|policy|drop_newest
+consumer_health|state|healthy
+consumer_health|state|backpressured
+consumer_health|state|retrying
+consumer_health|state|failed
+consumer_health|signal|missed_ack
+consumer_health|signal|missed_lease
