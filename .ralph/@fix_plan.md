@@ -45,16 +45,6 @@
 - [x] Story 4.6: Reconstruct Span Trees for Request/Reply and Streaming
 - [x] Story 4.7: Live-Tail Envelopes by Subject Pattern
 - [x] Story 4.8: Redeliver Previously Sent Envelopes Safely
-  > As a developer recovering from a failed workflow
-  > I want to redeliver a previously sent envelope from the audit log
-  > So that I can recover work without manually reconstructing payloads or hiding that replay occurred.
-  > AC: Given an envelope exists in the audit log and is eligible for redelivery, When the developer requests replay/redelivery for that envelope, Then the daemon creates a new delivery attempt linked to the original message, And the replay is clearly marked as replayed-from the original rather than treated as the original send.
-  > AC: Given the selected envelope is ineligible for redelivery because of retention, authorization, payload size, redaction, or policy limits, When redelivery is requested, Then the command returns a stable refusal reason, And no new delivery attempt is created.
-  > AC: Given redelivery is allowed, When the replayed envelope is routed, Then it receives a new message/delivery identity while preserving correlation and replay lineage metadata, And trace output can show original and replayed attempts together.
-  > AC: Given a developer requests dry-run or preview behavior before redelivery, When the preview is generated, Then the output shows target, subject, safe payload summary, replay lineage, policy checks, expected effect, and required confirmation input, And no delivery side effect occurs.
-  > AC: Given replay/redelivery would create a side effect, When the command runs in interactive, non-interactive, JSON/API, or scripted mode, Then redelivery requires explicit confirmation, `--yes`, or a preview-issued confirmation token according to documented mode rules, And missing, stale, or mismatched confirmation refuses replay without creating a delivery attempt.
-  > AC: Given redelivery tests run, When eligible replay, ineligible replay, preview, confirmation required, `--yes`, stale confirmation token, non-interactive refusal, replay lineage, and redaction scenarios execute, Then replay behavior is deterministic, auditable, and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-4-8
 - [ ] Story 4.9: Configure Retention and Surface Retention Gaps
   > As an operator
   > I want configurable retention for messages, dead letters, and audit records

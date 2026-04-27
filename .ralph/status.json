@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-04-27T16:31:34+00:00",
-  "loop_count": 1,
-  "calls_made_this_hour": 0,
+  "timestamp": "2026-04-27T19:39:10+00:00",
+  "loop_count": 3,
+  "calls_made_this_hour": 3,
   "max_calls_per_hour": 100,
-  "last_action": "unexpected_exit",
-  "status": "stopped",
-  "exit_reason": "error",
-  "next_reset": "21:31:34",
-  "driver_exit_code": 1
+  "last_action": "executing",
+  "status": "running",
+  "exit_reason": "",
+  "next_reset": "00:39:10",
+  "driver_exit_code": null
 }
