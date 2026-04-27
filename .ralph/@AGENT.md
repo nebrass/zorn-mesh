@@ -44,6 +44,7 @@ cd sdks/typescript && bun test
 - Story 1.1 is scaffold-only: daemon routing, durable store behavior, and auto-spawn semantics remain out of scope.
 - Story 1.2 adds the local daemon rendezvous contract: `zornmesh daemon` owns a private UDS, emits `zorn: state=ready socket=<path>`, rejects unsafe local trust states, and honors `ZORN_NO_AUTOSPAWN=1` in SDK connect validation.
 - Story 1.3 adds the Rust SDK auto-spawn contract: `Mesh::connect()` resolves the UDS, starts an SDK-owned local daemon when enabled, retries readiness up to the connect budget, and exposes typed unreachable/timeout errors.
+- Story 1.4 adds first local pub/sub routing: Rust SDK clients use `Mesh::subscribe()` and `Mesh::publish()` over the trusted UDS, with shared subject-routing fixtures under `fixtures/pubsub`.
 
 ## Feature Development Quality Standards
 

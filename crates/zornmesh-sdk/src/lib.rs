@@ -5,12 +5,18 @@ pub const CRATE_BOUNDARY: &str = "zornmesh-sdk";
 mod spawn;
 
 use std::{
+    io,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
 
+use zornmesh_core::Envelope;
 use zornmesh_daemon::DaemonError;
+use zornmesh_proto::{
+    ClientFrame, FrameStatus, ProtoError, ServerFrame, read_server_frame, write_client_frame,
+};
 use zornmesh_rpc::local::{self, ENV_NO_AUTOSPAWN, ENV_SOCKET_PATH, LocalError, LocalErrorCode};
 
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_millis(1_000);
@@ -196,6 +202,67 @@ impl Mesh {
     }
 
     #[doc(hidden)]
+    pub fn for_test_socket(socket_path: impl Into<PathBuf>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
+        }
+    }
+
+    pub fn publish(&self, envelope: &Envelope) -> SendResult {
+        match self.open_stream() {
+            Ok(mut stream) => {
+                if let Err(error) = write_client_frame(
+                    &mut stream,
+                    &ClientFrame::Publish {
+                        envelope: envelope.clone(),
+                    },
+                ) {
+                    return SendResult::from_proto_error(error);
+                }
+
+                match read_server_frame(&mut stream) {
+                    Ok(ServerFrame::SendResult(result)) => SendResult::from_frame(result),
+                    Ok(ServerFrame::Delivery { .. }) => {
+                        SendResult::rejected("E_PROTOCOL", "daemon returned delivery to publisher")
+                    }
+                    Err(error) => SendResult::from_proto_error(error),
+                }
+            }
+            Err(error) if error.code() == SdkErrorCode::DaemonUnreachable => {
+                SendResult::daemon_unreachable(error.to_string())
+            }
+            Err(error) => SendResult::rejected(error.code().as_str(), error.to_string()),
+        }
+    }
+
+    pub fn subscribe(&self, pattern: impl Into<String>) -> Result<Subscription, SdkError> {
+        let mut stream = self.open_stream()?;
+        write_client_frame(
+            &mut stream,
+            &ClientFrame::Subscribe {
+                pattern: pattern.into(),
+            },
+        )
+        .map_err(SdkError::from)?;
+
+        match read_server_frame(&mut stream).map_err(SdkError::from)? {
+            ServerFrame::SendResult(result) if result.status() == FrameStatus::Accepted => {
+                Ok(Subscription { stream })
+            }
+            ServerFrame::SendResult(result) => Err(SdkError::from_send_result(result)),
+            ServerFrame::Delivery { .. } => Err(SdkError::new(
+                SdkErrorCode::Protocol,
+                "daemon returned delivery before subscription acceptance",
+            )),
+        }
+    }
+
+    fn open_stream(&self) -> Result<UnixStream, SdkError> {
+        let uid = local::effective_uid().map_err(SdkError::from)?;
+        local::connect_trusted_socket(&self.socket_path, uid).map_err(SdkError::from)
+    }
+
+    #[doc(hidden)]
     pub fn shutdown_autospawned_daemon_for_tests(socket_path: &Path) {
         spawn::shutdown_daemon_for_tests(socket_path);
     }
@@ -218,6 +285,10 @@ pub enum SdkErrorCode {
     DaemonUnreachable,
     DaemonReadinessTimeout,
     InvalidConfig,
+    SubjectValidation,
+    SubscriptionCap,
+    PayloadLimit,
+    Protocol,
     Io,
 }
 
@@ -229,6 +300,10 @@ impl SdkErrorCode {
             Self::DaemonUnreachable => "E_DAEMON_UNREACHABLE",
             Self::DaemonReadinessTimeout => "E_DAEMON_READINESS_TIMEOUT",
             Self::InvalidConfig => "E_INVALID_CONFIG",
+            Self::SubjectValidation => "E_SUBJECT_VALIDATION",
+            Self::SubscriptionCap => "E_SUBSCRIPTION_CAP",
+            Self::PayloadLimit => "E_PAYLOAD_LIMIT",
+            Self::Protocol => "E_PROTOCOL",
             Self::Io => "E_DAEMON_IO",
         }
     }
@@ -260,6 +335,126 @@ impl SdkError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendStatus {
+    Accepted,
+    Rejected,
+    DaemonUnreachable,
+    ValidationFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendResult {
+    status: SendStatus,
+    code: String,
+    message: String,
+}
+
+impl SendResult {
+    fn from_frame(frame: zornmesh_proto::SendResultFrame) -> Self {
+        let status = match frame.status() {
+            FrameStatus::Accepted => SendStatus::Accepted,
+            FrameStatus::Rejected => SendStatus::Rejected,
+            FrameStatus::ValidationFailed => SendStatus::ValidationFailed,
+        };
+        Self {
+            status,
+            code: frame.code().to_owned(),
+            message: frame.message().to_owned(),
+        }
+    }
+
+    fn daemon_unreachable(message: impl Into<String>) -> Self {
+        Self {
+            status: SendStatus::DaemonUnreachable,
+            code: SdkErrorCode::DaemonUnreachable.as_str().to_owned(),
+            message: message.into(),
+        }
+    }
+
+    fn rejected(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: SendStatus::Rejected,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    fn validation_failed(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: SendStatus::ValidationFailed,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    fn from_proto_error(error: ProtoError) -> Self {
+        match error.code() {
+            "E_SUBJECT_VALIDATION" | "E_PAYLOAD_LIMIT" | "E_PROTOCOL" => {
+                Self::validation_failed(error.code(), error.to_string())
+            }
+            code => Self::rejected(code, error.to_string()),
+        }
+    }
+
+    pub const fn status(&self) -> SendStatus {
+        self.status
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Debug)]
+pub struct Subscription {
+    stream: UnixStream,
+}
+
+impl Subscription {
+    pub fn recv_delivery(&mut self, timeout: Duration) -> Result<Option<Delivery>, SdkError> {
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| SdkError::new(SdkErrorCode::Io, error.to_string()))?;
+
+        match read_server_frame(&mut self.stream) {
+            Ok(ServerFrame::Delivery { envelope, attempt }) => {
+                Ok(Some(Delivery { envelope, attempt }))
+            }
+            Ok(ServerFrame::SendResult(result)) => Err(SdkError::from_send_result(result)),
+            Err(error)
+                if matches!(
+                    error.io_kind(),
+                    Some(io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(SdkError::from(error)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivery {
+    envelope: Envelope,
+    attempt: u32,
+}
+
+impl Delivery {
+    pub const fn envelope(&self) -> &Envelope {
+        &self.envelope
+    }
+
+    pub const fn attempt(&self) -> u32 {
+        self.attempt
+    }
+}
+
 impl From<LocalError> for SdkError {
     fn from(value: LocalError) -> Self {
         let code = match value.code() {
@@ -270,6 +465,32 @@ impl From<LocalError> for SdkError {
             }
             LocalErrorCode::InvalidConfig => SdkErrorCode::InvalidConfig,
             LocalErrorCode::Io => SdkErrorCode::Io,
+        };
+        Self::new(code, value.message())
+    }
+}
+
+impl From<ProtoError> for SdkError {
+    fn from(value: ProtoError) -> Self {
+        let code = match value.code() {
+            "E_SUBJECT_VALIDATION" => SdkErrorCode::SubjectValidation,
+            "E_PAYLOAD_LIMIT" => SdkErrorCode::PayloadLimit,
+            "E_DAEMON_IO" => SdkErrorCode::Io,
+            _ => SdkErrorCode::Protocol,
+        };
+        Self::new(code, value.to_string())
+    }
+}
+
+impl SdkError {
+    fn from_send_result(value: zornmesh_proto::SendResultFrame) -> Self {
+        let code = match value.code() {
+            "E_SUBJECT_VALIDATION" => SdkErrorCode::SubjectValidation,
+            "E_SUBSCRIPTION_CAP" => SdkErrorCode::SubscriptionCap,
+            "E_PAYLOAD_LIMIT" => SdkErrorCode::PayloadLimit,
+            "E_PROTOCOL" => SdkErrorCode::Protocol,
+            "E_DAEMON_UNREACHABLE" => SdkErrorCode::DaemonUnreachable,
+            _ => SdkErrorCode::Io,
         };
         Self::new(code, value.message())
     }

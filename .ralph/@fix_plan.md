@@ -29,7 +29,7 @@
   > AC: Given the SDK connect contract is implemented, When the integration test runs concurrent Rust SDK connect attempts, Then all successful clients connect to the same daemon instance, And failed clients expose typed errors without orphaning daemon processes.
   > AC: Given shared SDK connect fixtures are created, When no daemon, existing daemon, disabled auto-spawn, stale socket, readiness timeout, and concurrent connect scenarios execute, Then Rust and TypeScript SDKs consume the same state names, error codes, and timeout expectations, And future SDK parity cannot silently diverge from the connect contract.
   > Spec: specs/planning-artifacts/epics.md#story-1-3
-- [ ] Story 1.4: Send First Local Publish/Subscribe Envelope
+- [x] Story 1.4: Send First Local Publish/Subscribe Envelope
   > As a developer
   > I want two local agents to publish and subscribe to a first envelope through the daemon
   > So that I can prove the local mesh coordinates real agent traffic end-to-end.

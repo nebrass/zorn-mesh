@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -11,11 +11,17 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
     time::Duration,
 };
 
+use zornmesh_broker::{Broker, BrokerError, BrokerErrorCode};
+use zornmesh_proto::{
+    ClientFrame, FrameStatus, ProtoError, SendResultFrame, ServerFrame, read_client_frame,
+    write_server_frame,
+};
 use zornmesh_rpc::local::{
     self, ENV_SHUTDOWN_BUDGET_MS, LocalError, LocalErrorCode, connect_trusted_socket,
 };
@@ -220,6 +226,7 @@ pub struct DaemonRuntime {
     lock_path: PathBuf,
     _lock_file: File,
     listener: Option<UnixListener>,
+    broker: Broker,
     state: DaemonState,
     readiness_line: String,
     shutdown_budget: Duration,
@@ -269,6 +276,7 @@ impl DaemonRuntime {
             lock_path,
             _lock_file: lock_file,
             listener: Some(listener),
+            broker: Broker::new(),
             state: DaemonState::Ready,
             shutdown_budget: config.shutdown_budget,
         })
@@ -282,7 +290,7 @@ impl DaemonRuntime {
         &self.readiness_line
     }
 
-    pub fn accept_once(&self) -> Result<Option<UnixStream>, DaemonError> {
+    pub fn accept_once(&self) -> Result<bool, DaemonError> {
         let listener = self.listener.as_ref().ok_or_else(|| {
             DaemonError::new(
                 DaemonErrorCode::DaemonUnreachable,
@@ -291,8 +299,12 @@ impl DaemonRuntime {
         })?;
 
         match listener.accept() {
-            Ok((stream, _addr)) => Ok(Some(stream)),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Ok((stream, _addr)) => {
+                let broker = self.broker.clone();
+                thread::spawn(move || handle_client(stream, broker));
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
             Err(error) => Err(DaemonError::new(
                 DaemonErrorCode::Io,
                 format!("failed to accept local daemon connection: {error}"),
@@ -368,6 +380,119 @@ pub fn run_foreground(config: DaemonConfig) -> Result<ShutdownReport, DaemonErro
     let report = daemon.shutdown_with_in_flight(0)?;
     println!("zorn: state=draining outcome={}", report.outcome.as_str());
     Ok(report)
+}
+
+fn handle_client(mut stream: UnixStream, broker: Broker) {
+    match read_client_frame(&mut stream) {
+        Ok(ClientFrame::Subscribe { pattern }) => handle_subscribe(stream, broker, pattern),
+        Ok(ClientFrame::Publish { envelope }) => handle_publish(&mut stream, broker, envelope),
+        Err(error) if is_connect_probe_close(&error) => {}
+        Err(error) => {
+            let _ = write_proto_error(&mut stream, &error);
+        }
+    }
+}
+
+fn handle_subscribe(mut stream: UnixStream, broker: Broker, pattern: String) {
+    let (delivery_tx, delivery_rx) = mpsc::channel();
+    let _subscription = match broker.subscribe(pattern, delivery_tx) {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            let _ = write_broker_error(&mut stream, &error);
+            return;
+        }
+    };
+
+    if write_result(
+        &mut stream,
+        FrameStatus::Accepted,
+        "ACCEPTED",
+        "subscription accepted",
+    )
+    .is_err()
+    {
+        return;
+    }
+
+    let _ = stream.set_nonblocking(true);
+    loop {
+        match delivery_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(delivery) => {
+                let frame = ServerFrame::Delivery {
+                    envelope: delivery.envelope().clone(),
+                    attempt: delivery.attempt(),
+                };
+                if write_server_frame(&mut stream, &frame).is_err() {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if client_has_closed(&mut stream) {
+            break;
+        }
+    }
+}
+
+fn handle_publish(stream: &mut UnixStream, broker: Broker, envelope: zornmesh_core::Envelope) {
+    match broker.publish(envelope) {
+        Ok(delivery_attempts) => {
+            let _ = write_result(
+                stream,
+                FrameStatus::Accepted,
+                "ACCEPTED",
+                format!("accepted for routing; delivery_attempts={delivery_attempts}"),
+            );
+        }
+        Err(error) => {
+            let _ = write_broker_error(stream, &error);
+        }
+    }
+}
+
+fn write_proto_error(stream: &mut UnixStream, error: &ProtoError) -> Result<(), ProtoError> {
+    write_result(
+        stream,
+        FrameStatus::ValidationFailed,
+        error.code(),
+        error.to_string(),
+    )
+}
+
+fn write_broker_error(stream: &mut UnixStream, error: &BrokerError) -> Result<(), ProtoError> {
+    let status = match error.code() {
+        BrokerErrorCode::SubjectValidation => FrameStatus::ValidationFailed,
+        BrokerErrorCode::SubscriptionCap => FrameStatus::Rejected,
+    };
+    write_result(stream, status, error.code().as_str(), error.message())
+}
+
+fn write_result(
+    stream: &mut UnixStream,
+    status: FrameStatus,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> Result<(), ProtoError> {
+    write_server_frame(
+        stream,
+        &ServerFrame::SendResult(SendResultFrame::new(status, code, message)),
+    )
+}
+
+fn is_connect_probe_close(error: &ProtoError) -> bool {
+    matches!(error, ProtoError::Truncated("frame_length"))
+}
+
+fn client_has_closed(stream: &mut UnixStream) -> bool {
+    let mut probe = [0_u8; 1];
+    match stream.read(&mut probe) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+        Err(_) => true,
+    }
 }
 
 fn prepare_existing_socket(path: &Path, uid: u32) -> Result<(), DaemonError> {

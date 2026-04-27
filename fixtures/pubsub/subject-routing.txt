@@ -1,0 +1,9 @@
+# kind|pattern|subject|matches
+exact|mesh.trace.created|mesh.trace.created|true
+exact|mesh.trace.created|mesh.trace.closed|false
+prefix|mesh.trace.>|mesh.trace.created|true
+prefix|mesh.trace.>|mesh.trace.created.v2|true
+prefix|mesh.trace.>|mesh.audit.created|false
+wildcard|mesh.*.created|mesh.trace.created|true
+wildcard|mesh.*.created|mesh.trace.created.v2|false
+wildcard|mesh.*.created|mesh.audit.created|true

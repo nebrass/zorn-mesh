@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 signal-hook = "0.3"
 zornmesh-broker = { path = "../zornmesh-broker" }
+zornmesh-core = { path = "../zornmesh-core" }
+zornmesh-proto = { path = "../zornmesh-proto" }
 zornmesh-rpc = { path = "../zornmesh-rpc" }
 zornmesh-store = { path = "../zornmesh-store" }
 
