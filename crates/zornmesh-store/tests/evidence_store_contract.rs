@@ -31,13 +31,15 @@ fn evidence_path(dir: &Path) -> PathBuf {
 }
 
 fn envelope() -> Envelope {
-    Envelope::with_metadata(
+    Envelope::with_trace_context(
         "agent.local/source",
         "mesh.work.created",
         b"{\"password\":\"must-not-persist\"}".to_vec(),
         1_700_000_000_001,
         "corr-evidence-1",
         "application/json; token=must-not-persist",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-1111111111111111-01",
+        None,
     )
     .expect("valid envelope")
 }
@@ -64,6 +66,7 @@ fn accepted_envelope_audit_entry_and_trace_indexes_commit_atomically() {
     assert_eq!(commit.envelope().timestamp_unix_ms(), 1_700_000_000_001);
     assert_eq!(commit.envelope().correlation_id(), "corr-evidence-1");
     assert_eq!(commit.envelope().trace_id(), "trace-1");
+    assert_eq!(commit.envelope().span_id(), "1111111111111111");
     assert_eq!(commit.envelope().parent_message_id(), Some("parent-msg-0"));
     assert_eq!(commit.envelope().delivery_state(), "accepted");
     assert_eq!(commit.envelope().payload_len(), 31);

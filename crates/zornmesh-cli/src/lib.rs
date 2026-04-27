@@ -1,7 +1,7 @@
 #![doc = "Command skeleton for the public zornmesh CLI."]
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::{self, BufRead, Write},
     os::unix::{
@@ -1629,6 +1629,7 @@ fn message_record_json(record: &EvidenceEnvelopeRecord) -> serde_json::Value {
         "timestamp_unix_ms": record.timestamp_unix_ms(),
         "correlation_id": record.correlation_id(),
         "trace_id": record.trace_id(),
+        "span_id": record.span_id(),
         "parent_message_id": record.parent_message_id(),
         "delivery_state": record.delivery_state(),
         "payload_len": record.payload_len(),
@@ -2322,12 +2323,818 @@ fn run_trace(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "events" && rest.iter().any(|arg| is_help(arg)) => {
             print_help("trace help", TRACE_HELP, invocation.output)
         }
-        [arg, ..] => Err(CliError::new(
+        [command, arg, ..] if command == "events" => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh trace argument '{arg}'"),
             ExitKind::UserError,
         )),
+        [correlation_id, rest @ ..] => {
+            let correlation_id = parse_non_empty_string("correlation id", correlation_id)?;
+            let options = parse_trace_options(rest)?;
+            trace_correlation(&correlation_id, options, invocation.output)
+        }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TraceOptions {
+    evidence_path: Option<PathBuf>,
+    span_tree: bool,
+}
+
+fn parse_trace_options(args: &[String]) -> Result<TraceOptions, CliError> {
+    let mut options = TraceOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = arg.strip_prefix("--evidence=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence", value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--evidence-path=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence-path", value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--store=") {
+            options.evidence_path = Some(parse_non_empty_path("--store", value)?);
+            index += 1;
+        } else if matches!(arg.as_str(), "--evidence" | "--evidence-path" | "--store") {
+            let value = inspect_option_value(args, index, arg)?;
+            options.evidence_path = Some(parse_non_empty_path(arg, value)?);
+            index += 2;
+        } else if arg == "--span-tree" {
+            options.span_tree = true;
+            index += 1;
+        } else {
+            return Err(CliError::new(
+                "E_UNSUPPORTED_COMMAND",
+                format!("unsupported zornmesh trace argument '{arg}'"),
+                ExitKind::UserError,
+            ));
+        }
+    }
+    Ok(options)
+}
+
+#[derive(Debug, Clone)]
+struct TraceEvent {
+    daemon_sequence: u64,
+    sort_rank: usize,
+    kind: &'static str,
+    message_id: String,
+    timestamp_unix_ms: Option<u64>,
+    source_agent: Option<String>,
+    target_or_subject: Option<String>,
+    subject: Option<String>,
+    participating_agents: Vec<String>,
+    delivery_state: String,
+    correlation_id: String,
+    trace_id: String,
+    span_id: Option<String>,
+    parent_message_id: Option<String>,
+    action: Option<String>,
+    relationship: &'static str,
+    exceptional_state: Option<&'static str>,
+    safe_payload_summary: serde_json::Value,
+    failure_category: Option<&'static str>,
+    attempt_count: Option<u32>,
+    safe_details: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TraceGap {
+    code: &'static str,
+    message_id: String,
+    missing_parent_message_id: Option<String>,
+    remediation: &'static str,
+}
+
+fn trace_correlation(
+    correlation_id: &str,
+    options: TraceOptions,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("trace"));
+    }
+
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?;
+    let mut warnings = Vec::new();
+    let (availability, events, span_tree, gaps, metadata) = match evidence_path.as_ref() {
+        Some(path) => match fs::metadata(path) {
+            Ok(_) => match FileEvidenceStore::open_evidence(path) {
+                Ok(store) => {
+                    let reconstruction = build_trace_reconstruction(correlation_id, &store);
+                    (
+                        "available",
+                        reconstruction.events,
+                        build_span_tree(&reconstruction.envelopes, &reconstruction.dead_letter_ids),
+                        reconstruction.gaps,
+                        inspect_metadata_json("available", Some(path), Some(&store), None),
+                    )
+                }
+                Err(error) => {
+                    let message = format!("evidence store is unavailable: {error}");
+                    warnings.push(DiagnosticWarning::new(
+                        "W_EVIDENCE_STORE_UNAVAILABLE",
+                        message.clone(),
+                    ));
+                    (
+                        "unavailable",
+                        Vec::new(),
+                        empty_span_tree(options.span_tree, "unavailable"),
+                        Vec::new(),
+                        inspect_metadata_json("unavailable", Some(path), None, Some(&message)),
+                    )
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let message = "evidence store does not exist".to_owned();
+                warnings.push(DiagnosticWarning::new(
+                    "W_EVIDENCE_STORE_UNAVAILABLE",
+                    message.clone(),
+                ));
+                (
+                    "unavailable",
+                    Vec::new(),
+                    empty_span_tree(options.span_tree, "unavailable"),
+                    Vec::new(),
+                    inspect_metadata_json("unavailable", Some(path), None, Some(&message)),
+                )
+            }
+            Err(error) => {
+                let message = format!("evidence store cannot be inspected: {error}");
+                warnings.push(DiagnosticWarning::new(
+                    "W_EVIDENCE_STORE_UNAVAILABLE",
+                    message.clone(),
+                ));
+                (
+                    "unavailable",
+                    Vec::new(),
+                    empty_span_tree(options.span_tree, "unavailable"),
+                    Vec::new(),
+                    inspect_metadata_json("unavailable", Some(path), None, Some(&message)),
+                )
+            }
+        },
+        None => {
+            let message = format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            );
+            warnings.push(DiagnosticWarning::new(
+                "W_EVIDENCE_STORE_UNAVAILABLE",
+                message.clone(),
+            ));
+            (
+                "unavailable",
+                Vec::new(),
+                empty_span_tree(options.span_tree, "unavailable"),
+                Vec::new(),
+                inspect_metadata_json("unavailable", None, None, Some(&message)),
+            )
+        }
+    };
+
+    let state = trace_state(availability, &events, &gaps, &span_tree);
+    if state == "not_found" {
+        warnings.push(DiagnosticWarning::new(
+            "W_TRACE_NOT_FOUND",
+            format!("no evidence records matched correlation ID '{correlation_id}'"),
+        ));
+    }
+    if state == "partial" {
+        warnings.push(DiagnosticWarning::new(
+            "W_TRACE_GAP_DETECTED",
+            "trace reconstruction is partial; inspect audit evidence, retention, and doctor output",
+        ));
+    }
+
+    let next_actions = trace_next_actions(state);
+    let participants = trace_participants(&events);
+    let delivery_states = trace_delivery_states(&events);
+    match output {
+        OutputFormat::Human => print_trace_human(TraceHumanReport {
+            correlation_id,
+            availability,
+            state,
+            events: &events,
+            participants: &participants,
+            delivery_states: &delivery_states,
+            gaps: &gaps,
+            span_tree: &span_tree,
+            span_tree_requested: options.span_tree,
+            next_actions: &next_actions,
+            warnings: &warnings,
+        }),
+        OutputFormat::Json => {
+            let data = serde_json::json!({
+                "correlation_id": correlation_id,
+                "availability": availability,
+                "state": state,
+                "ordering": "daemon_sequence",
+                "timeline": events.iter().map(trace_event_json).collect::<Vec<_>>(),
+                "participants": participants,
+                "delivery_states": delivery_states,
+                "gaps": gaps.iter().map(trace_gap_json).collect::<Vec<_>>(),
+                "span_tree": span_tree_json(&span_tree, options.span_tree),
+                "metadata": metadata,
+                "next_actions": next_actions,
+            });
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "trace",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before trace rendering"),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TraceReconstruction {
+    events: Vec<TraceEvent>,
+    envelopes: Vec<EvidenceEnvelopeRecord>,
+    dead_letter_ids: HashSet<String>,
+    gaps: Vec<TraceGap>,
+}
+
+fn build_trace_reconstruction(
+    correlation_id: &str,
+    store: &FileEvidenceStore,
+) -> TraceReconstruction {
+    let mut envelopes = store.query_envelopes(EvidenceQuery::new().correlation_id(correlation_id));
+    envelopes.sort_by(|left, right| {
+        (left.daemon_sequence(), left.message_id())
+            .cmp(&(right.daemon_sequence(), right.message_id()))
+    });
+    let envelope_by_id = envelopes
+        .iter()
+        .map(|record| (record.message_id().to_owned(), record.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut dead_letters =
+        store.query_dead_letters(DeadLetterQuery::new().correlation_id(correlation_id));
+    dead_letters.sort_by(|left, right| {
+        (left.daemon_sequence(), left.message_id())
+            .cmp(&(right.daemon_sequence(), right.message_id()))
+    });
+    let dead_letter_ids = dead_letters
+        .iter()
+        .map(|record| record.message_id().to_owned())
+        .collect::<HashSet<_>>();
+    let mut events = Vec::new();
+
+    for envelope in &envelopes {
+        let relationship = trace_relationship(
+            envelope.parent_message_id(),
+            envelope.subject(),
+            envelope.delivery_state(),
+            None,
+            None,
+            dead_letter_ids.contains(envelope.message_id()),
+        );
+        let exceptional_state = exceptional_state(
+            envelope.subject(),
+            envelope.delivery_state(),
+            None,
+            None,
+            dead_letter_ids.contains(envelope.message_id()),
+        );
+        events.push(TraceEvent {
+            daemon_sequence: envelope.daemon_sequence(),
+            sort_rank: 0,
+            kind: "envelope",
+            message_id: envelope.message_id().to_owned(),
+            timestamp_unix_ms: Some(envelope.timestamp_unix_ms()),
+            source_agent: Some(envelope.source_agent().to_owned()),
+            target_or_subject: Some(envelope.target_or_subject().to_owned()),
+            subject: Some(envelope.subject().to_owned()),
+            participating_agents: participating_agents([
+                Some(envelope.source_agent()),
+                Some(envelope.target_or_subject()),
+            ]),
+            delivery_state: envelope.delivery_state().to_owned(),
+            correlation_id: envelope.correlation_id().to_owned(),
+            trace_id: envelope.trace_id().to_owned(),
+            span_id: Some(envelope.span_id().to_owned()),
+            parent_message_id: envelope.parent_message_id().map(ToOwned::to_owned),
+            action: None,
+            relationship,
+            exceptional_state,
+            safe_payload_summary: payload_summary(
+                envelope.payload_len(),
+                envelope.payload_content_type(),
+            ),
+            failure_category: None,
+            attempt_count: None,
+            safe_details: None,
+        });
+    }
+
+    for dead_letter in &dead_letters {
+        let envelope = envelope_by_id.get(dead_letter.message_id());
+        events.push(TraceEvent {
+            daemon_sequence: dead_letter.daemon_sequence(),
+            sort_rank: 5,
+            kind: "dead_letter",
+            message_id: dead_letter.message_id().to_owned(),
+            timestamp_unix_ms: Some(dead_letter.terminal_unix_ms()),
+            source_agent: Some(dead_letter.source_agent().to_owned()),
+            target_or_subject: dead_letter.intended_target().map(ToOwned::to_owned),
+            subject: Some(dead_letter.subject().to_owned()),
+            participating_agents: participating_agents([
+                Some(dead_letter.source_agent()),
+                dead_letter.intended_target(),
+            ]),
+            delivery_state: dead_letter.terminal_state().to_owned(),
+            correlation_id: dead_letter.correlation_id().to_owned(),
+            trace_id: dead_letter.trace_id().to_owned(),
+            span_id: envelope.map(|record| record.span_id().to_owned()),
+            parent_message_id: envelope
+                .and_then(EvidenceEnvelopeRecord::parent_message_id)
+                .map(ToOwned::to_owned),
+            action: Some("dead_lettered".to_owned()),
+            relationship: "dead-letter-terminal",
+            exceptional_state: Some("dead_letter"),
+            safe_payload_summary: payload_summary(
+                dead_letter.payload_len(),
+                dead_letter.payload_content_type(),
+            ),
+            failure_category: Some(dead_letter.failure_category().as_str()),
+            attempt_count: Some(dead_letter.attempt_count()),
+            safe_details: Some(dead_letter.safe_details().to_owned()),
+        });
+    }
+
+    for (audit_index, audit) in store
+        .audit_entries()
+        .into_iter()
+        .filter(|entry| entry.correlation_id() == correlation_id)
+        .enumerate()
+    {
+        let envelope = envelope_by_id.get(audit.message_id());
+        let relationship = trace_relationship(
+            envelope.and_then(EvidenceEnvelopeRecord::parent_message_id),
+            audit.capability_or_subject(),
+            audit.state_to(),
+            Some(audit.action()),
+            Some(audit.outcome_details()),
+            audit.action() == "dead_lettered" || audit.state_to() == "dead_lettered",
+        );
+        let exceptional_state = exceptional_state(
+            audit.capability_or_subject(),
+            audit.state_to(),
+            Some(audit.action()),
+            Some(audit.outcome_details()),
+            audit.action() == "dead_lettered" || audit.state_to() == "dead_lettered",
+        );
+        events.push(TraceEvent {
+            daemon_sequence: audit.daemon_sequence(),
+            sort_rank: 10 + audit_index,
+            kind: "audit",
+            message_id: audit.message_id().to_owned(),
+            timestamp_unix_ms: envelope.map(EvidenceEnvelopeRecord::timestamp_unix_ms),
+            source_agent: Some(audit.actor().to_owned()),
+            target_or_subject: None,
+            subject: Some(audit.capability_or_subject().to_owned()),
+            participating_agents: participating_agents([Some(audit.actor()), None]),
+            delivery_state: audit.state_to().to_owned(),
+            correlation_id: audit.correlation_id().to_owned(),
+            trace_id: audit.trace_id().to_owned(),
+            span_id: envelope.map(|record| record.span_id().to_owned()),
+            parent_message_id: envelope
+                .and_then(EvidenceEnvelopeRecord::parent_message_id)
+                .map(ToOwned::to_owned),
+            action: Some(audit.action().to_owned()),
+            relationship,
+            exceptional_state,
+            safe_payload_summary: serde_json::json!({
+                "outcome_details": audit.outcome_details(),
+            }),
+            failure_category: None,
+            attempt_count: None,
+            safe_details: Some(audit.outcome_details().to_owned()),
+        });
+    }
+
+    events.sort_by(|left, right| {
+        (
+            left.daemon_sequence,
+            left.sort_rank,
+            left.kind,
+            left.message_id.as_str(),
+        )
+            .cmp(&(
+                right.daemon_sequence,
+                right.sort_rank,
+                right.kind,
+                right.message_id.as_str(),
+            ))
+    });
+    let gaps = trace_gaps(&envelopes);
+
+    TraceReconstruction {
+        events,
+        envelopes,
+        dead_letter_ids,
+        gaps,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TraceSpanTree {
+    reconstruction: &'static str,
+    nodes: Vec<TraceSpanNode>,
+}
+
+#[derive(Debug, Clone)]
+struct TraceSpanNode {
+    message_id: String,
+    trace_id: String,
+    span_id: String,
+    parent_message_id: Option<String>,
+    relationship: &'static str,
+    source_agent: String,
+    target_or_subject: String,
+    subject: String,
+    delivery_state: String,
+    status: &'static str,
+    invalid_reasons: Vec<&'static str>,
+}
+
+fn build_span_tree(
+    envelopes: &[EvidenceEnvelopeRecord],
+    dead_letter_ids: &HashSet<String>,
+) -> TraceSpanTree {
+    let parent_by_message = envelopes
+        .iter()
+        .map(|record| {
+            (
+                record.message_id().to_owned(),
+                record.parent_message_id().map(ToOwned::to_owned),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let cycle_nodes = cycle_nodes(&parent_by_message);
+    let mut nodes = envelopes
+        .iter()
+        .map(|record| {
+            let mut invalid_reasons = Vec::new();
+            if record.parent_message_id() == Some(record.message_id()) {
+                invalid_reasons.push("self_parent");
+            } else if record
+                .parent_message_id()
+                .is_some_and(|parent| !parent_by_message.contains_key(parent))
+            {
+                invalid_reasons.push("missing_parent");
+            }
+            if cycle_nodes.contains(record.message_id()) {
+                invalid_reasons.push("cycle");
+            }
+            TraceSpanNode {
+                message_id: record.message_id().to_owned(),
+                trace_id: record.trace_id().to_owned(),
+                span_id: record.span_id().to_owned(),
+                parent_message_id: record.parent_message_id().map(ToOwned::to_owned),
+                relationship: trace_relationship(
+                    record.parent_message_id(),
+                    record.subject(),
+                    record.delivery_state(),
+                    None,
+                    None,
+                    dead_letter_ids.contains(record.message_id()),
+                ),
+                source_agent: record.source_agent().to_owned(),
+                target_or_subject: record.target_or_subject().to_owned(),
+                subject: record.subject().to_owned(),
+                delivery_state: record.delivery_state().to_owned(),
+                status: if invalid_reasons.is_empty() {
+                    "valid"
+                } else {
+                    "partial"
+                },
+                invalid_reasons,
+            }
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| left.message_id.cmp(&right.message_id));
+    let reconstruction = if nodes.iter().any(|node| !node.invalid_reasons.is_empty()) {
+        "partial"
+    } else if nodes.is_empty() {
+        "empty"
+    } else {
+        "complete"
+    };
+    TraceSpanTree {
+        reconstruction,
+        nodes,
+    }
+}
+
+fn cycle_nodes(parent_by_message: &HashMap<String, Option<String>>) -> HashSet<String> {
+    let mut cyclic = HashSet::new();
+    for message_id in parent_by_message.keys() {
+        let mut seen = HashSet::new();
+        let mut cursor = Some(message_id.as_str());
+        while let Some(current) = cursor {
+            if !seen.insert(current.to_owned()) {
+                cyclic.extend(seen);
+                break;
+            }
+            cursor = parent_by_message
+                .get(current)
+                .and_then(|parent| parent.as_deref());
+        }
+    }
+    cyclic
+}
+
+fn empty_span_tree(_requested: bool, reconstruction: &'static str) -> TraceSpanTree {
+    TraceSpanTree {
+        reconstruction,
+        nodes: Vec::new(),
+    }
+}
+
+fn trace_gaps(envelopes: &[EvidenceEnvelopeRecord]) -> Vec<TraceGap> {
+    let message_ids = envelopes
+        .iter()
+        .map(|record| record.message_id().to_owned())
+        .collect::<HashSet<_>>();
+    envelopes
+        .iter()
+        .filter_map(|record| {
+            let parent = record.parent_message_id()?;
+            (!message_ids.contains(parent)).then(|| TraceGap {
+                code: "missing_parent",
+                message_id: record.message_id().to_owned(),
+                missing_parent_message_id: Some(parent.to_owned()),
+                remediation: "run inspect audit, check retention policy, and verify the audit chain",
+            })
+        })
+        .collect()
+}
+
+fn trace_state(
+    availability: &str,
+    events: &[TraceEvent],
+    gaps: &[TraceGap],
+    span_tree: &TraceSpanTree,
+) -> &'static str {
+    if availability != "available" {
+        "unavailable"
+    } else if events.is_empty() {
+        "not_found"
+    } else if !gaps.is_empty() || span_tree.reconstruction == "partial" {
+        "partial"
+    } else {
+        "complete"
+    }
+}
+
+fn trace_next_actions(state: &str) -> Vec<&'static str> {
+    match state {
+        "not_found" | "partial" | "unavailable" => {
+            vec![
+                "inspect",
+                "doctor",
+                "retention checks",
+                "audit verification",
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn trace_participants(events: &[TraceEvent]) -> Vec<String> {
+    events
+        .iter()
+        .flat_map(|event| event.participating_agents.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn trace_delivery_states(events: &[TraceEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|event| event.delivery_state.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn participating_agents<const N: usize>(agents: [Option<&str>; N]) -> Vec<String> {
+    agents
+        .into_iter()
+        .flatten()
+        .filter(|agent| agent.starts_with("agent."))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn payload_summary(payload_len: usize, payload_content_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "payload_len": payload_len,
+        "payload_content_type": payload_content_type,
+    })
+}
+
+fn exceptional_state(
+    subject: &str,
+    state: &str,
+    action: Option<&str>,
+    details: Option<&str>,
+    dead_letter: bool,
+) -> Option<&'static str> {
+    let text = format!(
+        "{} {} {} {}",
+        subject,
+        state,
+        action.unwrap_or_default(),
+        details.unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    if dead_letter || text.contains("dead_letter") || text.contains("dead-letter") {
+        Some("dead_letter")
+    } else if text.contains("cancel") {
+        Some("cancellation")
+    } else if text.contains("late") {
+        Some("late_arrival")
+    } else if text.contains("replay") {
+        Some("replay")
+    } else if text.contains("retry") {
+        Some("retry")
+    } else {
+        None
+    }
+}
+
+fn trace_relationship(
+    parent_message_id: Option<&str>,
+    subject: &str,
+    state: &str,
+    action: Option<&str>,
+    details: Option<&str>,
+    dead_letter: bool,
+) -> &'static str {
+    let text = format!(
+        "{} {} {} {}",
+        subject,
+        state,
+        action.unwrap_or_default(),
+        details.unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    if dead_letter || text.contains("dead_letter") || text.contains("dead-letter") {
+        "dead-letter-terminal"
+    } else if text.contains("replay") {
+        "replayed-from"
+    } else if text.contains("retry") {
+        "retry-of"
+    } else if text.contains("reply") || text.contains("response") {
+        "responds-to"
+    } else if parent_message_id.is_some() {
+        "caused-by"
+    } else {
+        "root"
+    }
+}
+
+fn trace_event_json(event: &TraceEvent) -> serde_json::Value {
+    serde_json::json!({
+        "daemon_sequence": event.daemon_sequence,
+        "kind": event.kind,
+        "message_id": event.message_id,
+        "timestamp_unix_ms": event.timestamp_unix_ms,
+        "source_agent": event.source_agent,
+        "target_or_subject": event.target_or_subject,
+        "subject": event.subject,
+        "participating_agents": event.participating_agents,
+        "delivery_state": event.delivery_state,
+        "correlation_id": event.correlation_id,
+        "trace_id": event.trace_id,
+        "span_id": event.span_id,
+        "parent_message_id": event.parent_message_id,
+        "action": event.action,
+        "relationship": event.relationship,
+        "exceptional": event.exceptional_state.is_some(),
+        "exceptional_state": event.exceptional_state,
+        "safe_payload_summary": event.safe_payload_summary,
+        "failure_category": event.failure_category,
+        "attempt_count": event.attempt_count,
+        "safe_details": event.safe_details,
+    })
+}
+
+fn trace_gap_json(gap: &TraceGap) -> serde_json::Value {
+    serde_json::json!({
+        "code": gap.code,
+        "message_id": gap.message_id,
+        "missing_parent_message_id": gap.missing_parent_message_id,
+        "remediation": gap.remediation,
+    })
+}
+
+fn span_tree_json(span_tree: &TraceSpanTree, requested: bool) -> serde_json::Value {
+    serde_json::json!({
+        "requested": requested,
+        "reconstruction": span_tree.reconstruction,
+        "nodes": span_tree.nodes.iter().map(span_node_json).collect::<Vec<_>>(),
+    })
+}
+
+fn span_node_json(node: &TraceSpanNode) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": node.message_id,
+        "trace_id": node.trace_id,
+        "span_id": node.span_id,
+        "parent_message_id": node.parent_message_id,
+        "relationship": node.relationship,
+        "source_agent": node.source_agent,
+        "target_or_subject": node.target_or_subject,
+        "subject": node.subject,
+        "delivery_state": node.delivery_state,
+        "status": node.status,
+        "invalid_reasons": node.invalid_reasons,
+    })
+}
+
+struct TraceHumanReport<'a> {
+    correlation_id: &'a str,
+    availability: &'static str,
+    state: &'static str,
+    events: &'a [TraceEvent],
+    participants: &'a [String],
+    delivery_states: &'a [String],
+    gaps: &'a [TraceGap],
+    span_tree: &'a TraceSpanTree,
+    span_tree_requested: bool,
+    next_actions: &'a [&'static str],
+    warnings: &'a [DiagnosticWarning],
+}
+
+fn print_trace_human(report: TraceHumanReport<'_>) -> Result<(), CliError> {
+    println!("zornmesh trace {}", report.correlation_id);
+    println!("status: {}", report.availability);
+    println!("state: {}", report.state);
+    println!("ordering: daemon_sequence");
+    println!("events: {}", report.events.len());
+    if !report.participants.is_empty() {
+        println!("participants: {}", report.participants.join(", "));
+    }
+    if !report.delivery_states.is_empty() {
+        println!("delivery_states: {}", report.delivery_states.join(", "));
+    }
+    for warning in report.warnings {
+        println!("warning: {}", warning.message);
+    }
+    if report.state == "not_found" {
+        println!("empty: no evidence records matched the correlation ID");
+    }
+    for event in report.events {
+        println!(
+            "event: sequence={} kind={} message_id={} state={} exceptional={} relationship={}",
+            event.daemon_sequence,
+            event.kind,
+            event.message_id,
+            event.delivery_state,
+            event.exceptional_state.unwrap_or("none"),
+            event.relationship
+        );
+    }
+    for gap in report.gaps {
+        println!(
+            "gap: {} message_id={} missing_parent_message_id={}",
+            gap.code,
+            gap.message_id,
+            gap.missing_parent_message_id
+                .as_deref()
+                .unwrap_or("unavailable")
+        );
+    }
+    if report.span_tree_requested {
+        println!("span_tree: {}", report.span_tree.reconstruction);
+        for node in &report.span_tree.nodes {
+            println!(
+                "span: message_id={} span_id={} parent={} relationship={} status={}",
+                node.message_id,
+                node.span_id,
+                node.parent_message_id.as_deref().unwrap_or("none"),
+                node.relationship,
+                node.status
+            );
+        }
+    }
+    if !report.next_actions.is_empty() {
+        println!("next_actions: {}", report.next_actions.join(", "));
+    }
+    Ok(())
 }
 
 fn trace_events(output: OutputFormat) -> Result<(), CliError> {

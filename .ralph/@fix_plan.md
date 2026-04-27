@@ -106,7 +106,7 @@
   > AC: Given an inspect query could return more records than the documented default or maximum page size, When the CLI/API renders results, Then output is paginated with deterministic ordering, explicit limit metadata, and a stable next-cursor or completion marker, And over-limit requests return a stable validation error or are clamped according to documented rules.
   > AC: Given inspect conformance tests run, When filtered message, DLQ, audit, empty, redacted, huge result set, pagination cursor, over-limit request, and unavailable-metadata scenarios execute, Then output shapes, ordering, stdout/stderr separation, and exit codes match fixtures.
   > Spec: specs/planning-artifacts/epics.md#story-4-4
-- [ ] Story 4.5: Reconstruct Conversation Timeline by Correlation ID
+- [x] Story 4.5: Reconstruct Conversation Timeline by Correlation ID
   > As a developer debugging a broken multi-agent workflow
   > I want `zornmesh trace <correlation_id>` to rebuild the ordered conversation timeline
   > So that I can understand every participating agent, message, and delivery state without stitching logs by hand.

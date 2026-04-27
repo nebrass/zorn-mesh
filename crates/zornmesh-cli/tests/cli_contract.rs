@@ -9,8 +9,8 @@ use std::{
 
 use zornmesh_core::Envelope;
 use zornmesh_store::{
-    DeadLetterFailureCategory, EvidenceDeadLetterInput, EvidenceEnvelopeInput, EvidenceStore,
-    FileEvidenceStore,
+    DeadLetterFailureCategory, EvidenceDeadLetterInput, EvidenceEnvelopeInput,
+    EvidenceStateTransitionInput, EvidenceStore, FileEvidenceStore,
 };
 
 const TEST_SOCKET: &str = "/tmp/zorn-cli-contract.sock";
@@ -145,6 +145,26 @@ fn evidence_envelope(
     .expect("valid evidence envelope")
 }
 
+fn trace_envelope(
+    source: &str,
+    subject: &str,
+    correlation_id: &str,
+    timestamp_unix_ms: u64,
+    span_id: &str,
+) -> Envelope {
+    Envelope::with_trace_context(
+        source,
+        subject,
+        b"{\"secret\":\"must-not-leak\"}".to_vec(),
+        timestamp_unix_ms,
+        correlation_id,
+        "application/json; token=must-not-leak",
+        format!("00-4bf92f3577b34da6a3ce929d0e0e4736-{span_id}-01"),
+        None,
+    )
+    .expect("valid trace envelope")
+}
+
 fn seed_inspect_evidence(path: &std::path::Path) {
     let store = FileEvidenceStore::open_evidence(path).expect("evidence store opens");
     store
@@ -219,6 +239,282 @@ fn seed_inspect_evidence(path: &std::path::Path) {
             .with_timing(1_700_000_000_010, 1_700_000_000_020, 1_700_000_000_030),
         )
         .expect("dead letter persists");
+}
+
+struct TransitionSeed<'a> {
+    daemon_sequence: u64,
+    message_id: &'a str,
+    actor: &'a str,
+    action: &'a str,
+    subject: &'a str,
+    correlation_id: &'a str,
+    trace_id: &'a str,
+    state_from: &'a str,
+    state_to: &'a str,
+    details: &'a str,
+}
+
+fn transition(store: &FileEvidenceStore, seed: TransitionSeed<'_>) {
+    store
+        .persist_state_transition(
+            EvidenceStateTransitionInput::new(
+                seed.daemon_sequence,
+                seed.message_id,
+                seed.actor,
+                seed.action,
+                seed.subject,
+                seed.correlation_id,
+                seed.trace_id,
+                seed.state_from,
+                seed.state_to,
+                seed.details,
+            )
+            .expect("valid transition input"),
+        )
+        .expect("state transition persists");
+}
+
+fn seed_trace_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("trace evidence store opens");
+    let request = store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                trace_envelope(
+                    "agent.local/client",
+                    "mesh.request.created",
+                    "corr-trace",
+                    1_700_000_000_100,
+                    "1111111111111111",
+                ),
+                "msg-request",
+                "trace-root",
+                "accepted",
+            )
+            .expect("valid request input")
+            .with_target("agent.local/worker"),
+        )
+        .expect("request persists");
+    transition(
+        &store,
+        TransitionSeed {
+            daemon_sequence: request.envelope().daemon_sequence(),
+            message_id: "msg-request",
+            actor: "agent.local/worker",
+            action: "delivery_ack",
+            subject: "mesh.request.created",
+            correlation_id: "corr-trace",
+            trace_id: "trace-root",
+            state_from: "accepted",
+            state_to: "acknowledged",
+            details: "delivered to worker",
+        },
+    );
+
+    let retry = store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                trace_envelope(
+                    "agent.local/client",
+                    "mesh.request.retry",
+                    "corr-trace",
+                    1_700_000_000_110,
+                    "2222222222222222",
+                ),
+                "msg-retry",
+                "trace-root",
+                "retrying",
+            )
+            .expect("valid retry input")
+            .with_target("agent.local/worker")
+            .with_parent_message_id("msg-request"),
+        )
+        .expect("retry persists");
+    transition(
+        &store,
+        TransitionSeed {
+            daemon_sequence: retry.envelope().daemon_sequence(),
+            message_id: "msg-retry",
+            actor: "agent.local/worker",
+            action: "retry_scheduled",
+            subject: "mesh.request.retry",
+            correlation_id: "corr-trace",
+            trace_id: "trace-root",
+            state_from: "accepted",
+            state_to: "retrying",
+            details: "retry after transient timeout",
+        },
+    );
+
+    let replay = store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                trace_envelope(
+                    "agent.local/client",
+                    "mesh.request.replay",
+                    "corr-trace",
+                    1_700_000_000_120,
+                    "3333333333333333",
+                ),
+                "msg-replay",
+                "trace-root",
+                "replayed",
+            )
+            .expect("valid replay input")
+            .with_target("agent.local/worker")
+            .with_parent_message_id("msg-request"),
+        )
+        .expect("replay persists");
+    transition(
+        &store,
+        TransitionSeed {
+            daemon_sequence: replay.envelope().daemon_sequence(),
+            message_id: "msg-replay",
+            actor: "agent.local/worker",
+            action: "replay_enqueued",
+            subject: "mesh.request.replay",
+            correlation_id: "corr-trace",
+            trace_id: "trace-root",
+            state_from: "accepted",
+            state_to: "replayed",
+            details: "replayed from msg-request",
+        },
+    );
+
+    let cancelled = store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                trace_envelope(
+                    "agent.local/client",
+                    "mesh.request.cancel",
+                    "corr-trace",
+                    1_700_000_000_130,
+                    "4444444444444444",
+                ),
+                "msg-cancel",
+                "trace-root",
+                "accepted",
+            )
+            .expect("valid cancellation input")
+            .with_target("agent.local/worker")
+            .with_parent_message_id("msg-request"),
+        )
+        .expect("cancellation persists");
+    transition(
+        &store,
+        TransitionSeed {
+            daemon_sequence: cancelled.envelope().daemon_sequence(),
+            message_id: "msg-cancel",
+            actor: "agent.local/client",
+            action: "cancellation",
+            subject: "mesh.request.cancel",
+            correlation_id: "corr-trace",
+            trace_id: "trace-root",
+            state_from: "accepted",
+            state_to: "cancelled",
+            details: "cancelled by sender",
+        },
+    );
+
+    let late = store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                trace_envelope(
+                    "agent.local/worker",
+                    "mesh.reply.created",
+                    "corr-trace",
+                    1_700_000_000_090,
+                    "5555555555555555",
+                ),
+                "msg-late-reply",
+                "trace-root",
+                "accepted",
+            )
+            .expect("valid late reply input")
+            .with_target("agent.local/client")
+            .with_parent_message_id("msg-request"),
+        )
+        .expect("late reply persists");
+    transition(
+        &store,
+        TransitionSeed {
+            daemon_sequence: late.envelope().daemon_sequence(),
+            message_id: "msg-late-reply",
+            actor: "agent.local/worker",
+            action: "late_arrival",
+            subject: "mesh.reply.created",
+            correlation_id: "corr-trace",
+            trace_id: "trace-root",
+            state_from: "accepted",
+            state_to: "late_arrival",
+            details: "reply arrived after cancellation",
+        },
+    );
+
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                trace_envelope(
+                    "agent.local/worker",
+                    "mesh.work.created",
+                    "corr-trace",
+                    1_700_000_000_140,
+                    "6666666666666666",
+                ),
+                "msg-dlq",
+                "trace-root",
+                "accepted",
+            )
+            .expect("valid dead-letter input")
+            .with_target("agent.local/client")
+            .with_parent_message_id("msg-request"),
+        )
+        .expect("dead-letter envelope persists");
+    store
+        .persist_dead_letter(
+            EvidenceDeadLetterInput::new(
+                trace_envelope(
+                    "agent.local/worker",
+                    "mesh.work.created",
+                    "corr-trace",
+                    1_700_000_000_140,
+                    "6666666666666666",
+                ),
+                "msg-dlq",
+                "trace-root",
+                "dead_lettered",
+                DeadLetterFailureCategory::RetryExhausted,
+                "retry exhausted with token=must-not-leak",
+            )
+            .expect("valid dead letter trace input")
+            .with_intended_target("agent.local/client")
+            .with_attempt_count(3)
+            .with_last_failure_category(DeadLetterFailureCategory::Timeout)
+            .with_timing(1_700_000_000_141, 1_700_000_000_151, 1_700_000_000_161),
+        )
+        .expect("trace dead letter persists");
+}
+
+fn seed_partial_trace_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("partial trace evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                trace_envelope(
+                    "agent.local/orphan",
+                    "mesh.orphan.created",
+                    "corr-partial",
+                    1_700_000_001_000,
+                    "7777777777777777",
+                ),
+                "msg-orphan",
+                "trace-partial",
+                "accepted",
+            )
+            .expect("valid orphan input")
+            .with_target("agent.local/target")
+            .with_parent_message_id("msg-missing-parent"),
+        )
+        .expect("orphan persists");
 }
 
 #[test]
@@ -499,6 +795,240 @@ fn inspect_over_limit_request_returns_stable_validation_error() {
         stderr(&output),
         "E_VALIDATION_FAILED: inspect limit 101 exceeds maximum 100\n"
     );
+}
+
+#[test]
+fn trace_json_reconstructs_ordered_timeline_and_span_tree() {
+    let path = temp_evidence_path("trace-complete");
+    seed_trace_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&[
+        "trace",
+        "corr-trace",
+        "--evidence",
+        path,
+        "--span-tree",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let text = stdout(&output);
+    assert_no_ansi(&text);
+    assert!(!text.contains("must-not-leak"));
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "trace");
+    assert_eq!(value["data"]["correlation_id"], "corr-trace");
+    assert_eq!(value["data"]["availability"], "available");
+    assert_eq!(value["data"]["state"], "complete");
+    assert_eq!(value["data"]["ordering"], "daemon_sequence");
+
+    let timeline = value["data"]["timeline"]
+        .as_array()
+        .expect("timeline is an array");
+    assert!(
+        timeline.len() >= 18,
+        "timeline includes envelopes, audit entries, and terminal records"
+    );
+    assert_eq!(timeline[0]["kind"], "envelope");
+    assert_eq!(timeline[0]["message_id"], "msg-request");
+    assert_eq!(timeline[0]["timestamp_unix_ms"], 1_700_000_000_100_u64);
+
+    let envelope_position = |message_id: &str| {
+        timeline
+            .iter()
+            .position(|event| event["kind"] == "envelope" && event["message_id"] == message_id)
+            .expect("message appears in timeline")
+    };
+    assert!(
+        envelope_position("msg-late-reply") > envelope_position("msg-cancel"),
+        "daemon sequence, not client timestamp, controls ordering"
+    );
+
+    let participants = value["data"]["participants"]
+        .as_array()
+        .expect("participants array")
+        .iter()
+        .map(|value| value.as_str().expect("participant string"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        participants,
+        vec!["agent.local/client", "agent.local/worker"]
+    );
+
+    let states = value["data"]["delivery_states"]
+        .as_array()
+        .expect("delivery states array")
+        .iter()
+        .map(|value| value.as_str().expect("state string"))
+        .collect::<Vec<_>>();
+    for state in [
+        "acknowledged",
+        "cancelled",
+        "dead_lettered",
+        "late_arrival",
+        "replayed",
+        "retrying",
+    ] {
+        assert!(states.contains(&state), "missing state {state}");
+    }
+
+    let exceptional_states = timeline
+        .iter()
+        .filter(|event| event["exceptional"] == true)
+        .map(|event| {
+            event["exceptional_state"]
+                .as_str()
+                .expect("exceptional state")
+        })
+        .collect::<Vec<_>>();
+    for state in [
+        "retry",
+        "replay",
+        "cancellation",
+        "late_arrival",
+        "dead_letter",
+    ] {
+        assert!(
+            exceptional_states.contains(&state),
+            "missing exceptional state {state}"
+        );
+    }
+
+    let dead_letter = timeline
+        .iter()
+        .find(|event| event["kind"] == "dead_letter")
+        .expect("dead-letter event appears");
+    assert_eq!(dead_letter["message_id"], "msg-dlq");
+    assert_eq!(dead_letter["failure_category"], "retry_exhausted");
+    assert_eq!(dead_letter["attempt_count"], 3);
+    assert_eq!(
+        dead_letter["safe_payload_summary"]["payload_content_type"],
+        "[REDACTED]"
+    );
+
+    let span_tree = &value["data"]["span_tree"];
+    assert_eq!(span_tree["reconstruction"], "complete");
+    let nodes = span_tree["nodes"].as_array().expect("span nodes array");
+    let node = |message_id: &str| {
+        nodes
+            .iter()
+            .find(|node| node["message_id"] == message_id)
+            .expect("span node exists")
+    };
+    assert_eq!(node("msg-request")["span_id"], "1111111111111111");
+    assert_eq!(
+        node("msg-request")["parent_message_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(node("msg-request")["relationship"], "root");
+    assert_eq!(node("msg-request")["status"], "valid");
+    assert_eq!(node("msg-retry")["relationship"], "retry-of");
+    assert_eq!(node("msg-replay")["relationship"], "replayed-from");
+    assert_eq!(node("msg-late-reply")["relationship"], "responds-to");
+    assert_eq!(node("msg-dlq")["relationship"], "dead-letter-terminal");
+
+    let human = zornmesh(&["trace", "corr-trace", "--evidence", path, "--span-tree"]);
+    assert_success(&human);
+    let human = stdout(&human);
+    assert_no_ansi(&human);
+    assert!(!human.contains("must-not-leak"));
+    assert!(human.contains("state: complete\n"));
+    assert!(human.contains(
+        "event: sequence=2 kind=envelope message_id=msg-retry state=retrying exceptional=retry relationship=retry-of"
+    ));
+    assert!(human.contains(
+        "event: sequence=6 kind=dead_letter message_id=msg-dlq state=dead_lettered exceptional=dead_letter relationship=dead-letter-terminal"
+    ));
+    assert!(human.contains(
+        "span: message_id=msg-replay span_id=3333333333333333 parent=msg-request relationship=replayed-from status=valid"
+    ));
+}
+
+#[test]
+fn trace_missing_correlation_returns_stable_not_found_json() {
+    let path = temp_evidence_path("trace-empty");
+    FileEvidenceStore::open_evidence(&path).expect("empty evidence store opens");
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&[
+        "trace",
+        "missing-correlation",
+        "--evidence",
+        path,
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "trace");
+    assert_eq!(value["data"]["correlation_id"], "missing-correlation");
+    assert_eq!(value["data"]["availability"], "available");
+    assert_eq!(value["data"]["state"], "not_found");
+    assert_eq!(value["data"]["timeline"].as_array().unwrap().len(), 0);
+    assert_eq!(value["warnings"][0]["code"], "W_TRACE_NOT_FOUND");
+    let next_actions = value["data"]["next_actions"]
+        .as_array()
+        .expect("next actions array")
+        .iter()
+        .map(|value| value.as_str().expect("next action string"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        next_actions,
+        vec![
+            "inspect",
+            "doctor",
+            "retention checks",
+            "audit verification"
+        ]
+    );
+}
+
+#[test]
+fn trace_partial_lineage_gap_is_explicit_in_human_and_json() {
+    let path = temp_evidence_path("trace-partial");
+    seed_partial_trace_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&[
+        "trace",
+        "corr-partial",
+        "--evidence",
+        path,
+        "--span-tree",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "trace");
+    assert_eq!(value["data"]["state"], "partial");
+    assert_eq!(value["warnings"][0]["code"], "W_TRACE_GAP_DETECTED");
+    assert_eq!(value["data"]["gaps"][0]["code"], "missing_parent");
+    assert_eq!(value["data"]["gaps"][0]["message_id"], "msg-orphan");
+    assert_eq!(
+        value["data"]["gaps"][0]["missing_parent_message_id"],
+        "msg-missing-parent"
+    );
+    assert_eq!(value["data"]["span_tree"]["reconstruction"], "partial");
+    assert_eq!(value["data"]["span_tree"]["nodes"][0]["status"], "partial");
+    assert_eq!(
+        value["data"]["span_tree"]["nodes"][0]["invalid_reasons"][0],
+        "missing_parent"
+    );
+
+    let human = zornmesh(&["trace", "corr-partial", "--evidence", path, "--span-tree"]);
+    assert_success(&human);
+    let human = stdout(&human);
+    assert_no_ansi(&human);
+    assert!(human.contains("state: partial\n"));
+    assert!(human.contains(
+        "gap: missing_parent message_id=msg-orphan missing_parent_message_id=msg-missing-parent"
+    ));
+    assert!(human.contains("next_actions: inspect, doctor, retention checks, audit verification"));
 }
 
 #[test]

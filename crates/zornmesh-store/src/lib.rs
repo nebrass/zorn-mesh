@@ -441,6 +441,7 @@ pub struct EvidenceEnvelopeRecord {
     timestamp_unix_ms: u64,
     correlation_id: String,
     trace_id: String,
+    span_id: String,
     parent_message_id: Option<String>,
     delivery_state: String,
     payload_len: usize,
@@ -478,6 +479,10 @@ impl EvidenceEnvelopeRecord {
 
     pub fn trace_id(&self) -> &str {
         &self.trace_id
+    }
+
+    pub fn span_id(&self) -> &str {
+        &self.span_id
     }
 
     pub fn parent_message_id(&self) -> Option<&str> {
@@ -1053,6 +1058,7 @@ impl EvidenceStore for FileEvidenceStore {
             timestamp_unix_ms: input.envelope.timestamp_unix_ms(),
             correlation_id: input.envelope.correlation_id().to_owned(),
             trace_id: input.trace_id.clone(),
+            span_id: input.envelope.trace_context().span_id().to_owned(),
             parent_message_id: input.parent_message_id.clone(),
             delivery_state: input.delivery_state.clone(),
             payload_len: payload_metadata.payload_len(),
@@ -1602,6 +1608,7 @@ impl EvidenceLogRecord {
                 envelope.timestamp_unix_ms().to_string(),
                 encode_field(envelope.correlation_id()),
                 encode_field(envelope.trace_id()),
+                encode_field(envelope.span_id()),
                 encode_field(envelope.parent_message_id().unwrap_or("")),
                 encode_field(envelope.delivery_state()),
                 envelope.payload_len().to_string(),
@@ -1689,9 +1696,11 @@ impl EvidenceLogRecord {
     }
 
     fn parse_accepted(parts: &[&str]) -> Option<Self> {
-        if parts.len() != 22 {
+        if parts.len() != 22 && parts.len() != 23 {
             return None;
         }
+        let has_span_id = parts.len() == 23;
+        let offset = usize::from(has_span_id);
         let envelope = EvidenceEnvelopeRecord {
             daemon_sequence: parts.get(2)?.parse().ok()?,
             message_id: decode_field(parts.get(3)?)?,
@@ -1701,24 +1710,29 @@ impl EvidenceLogRecord {
             timestamp_unix_ms: parts.get(7)?.parse().ok()?,
             correlation_id: decode_field(parts.get(8)?)?,
             trace_id: decode_field(parts.get(9)?)?,
-            parent_message_id: decode_optional_field(parts.get(10)?)?,
-            delivery_state: decode_field(parts.get(11)?)?,
-            payload_len: parts.get(12)?.parse().ok()?,
-            payload_content_type: decode_field(parts.get(13)?)?,
+            span_id: if has_span_id {
+                decode_field(parts.get(10)?)?
+            } else {
+                "unavailable".to_owned()
+            },
+            parent_message_id: decode_optional_field(parts.get(10 + offset)?)?,
+            delivery_state: decode_field(parts.get(11 + offset)?)?,
+            payload_len: parts.get(12 + offset)?.parse().ok()?,
+            payload_content_type: decode_field(parts.get(13 + offset)?)?,
         };
         let audit = EvidenceAuditEntry {
             daemon_sequence: envelope.daemon_sequence,
             message_id: envelope.message_id.clone(),
-            previous_audit_hash: decode_field(parts.get(14)?)?,
-            current_audit_hash: decode_field(parts.get(15)?)?,
-            actor: decode_field(parts.get(16)?)?,
-            action: decode_field(parts.get(17)?)?,
-            capability_or_subject: decode_field(parts.get(18)?)?,
+            previous_audit_hash: decode_field(parts.get(14 + offset)?)?,
+            current_audit_hash: decode_field(parts.get(15 + offset)?)?,
+            actor: decode_field(parts.get(16 + offset)?)?,
+            action: decode_field(parts.get(17 + offset)?)?,
+            capability_or_subject: decode_field(parts.get(18 + offset)?)?,
             correlation_id: envelope.correlation_id.clone(),
             trace_id: envelope.trace_id.clone(),
-            state_from: decode_optional_field(parts.get(19)?)?,
-            state_to: decode_field(parts.get(20)?)?,
-            outcome_details: decode_field(parts.get(21)?)?,
+            state_from: decode_optional_field(parts.get(19 + offset)?)?,
+            state_to: decode_field(parts.get(20 + offset)?)?,
+            outcome_details: decode_field(parts.get(21 + offset)?)?,
         };
         Some(Self::Accepted {
             envelope: Box::new(envelope),

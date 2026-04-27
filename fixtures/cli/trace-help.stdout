@@ -1,12 +1,15 @@
 zornmesh trace
-Inspect trace and fixture scaffolding.
+Reconstruct conversation timelines by correlation ID.
 
-Usage: zornmesh trace <COMMAND>
+Usage: zornmesh trace <CORRELATION_ID> [OPTIONS]
+       zornmesh trace events
 
 Commands:
   events  Emit trace event stream scaffolding
   help    Print trace help
 
 Options:
-      --output <FORMAT>  Select human, json, or ndjson output
+      --evidence <PATH>  Read this evidence log
+      --span-tree        Include parent/child span reconstruction
+      --output <FORMAT>  Select human or json output
   -h, --help  Print help
