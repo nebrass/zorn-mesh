@@ -6,17 +6,7 @@
 > Goal: A developer can install/run `zornmesh`, start or auto-spawn one trustworthy local daemon, use stable CLI output, and send/receive a first basic envelope through Rust/TypeScript SDK surfaces.
 
 - [x] Story 1.1: Create Buildable Workspace and Command Skeleton
-  > As a developer
-  > I want a buildable `zornmesh` workspace with the correct Rust/Bun boundaries and command skeleton
-  > So that implementation can proceed from a verified scaffold instead of drifting into unsupported tooling or names.
-  > AC: Given a fresh checkout of the repository, When the developer runs the documented build/check command, Then the root Rust workspace compiles with Rust 2024 resolver 3 and includes the planned crate boundaries for core, proto, store, broker, rpc, SDK, daemon, CLI, and xtask, And no alternate Rust async runtime or unsupported external broker dependency is introduced.
-  > AC: Given the TypeScript SDK boundary is initialized, When the developer runs the documented Bun test command in `sdks/typescript`, Then a minimal Bun-managed TypeScript SDK package exists and its minimal test passes, And no npm, pnpm, yarn, Node-specific runner, or fake Python v0.1 package is added.
-  > AC: Given the `zornmesh` CLI skeleton exists, When the developer runs `zornmesh --help`, Then the command prints stable help output using the public `zornmesh` name, And initial CLI golden-output fixtures exist for root help and trace help.
-  > AC: Given the conformance-first architecture requirement, When the scaffold is complete, Then `conformance/`, `fixtures/cli/`, `fixtures/errors/`, and `test-infra/` exist with README or manifest files explaining their fixture ownership, And the scaffold includes a thin smoke path such as a core envelope/domain round-trip or CLI/help fixture check.
-  > AC: Given a dev agent starts from this story, When they review the repository after implementation, Then `just check`, `just test`, `just lint`, `just docs`, and `just conformance` exist as human entrypoints, And generation, fixture, conformance, and release-preflight work delegates to explicit `cargo xtask <subcommand>` entrypoints., And missing required tooling fails explicitly rather than silently succeeding.
-  > AC: Given scaffold scope can drift into premature implementation, When this story is complete, Then it is limited to scaffold, fixtures, and smoke validation, And daemon routing, durable store, and auto-spawn semantics remain out of scope except for explicit compileable boundaries.
-  > Spec: specs/planning-artifacts/epics.md#story-1-1
-- [ ] Story 1.2: Establish Local Daemon Rendezvous and Trust Checks
+- [x] Story 1.2: Establish Local Daemon Rendezvous and Trust Checks
   > As an operator
   > I want the local daemon to start, own one trusted socket, reject unsafe privilege/permission states, and report its lifecycle state
   > So that every SDK and CLI interaction has one trustworthy local mesh endpoint.
@@ -28,7 +18,7 @@
   > AC: Given the daemon receives SIGTERM, When shutdown begins, Then the daemon stops accepting new connections and reports a draining state, And the process exits according to the configured shutdown budget with a documented exit outcome.
   > AC: Given the shutdown budget expires while work remains in flight, When the daemon exits or escalates shutdown, Then over-budget work is marked with a structured shutdown-budget-exceeded outcome or dead-letter reason where durable state exists, And the process exits with a documented status instead of silently losing work.
   > Spec: specs/planning-artifacts/epics.md#story-1-2
-- [ ] Story 1.3: Connect Rust SDK to Auto-Spawned Daemon
+- [x] Story 1.3: Connect Rust SDK to Auto-Spawned Daemon
   > As an adopter building a Rust agent
   > I want `Mesh.connect()` to find or auto-spawn the local daemon and complete a readiness handshake
   > So that my agent can join the local mesh without manual daemon setup.

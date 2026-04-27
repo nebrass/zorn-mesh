@@ -34,6 +34,7 @@ cargo xtask lint
 cargo xtask docs
 cargo xtask conformance
 cargo run -p zornmesh-cli -- --help
+cargo run -p zornmesh-cli -- daemon --help
 cd sdks/typescript && bun test
 ```
 
@@ -41,6 +42,8 @@ cd sdks/typescript && bun test
 - The repository is a Rust 2024 workspace with resolver 3 and a Bun-managed TypeScript SDK boundary.
 - `just` is the human entrypoint; `cargo xtask <subcommand>` owns workspace automation.
 - Story 1.1 is scaffold-only: daemon routing, durable store behavior, and auto-spawn semantics remain out of scope.
+- Story 1.2 adds the local daemon rendezvous contract: `zornmesh daemon` owns a private UDS, emits `zorn: state=ready socket=<path>`, rejects unsafe local trust states, and honors `ZORN_NO_AUTOSPAWN=1` in SDK connect validation.
+- Story 1.3 adds the Rust SDK auto-spawn contract: `Mesh::connect()` resolves the UDS, starts an SDK-owned local daemon when enabled, retries readiness up to the connect budget, and exposes typed unreachable/timeout errors.
 
 ## Feature Development Quality Standards
 

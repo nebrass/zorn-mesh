@@ -1,0 +1,15 @@
+{
+  "schema": "zornmesh.sdk.connect_contract.v1",
+  "state_names": ["ready", "draining"],
+  "error_codes": [
+    "E_DAEMON_UNREACHABLE",
+    "E_DAEMON_READINESS_TIMEOUT",
+    "E_LOCAL_TRUST_UNSAFE",
+    "E_ELEVATED_PRIVILEGE",
+    "E_INVALID_CONFIG",
+    "E_DAEMON_IO"
+  ],
+  "connect_timeout_ms": 1000,
+  "readiness_p95_ms": 200,
+  "retry_initial_delay_ms": 5
+}

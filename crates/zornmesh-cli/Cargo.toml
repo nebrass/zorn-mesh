@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+zornmesh-daemon = { path = "../zornmesh-daemon" }
 zornmesh-sdk = { path = "../zornmesh-sdk" }
 
 [lib]

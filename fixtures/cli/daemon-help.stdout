@@ -1,0 +1,8 @@
+zornmesh daemon
+Start and manage the local zornmesh daemon.
+
+Usage: zornmesh daemon [OPTIONS]
+
+Options:
+      --socket <PATH>  Override the local daemon socket path
+  -h, --help           Print help

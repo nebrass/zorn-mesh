@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 zornmesh-core = { path = "../zornmesh-core" }
+zornmesh-daemon = { path = "../zornmesh-daemon" }
 zornmesh-proto = { path = "../zornmesh-proto" }
 zornmesh-rpc = { path = "../zornmesh-rpc" }
 

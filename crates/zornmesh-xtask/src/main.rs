@@ -108,6 +108,11 @@ fn conformance(root: &Path) -> Result<(), String> {
         "cargo",
         &["test", "-p", "zornmesh-cli", "--test", "golden_help"],
         root,
+    )?;
+    run_tool(
+        "cargo",
+        &["test", "-p", "zornmesh-cli", "--test", "daemon_help"],
+        root,
     )
 }
 
@@ -131,6 +136,7 @@ fn fixtures(root: &Path, args: &[String]) -> Result<(), String> {
 
     for path in [
         "fixtures/cli/README.md",
+        "fixtures/cli/daemon-help.stdout",
         "fixtures/cli/root-help.stdout",
         "fixtures/cli/trace-help.stdout",
         "fixtures/errors/README.md",

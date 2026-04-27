@@ -24,7 +24,14 @@ The Justfile delegates to explicit `cargo xtask <subcommand>` entrypoints. Missi
 
 ```bash
 cargo run -p zornmesh-cli -- --help
+cargo run -p zornmesh-cli -- daemon --help
 cargo run -p zornmesh-cli -- trace --help
 ```
 
 The generated output is fixture-checked under `fixtures/cli/`.
+
+## Local daemon rendezvous
+
+`zornmesh daemon` starts the local Unix-domain socket daemon, prints a parseable readiness line (`zorn: state=ready socket=<path>`), and owns a private per-user socket. The daemon rejects elevated-privilege startup, unsafe socket ownership or permissions, active duplicate owners, and stale untrusted sockets with stable error codes.
+
+Useful environment variables are documented in [`docs/env-vars.md`](docs/env-vars.md). The first lifecycle variables are `ZORN_SOCKET_PATH`, `ZORN_NO_AUTOSPAWN`, and `ZORN_SHUTDOWN_BUDGET_MS`.

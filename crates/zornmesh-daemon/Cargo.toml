@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+signal-hook = "0.3"
 zornmesh-broker = { path = "../zornmesh-broker" }
 zornmesh-rpc = { path = "../zornmesh-rpc" }
 zornmesh-store = { path = "../zornmesh-store" }

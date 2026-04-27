@@ -4,6 +4,7 @@ Local-first agent mesh coordination.
 Usage: zornmesh [OPTIONS] <COMMAND>
 
 Commands:
+  daemon   Start or inspect the local zornmesh daemon
   trace    Inspect trace and fixture scaffolding
   help     Print command help
 
