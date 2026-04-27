@@ -11,9 +11,9 @@ use std::{
 };
 
 use zornmesh_core::{
-    AgentCard, CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome,
-    Envelope, NackReasonCategory, SubjectValidationError, validate_subject,
-    validate_subject_pattern,
+    AgentCard, CapabilityDescriptor, CapabilityDirection, CoordinationOutcome,
+    CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome, Envelope, NackReasonCategory,
+    SubjectValidationError, validate_subject, validate_subject_pattern,
 };
 
 pub const CRATE_BOUNDARY: &str = "zornmesh-broker";
@@ -627,6 +627,94 @@ impl Broker {
         Ok(AgentRegistrationOutcome::Registered { canonical: card })
     }
 
+    pub fn declare_capabilities(
+        &self,
+        agent_canonical_id: &str,
+        descriptors: Vec<CapabilityDescriptor>,
+    ) -> Result<CapabilityDeclarationOutcome, CapabilityError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        if !inner.agent_cards.contains_key(agent_canonical_id) {
+            return Err(CapabilityError::new(
+                CapabilityErrorCode::AgentNotFound,
+                format!("agent '{agent_canonical_id}' is not registered"),
+            ));
+        }
+        let mut offered = Vec::new();
+        let mut consumed = Vec::new();
+        for descriptor in descriptors {
+            match descriptor.direction() {
+                CapabilityDirection::Offered => offered.push(descriptor),
+                CapabilityDirection::Consumed => consumed.push(descriptor),
+                CapabilityDirection::Both => {
+                    offered.push(descriptor.clone());
+                    consumed.push(descriptor);
+                }
+            }
+        }
+
+        let change_kind = if inner.capabilities.contains_key(agent_canonical_id) {
+            CapabilityChangeKind::Changed
+        } else {
+            CapabilityChangeKind::Initial
+        };
+        inner.capabilities.insert(
+            agent_canonical_id.to_owned(),
+            AgentCapabilities {
+                offered: offered.clone(),
+                consumed: consumed.clone(),
+            },
+        );
+        inner.capability_change_events.push(CapabilityChangeEvent {
+            agent_canonical_id: agent_canonical_id.to_owned(),
+            kind: change_kind,
+            offered_count: offered.len(),
+            consumed_count: consumed.len(),
+        });
+        Ok(CapabilityDeclarationOutcome::Updated {
+            offered,
+            consumed,
+            change_kind,
+        })
+    }
+
+    pub fn inspect_agent_capabilities(
+        &self,
+        agent_canonical_id: &str,
+    ) -> Option<AgentCapabilitySummary> {
+        let inner = self.inner.lock().expect("broker lock is not poisoned");
+        let agent = inner.agent_cards.get(agent_canonical_id)?.clone();
+        let caps = inner.capabilities.get(agent_canonical_id).cloned()?;
+        Some(AgentCapabilitySummary {
+            agent,
+            offered: caps.offered,
+            consumed: caps.consumed,
+        })
+    }
+
+    pub fn list_agents_with_capabilities(&self) -> Vec<AgentCapabilitySummary> {
+        let inner = self.inner.lock().expect("broker lock is not poisoned");
+        inner
+            .agent_cards
+            .iter()
+            .map(|(id, agent)| {
+                let caps = inner.capabilities.get(id).cloned().unwrap_or_default();
+                AgentCapabilitySummary {
+                    agent: agent.clone(),
+                    offered: caps.offered,
+                    consumed: caps.consumed,
+                }
+            })
+            .collect()
+    }
+
+    pub fn capability_change_events(&self) -> Vec<CapabilityChangeEvent> {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .capability_change_events
+            .clone()
+    }
+
     pub fn lookup_agent_card(&self, canonical_stable_id: &str) -> Option<AgentCard> {
         self.inner
             .lock()
@@ -1132,7 +1220,116 @@ struct BrokerInner {
     queue_bounds: HashMap<String, QueueBoundsConfig>,
     consumer_health: HashMap<String, ConsumerHealthRecord>,
     agent_cards: HashMap<String, AgentCard>,
+    capabilities: HashMap<String, AgentCapabilities>,
+    capability_change_events: Vec<CapabilityChangeEvent>,
 }
+
+#[derive(Debug, Clone, Default)]
+struct AgentCapabilities {
+    offered: Vec<CapabilityDescriptor>,
+    consumed: Vec<CapabilityDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCapabilitySummary {
+    pub agent: AgentCard,
+    pub offered: Vec<CapabilityDescriptor>,
+    pub consumed: Vec<CapabilityDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityDeclarationOutcome {
+    Updated {
+        offered: Vec<CapabilityDescriptor>,
+        consumed: Vec<CapabilityDescriptor>,
+        change_kind: CapabilityChangeKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityChangeKind {
+    Initial,
+    Changed,
+}
+
+impl CapabilityChangeKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Changed => "changed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityChangeEvent {
+    agent_canonical_id: String,
+    kind: CapabilityChangeKind,
+    offered_count: usize,
+    consumed_count: usize,
+}
+
+impl CapabilityChangeEvent {
+    pub fn agent_canonical_id(&self) -> &str {
+        &self.agent_canonical_id
+    }
+
+    pub const fn kind(&self) -> CapabilityChangeKind {
+        self.kind
+    }
+
+    pub const fn offered_count(&self) -> usize {
+        self.offered_count
+    }
+
+    pub const fn consumed_count(&self) -> usize {
+        self.consumed_count
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityErrorCode {
+    AgentNotFound,
+}
+
+impl CapabilityErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentNotFound => "E_CAPABILITY_AGENT_NOT_FOUND",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityError {
+    code: CapabilityErrorCode,
+    message: String,
+}
+
+impl CapabilityError {
+    fn new(code: CapabilityErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> CapabilityErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for CapabilityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for CapabilityError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRegistrationOutcome {

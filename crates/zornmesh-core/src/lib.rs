@@ -962,3 +962,232 @@ impl fmt::Display for AgentCardError {
 }
 
 impl std::error::Error for AgentCardError {}
+
+pub const MAX_CAPABILITY_ID_BYTES: usize = 128;
+pub const MAX_CAPABILITY_VERSION_BYTES: usize = 32;
+pub const MAX_CAPABILITY_SUMMARY_BYTES: usize = 512;
+pub const MAX_CAPABILITY_SCHEMA_REF_BYTES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityDirection {
+    Offered,
+    Consumed,
+    Both,
+}
+
+impl CapabilityDirection {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Offered => "offered",
+            Self::Consumed => "consumed",
+            Self::Both => "both",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitySchemaDialect {
+    TypeBox,
+    JsonSchema,
+}
+
+impl CapabilitySchemaDialect {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TypeBox => "typebox",
+            Self::JsonSchema => "json_schema",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDescriptor {
+    capability_id: String,
+    version: String,
+    direction: CapabilityDirection,
+    summary: String,
+    schema_dialect: CapabilitySchemaDialect,
+    schema_ref: String,
+}
+
+impl CapabilityDescriptor {
+    pub fn builder(
+        capability_id: impl Into<String>,
+        version: impl Into<String>,
+        direction: CapabilityDirection,
+    ) -> CapabilityDescriptorBuilder {
+        CapabilityDescriptorBuilder {
+            capability_id: capability_id.into(),
+            version: version.into(),
+            direction,
+            summary: String::new(),
+            schema_dialect: CapabilitySchemaDialect::TypeBox,
+            schema_ref: String::new(),
+        }
+    }
+
+    pub fn capability_id(&self) -> &str {
+        &self.capability_id
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub const fn direction(&self) -> CapabilityDirection {
+        self.direction
+    }
+
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    pub const fn schema_dialect(&self) -> CapabilitySchemaDialect {
+        self.schema_dialect
+    }
+
+    pub fn schema_ref(&self) -> &str {
+        &self.schema_ref
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CapabilityDescriptorBuilder {
+    capability_id: String,
+    version: String,
+    direction: CapabilityDirection,
+    summary: String,
+    schema_dialect: CapabilitySchemaDialect,
+    schema_ref: String,
+}
+
+impl CapabilityDescriptorBuilder {
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    pub fn with_schema_ref(
+        mut self,
+        dialect: CapabilitySchemaDialect,
+        schema_ref: impl Into<String>,
+    ) -> Self {
+        self.schema_dialect = dialect;
+        self.schema_ref = schema_ref.into();
+        self
+    }
+
+    pub fn build(self) -> Result<CapabilityDescriptor, CapabilityDescriptorError> {
+        if self.capability_id.trim().is_empty() {
+            return Err(CapabilityDescriptorError::new(
+                CapabilityDescriptorErrorCode::InvalidId,
+                "capability_id must not be empty",
+            ));
+        }
+        if self.capability_id.len() > MAX_CAPABILITY_ID_BYTES {
+            return Err(CapabilityDescriptorError::new(
+                CapabilityDescriptorErrorCode::InvalidId,
+                format!(
+                    "capability_id is {} bytes; maximum is {MAX_CAPABILITY_ID_BYTES}",
+                    self.capability_id.len()
+                ),
+            ));
+        }
+        if !self
+            .capability_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            return Err(CapabilityDescriptorError::new(
+                CapabilityDescriptorErrorCode::InvalidId,
+                "capability_id must be ASCII alphanumeric with '.', '-', '_' separators",
+            ));
+        }
+        if self.version.trim().is_empty() || self.version.len() > MAX_CAPABILITY_VERSION_BYTES {
+            return Err(CapabilityDescriptorError::new(
+                CapabilityDescriptorErrorCode::InvalidVersion,
+                "capability version must be non-empty and within size limit",
+            ));
+        }
+        if self.schema_ref.trim().is_empty() {
+            return Err(CapabilityDescriptorError::new(
+                CapabilityDescriptorErrorCode::InvalidSchema,
+                "capability schema_ref must not be empty",
+            ));
+        }
+        if self.schema_ref.len() > MAX_CAPABILITY_SCHEMA_REF_BYTES {
+            return Err(CapabilityDescriptorError::new(
+                CapabilityDescriptorErrorCode::InvalidSchema,
+                format!(
+                    "capability schema_ref is {} bytes; maximum is {MAX_CAPABILITY_SCHEMA_REF_BYTES}",
+                    self.schema_ref.len()
+                ),
+            ));
+        }
+        if self.summary.len() > MAX_CAPABILITY_SUMMARY_BYTES {
+            return Err(CapabilityDescriptorError::new(
+                CapabilityDescriptorErrorCode::InvalidId,
+                format!(
+                    "capability summary is {} bytes; maximum is {MAX_CAPABILITY_SUMMARY_BYTES}",
+                    self.summary.len()
+                ),
+            ));
+        }
+        Ok(CapabilityDescriptor {
+            capability_id: self.capability_id,
+            version: self.version,
+            direction: self.direction,
+            summary: self.summary,
+            schema_dialect: self.schema_dialect,
+            schema_ref: self.schema_ref,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityDescriptorErrorCode {
+    InvalidId,
+    InvalidVersion,
+    InvalidSchema,
+}
+
+impl CapabilityDescriptorErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidId => "E_CAPABILITY_INVALID_ID",
+            Self::InvalidVersion => "E_CAPABILITY_INVALID_VERSION",
+            Self::InvalidSchema => "E_CAPABILITY_INVALID_SCHEMA",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDescriptorError {
+    code: CapabilityDescriptorErrorCode,
+    message: String,
+}
+
+impl CapabilityDescriptorError {
+    pub fn new(code: CapabilityDescriptorErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> CapabilityDescriptorErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for CapabilityDescriptorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for CapabilityDescriptorError {}

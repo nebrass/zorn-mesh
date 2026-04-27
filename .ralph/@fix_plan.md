@@ -27,17 +27,7 @@
 > Goal: Developers can see who is on the mesh, what each agent can do, safely gate high-privilege capabilities, and bridge existing MCP hosts without modifying those hosts.
 
 - [x] Story 3.1: Register Minimal AgentCard Identity
-  > As an agent author
-  > I want my agent to register a stable AgentCard-compatible identity with the local mesh
-  > So that routing, trace, audit, and future UI surfaces can consistently identify who sent and received work.
-  > AC: Given an agent connects to the daemon, When it submits minimal AgentCard-compatible identity metadata, Then the daemon validates required identity fields, version, display name or stable ID, and source/transport metadata, And rejects malformed or unsupported identity payloads with stable typed errors.
-  > AC: Given an identity is accepted, When the agent publishes, subscribes, requests, replies, fetches, ACKs, or NACKs, Then the operation is associated with the stable agent reference, And downstream trace, audit, delivery, and UI contracts can rely on that reference.
-  > AC: Given an older or non-canonical identity shape is accepted for compatibility, When normalization occurs, Then the daemon stores both raw input and canonical normalized form for audit/debugging, And the canonical form is used for routing and API output.
-  > AC: Given duplicate identity registration occurs within the same local trust boundary, When the duplicate is compatible with the existing identity, Then the daemon resolves it deterministically to the same canonical agent reference, And incompatible duplicates return a stable conflict error.
-  > AC: Given the AgentCard-compatible identity contract is introduced, When fixtures are created, Then the supported AgentCard profile version, required fields, canonical normalization rules, and stable error codes are pinned in the central conformance manifest, And daemon, CLI, Rust SDK, TypeScript SDK, JSON-RPC, and fixture expectations consume the same contract source.
-  > AC: Given identity conformance tests run, When canonical, missing-required-field, unsupported-version, duplicate-compatible, and duplicate-conflict fixtures execute, Then registration behavior is deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-3-1
-- [ ] Story 3.2: Advertise and Resolve Symmetric Capabilities
+- [x] Story 3.2: Advertise and Resolve Symmetric Capabilities
   > As an adopter
   > I want agents to advertise both offered and consumed capabilities
   > So that I can understand what each agent can do and how agents may interact.
