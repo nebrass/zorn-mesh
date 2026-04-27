@@ -40,7 +40,7 @@
   > AC: Given a publisher sends an envelope through the Rust SDK, When the daemon accepts it for routing, Then the publisher receives an explicit send result, And the result distinguishes accepted, rejected, daemon-unreachable, and validation-failed outcomes.
   > AC: Given the first-message smoke path is implemented, When a dev agent runs the documented integration test, Then the test starts the daemon, connects two SDK clients, sends an envelope, receives it, and tears down without orphaned processes, And the same fixture can be reused by future TypeScript SDK parity work without asserting exactly-once delivery under retry, reconnect, or failure.
   > Spec: specs/planning-artifacts/epics.md#story-1-4
-- [ ] Story 1.5: Add TypeScript SDK Bootstrap Parity
+- [x] Story 1.5: Add TypeScript SDK Bootstrap Parity
   > As an adopter building a TypeScript agent
   > I want the Bun-managed TypeScript SDK to connect to the local daemon and pass the same first-message fixture as Rust
   > So that v0.1 supports cross-language agent construction from the start.
