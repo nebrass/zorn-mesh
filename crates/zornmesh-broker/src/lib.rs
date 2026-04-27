@@ -675,6 +675,9 @@ impl Broker {
                 format!("stream '{}' is already open", registration.stream_id),
             ));
         }
+        inner
+            .stream_correlation_index
+            .insert(registration.correlation_id.clone(), registration.stream_id.clone());
         inner.streams.insert(
             registration.stream_id.clone(),
             StreamRecord {
@@ -685,6 +688,85 @@ impl Broker {
             },
         );
         Ok(())
+    }
+
+    pub fn cancel_request(
+        &self,
+        correlation_id: &str,
+        now: SystemTime,
+    ) -> Result<CancellationOutcome, BrokerError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        if let Some(pending) = inner.pending_requests.remove(correlation_id) {
+            let outcome = CoordinationOutcome::new(
+                CoordinationOutcomeKind::Terminal,
+                CoordinationStage::Transport,
+                "CANCELLED",
+                format!("request {correlation_id} cancelled"),
+                false,
+                true,
+                pending.deadline.duration_since(now).map(|_| 0).unwrap_or(0),
+            );
+            let _ = pending
+                .resolution_tx
+                .send(RequestResolution::Cancelled {
+                    correlation_id: correlation_id.to_owned(),
+                    outcome: outcome.clone(),
+                });
+            inner
+                .completed_correlations
+                .insert(correlation_id.to_owned());
+            inner
+                .cancelled_correlations
+                .insert(correlation_id.to_owned());
+            return Ok(CancellationOutcome::Cancelled(outcome));
+        }
+        if inner.timed_out_correlations.contains(correlation_id) {
+            return Ok(CancellationOutcome::AlreadyTimedOut);
+        }
+        if inner.completed_correlations.contains(correlation_id) {
+            return Ok(CancellationOutcome::AlreadyComplete);
+        }
+        Ok(CancellationOutcome::NotFound)
+    }
+
+    pub fn cancel_stream_by_correlation(
+        &self,
+        correlation_id: &str,
+    ) -> Result<CancellationOutcome, BrokerError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let Some(stream_id) = inner.stream_correlation_index.get(correlation_id).cloned() else {
+            return Ok(CancellationOutcome::NotFound);
+        };
+        let Some(record) = inner.streams.get_mut(&stream_id) else {
+            return Ok(CancellationOutcome::NotFound);
+        };
+        match record.state {
+            StreamState::Completed => return Ok(CancellationOutcome::AlreadyComplete),
+            StreamState::Aborted => return Ok(CancellationOutcome::AlreadyComplete),
+            StreamState::Open => {}
+        }
+        record.state = StreamState::Aborted;
+        let outcome = CoordinationOutcome::new(
+            CoordinationOutcomeKind::Terminal,
+            CoordinationStage::Transport,
+            "CANCELLED",
+            format!("stream '{stream_id}' cancelled by correlation {correlation_id}"),
+            false,
+            true,
+            record.next_sequence,
+        );
+        inner
+            .cancelled_correlations
+            .insert(correlation_id.to_owned());
+        Ok(CancellationOutcome::Cancelled(outcome))
+    }
+
+    pub fn was_correlation_cancelled(&self, correlation_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .cancelled_correlations
+            .contains(correlation_id)
     }
 
     pub fn submit_chunk(
@@ -878,6 +960,8 @@ struct BrokerInner {
     lease_audit: Vec<LeaseAuditEvent>,
     idempotency: HashMap<(String, String), IdempotencyRecord>,
     streams: HashMap<String, StreamRecord>,
+    stream_correlation_index: HashMap<String, String>,
+    cancelled_correlations: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1074,6 +1158,14 @@ pub enum StreamState {
     Open,
     Completed,
     Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancellationOutcome {
+    Cancelled(CoordinationOutcome),
+    AlreadyComplete,
+    AlreadyTimedOut,
+    NotFound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1703,6 +1795,10 @@ pub enum RequestResolution {
         reason: NackReasonCategory,
     },
     TimedOut {
+        correlation_id: String,
+        outcome: CoordinationOutcome,
+    },
+    Cancelled {
         correlation_id: String,
         outcome: CoordinationOutcome,
     },

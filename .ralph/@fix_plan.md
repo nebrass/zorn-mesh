@@ -20,17 +20,7 @@
 - [x] Story 2.3: Fetch, Lease, ACK, and NACK Pulled Envelopes
 - [x] Story 2.4: Add Idempotency Keys and Retry-Safe Sends
 - [x] Story 2.5: Stream Response Chunks with Byte-Budget Flow Control
-  > As an agent author
-  > I want agents to stream multi-part responses through bounded chunks
-  > So that large or incremental outputs can move through the mesh without unbounded buffering.
-  > AC: Given an agent starts a streaming response for a correlated request, When it sends multiple stream chunks, Then each chunk carries stream identity, correlation ID, sequence/order metadata, finality status, and size metadata, And the receiving agent can reconstruct chunks in order or detect a gap.
-  > AC: Given a stream chunk exceeds the configured chunk size limit, When the daemon receives it, Then the chunk is rejected with a stable payload-limit error, And the stream is not silently truncated or delivered partially as success.
-  > AC: Given a stream reaches the configured byte-budget window, When the sender attempts to continue without receiver progress or available budget, Then flow control prevents unbounded buffering, And the sender receives a typed backpressure or quota result.
-  > AC: Given a stream completes normally, When the final chunk is accepted, Then the receiver observes a terminal complete state, And the sender receives a terminal send outcome consistent with the coordination contract.
-  > AC: Given stream benchmark tests run, When one stream uses the configured 256 KiB byte-budget window on the v0.1 reference platform, Then sustained stream throughput is >= 50 MiB/sec, And benchmark fixtures fail if throughput regresses below the gate.
-  > AC: Given a stream is interrupted by daemon disconnect, invalid chunk order, or receiver failure, When the stream cannot complete, Then both sender and receiver can observe a terminal failed/cancelled state, And conformance fixtures cover complete, oversize, gap, quota, and interrupted stream scenarios.
-  > Spec: specs/planning-artifacts/epics.md#story-2-5
-- [ ] Story 2.6: Cancel In-Flight Requests and Streams
+- [x] Story 2.6: Cancel In-Flight Requests and Streams
   > As an agent author
   > I want to cancel an in-flight request or stream by correlation ID
   > So that agents can stop work that is no longer needed and observe a clear terminal outcome.

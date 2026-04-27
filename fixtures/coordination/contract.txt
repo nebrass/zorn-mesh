@@ -67,3 +67,8 @@ stream|error|E_STREAM_VALIDATION
 stream|termination|sender_cancelled
 stream|termination|receiver_failure
 stream|termination|daemon_disconnect
+cancellation|outcome|cancelled
+cancellation|outcome|already_complete
+cancellation|outcome|already_timed_out
+cancellation|outcome|not_found
+cancellation|code|CANCELLED
