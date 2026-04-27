@@ -21,17 +21,7 @@
 - [x] Story 2.4: Add Idempotency Keys and Retry-Safe Sends
 - [x] Story 2.5: Stream Response Chunks with Byte-Budget Flow Control
 - [x] Story 2.6: Cancel In-Flight Requests and Streams
-  > As an agent author
-  > I want to cancel an in-flight request or stream by correlation ID
-  > So that agents can stop work that is no longer needed and observe a clear terminal outcome.
-  > AC: Given a request is in flight and has not completed, When the caller cancels by correlation ID, Then the daemon records the request as cancelled, And the requester receives a terminal cancelled outcome rather than a timeout or success.
-  > AC: Given a target agent is processing a cancellable request, When cancellation is accepted, Then the target receives a cancellation signal or cancellation-visible delivery state, And any later reply from the target is rejected or recorded as late according to the coordination contract.
-  > AC: Given a reply and cancellation race to become terminal for the same correlation ID, When both events are evaluated or persisted, Then the first durably committed terminal event by daemon sequence wins, And the losing event is recorded as late or already-complete deterministically across replay.
-  > AC: Given a stream is in progress, When the requester cancels the stream by correlation ID, Then the sender and receiver observe a terminal cancelled state, And no further chunks are accepted as successful for that stream.
-  > AC: Given cancellation is requested for an unknown, completed, or expired correlation ID, When the daemon evaluates the request, Then it returns a stable not-found, already-complete, or expired result, And the operation does not mutate unrelated in-flight work.
-  > AC: Given cancellation conformance tests run, When request cancellation, stream cancellation, late reply, unknown ID, and already-complete scenarios execute, Then terminal states are deterministic and observable through SDK results and structured daemon events.
-  > Spec: specs/planning-artifacts/epics.md#story-2-6
-- [ ] Story 2.7: Resume Durable Subscriptions After Daemon Restart
+- [x] Story 2.7: Resume Durable Subscriptions After Daemon Restart
   > As an agent author
   > I want a durable subscription to resume from its last acknowledged position after daemon restart
   > So that my agent can continue processing without manually tracking offsets.

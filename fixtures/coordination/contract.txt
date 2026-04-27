@@ -72,3 +72,10 @@ cancellation|outcome|already_complete
 cancellation|outcome|already_timed_out
 cancellation|outcome|not_found
 cancellation|code|CANCELLED
+durable_subscription|outcome|resumed
+durable_subscription|outcome|retention_gap
+durable_subscription|error|E_SUBSCRIPTION_VALIDATION
+durable_subscription|error|E_SUBSCRIPTION_NOT_FOUND
+durable_subscription|error|E_SUBSCRIPTION_CONFLICT
+durable_subscription|error|E_SUBSCRIPTION_IO
+durable_subscription|error|E_SUBSCRIPTION_CORRUPT
