@@ -161,6 +161,8 @@ name = "zornmesh-cli"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "zornmesh-broker",
+ "zornmesh-core",
  "zornmesh-daemon",
  "zornmesh-rpc",
  "zornmesh-sdk",

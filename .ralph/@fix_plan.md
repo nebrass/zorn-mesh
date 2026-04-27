@@ -32,15 +32,6 @@
 - [x] Story 3.4: Enforce Local Socket Permission Model on Agent Connections
 - [x] Story 3.5: Redact Secrets Across Identity, Capability, and Delivery Surfaces
 - [x] Story 3.6: Canonicalize Agent Identity Across Multiple Host Connections
-  > As an adopter
-  > I want repeated connections from the same logical agent or host to resolve to one canonical mesh identity
-  > So that routing and trace history do not fragment across duplicate connection records.
-  > AC: Given the same logical agent connects through multiple supported connection paths or sessions, When the identity metadata matches the canonicalization rules, Then the daemon resolves those connections to one canonical agent identity, And presence output shows connection/source details without creating duplicate logical agents.
-  > AC: Given two connections claim the same identity but have incompatible metadata, When canonicalization evaluates them, Then the daemon rejects or quarantines the conflicting connection with a stable conflict error, And the existing canonical identity is not overwritten.
-  > AC: Given raw host identity metadata differs from the canonical mesh identity shape, When normalization succeeds, Then both raw and normalized identity forms remain available for audit/debugging, And routing, capability lookup, and trace output use the canonical identity.
-  > AC: Given a canonical agent has multiple active connections, When one connection disconnects, Then the agent remains present if another valid connection is active, And routing uses the remaining valid connection according to deterministic selection rules.
-  > AC: Given canonical identity tests run, When same-agent reconnect, multiple host connections, incompatible duplicate, raw/normalized storage, and partial disconnect scenarios execute, Then agent presence and routing behavior remain deterministic.
-  > Spec: specs/planning-artifacts/epics.md#story-3-6
 - [ ] Story 3.7: Connect MCP Hosts Through `zornmesh stdio --as-agent`
   > As a developer using an existing MCP host
   > I want to connect that host to zorn-mesh through `zornmesh stdio --as-agent`
