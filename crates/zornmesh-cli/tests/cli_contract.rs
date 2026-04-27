@@ -517,6 +517,265 @@ fn seed_partial_trace_evidence(path: &std::path::Path) {
         .expect("orphan persists");
 }
 
+fn seed_span_tree_streaming_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("span tree evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                trace_envelope(
+                    "agent.local/client",
+                    "mesh.request.created",
+                    "corr-span-tree",
+                    1_700_000_002_000,
+                    "aaaaaaaaaaaaaaaa",
+                ),
+                "msg-root-request",
+                "trace-span-tree",
+                "accepted",
+            )
+            .expect("valid root request input")
+            .with_target("agent.local/router"),
+        )
+        .expect("root request persists");
+
+    for (message_id, subject, timestamp, span_id, state) in [
+        (
+            "msg-stream-001",
+            "mesh.stream.chunk.001",
+            1_700_000_002_010,
+            "bbbbbbbbbbbbbbbb",
+            "stream_continue",
+        ),
+        (
+            "msg-stream-002",
+            "mesh.stream.chunk.002",
+            1_700_000_002_020,
+            "cccccccccccccccc",
+            "stream_continue",
+        ),
+        (
+            "msg-stream-003",
+            "mesh.stream.final",
+            1_700_000_002_030,
+            "dddddddddddddddd",
+            "stream_final",
+        ),
+        (
+            "msg-stream-cancelled",
+            "mesh.stream.cancelled",
+            1_700_000_002_040,
+            "eeeeeeeeeeeeeeee",
+            "stream_cancelled",
+        ),
+        (
+            "msg-stream-failed",
+            "mesh.stream.failed",
+            1_700_000_002_050,
+            "ffffffffffffffff",
+            "stream_failed",
+        ),
+        (
+            "msg-stream-gap",
+            "mesh.stream.gap",
+            1_700_000_002_060,
+            "1111111111111110",
+            "stream_gap",
+        ),
+    ] {
+        store
+            .persist_accepted_envelope(
+                EvidenceEnvelopeInput::new(
+                    trace_envelope(
+                        "agent.local/router",
+                        subject,
+                        "corr-span-tree",
+                        timestamp,
+                        span_id,
+                    ),
+                    message_id,
+                    "trace-span-tree",
+                    state,
+                )
+                .expect("valid stream input")
+                .with_target("agent.local/client")
+                .with_parent_message_id("msg-root-request"),
+            )
+            .expect("stream record persists");
+    }
+
+    for (message_id, subject, timestamp, span_id, state) in [
+        (
+            "msg-fanout-alpha",
+            "mesh.task.alpha",
+            1_700_000_002_070,
+            "1111111111111111",
+            "accepted",
+        ),
+        (
+            "msg-fanout-beta",
+            "mesh.task.beta",
+            1_700_000_002_080,
+            "2222222222222222",
+            "accepted",
+        ),
+        (
+            "msg-retry-branch",
+            "mesh.request.retry",
+            1_700_000_002_090,
+            "3333333333333333",
+            "retrying",
+        ),
+        (
+            "msg-replay-branch",
+            "mesh.request.replay",
+            1_700_000_002_100,
+            "4444444444444444",
+            "replayed",
+        ),
+        (
+            "msg-reply",
+            "mesh.reply.created",
+            1_700_000_002_110,
+            "5555555555555555",
+            "accepted",
+        ),
+        (
+            "msg-dlq-branch",
+            "mesh.task.failed",
+            1_700_000_002_120,
+            "6666666666666666",
+            "accepted",
+        ),
+    ] {
+        store
+            .persist_accepted_envelope(
+                EvidenceEnvelopeInput::new(
+                    trace_envelope(
+                        "agent.local/router",
+                        subject,
+                        "corr-span-tree",
+                        timestamp,
+                        span_id,
+                    ),
+                    message_id,
+                    "trace-span-tree",
+                    state,
+                )
+                .expect("valid branch input")
+                .with_target("agent.local/client")
+                .with_parent_message_id("msg-root-request"),
+            )
+            .expect("branch record persists");
+    }
+
+    store
+        .persist_dead_letter(
+            EvidenceDeadLetterInput::new(
+                trace_envelope(
+                    "agent.local/router",
+                    "mesh.task.failed",
+                    "corr-span-tree",
+                    1_700_000_002_121,
+                    "6666666666666666",
+                ),
+                "msg-dlq-branch",
+                "trace-span-tree",
+                "dead_lettered",
+                DeadLetterFailureCategory::RetryExhausted,
+                "retry exhausted with token=must-not-leak",
+            )
+            .expect("valid branch dead letter input")
+            .with_intended_target("agent.local/client")
+            .with_attempt_count(3)
+            .with_last_failure_category(DeadLetterFailureCategory::Timeout)
+            .with_timing(1_700_000_002_121, 1_700_000_002_122, 1_700_000_002_123),
+        )
+        .expect("branch dead letter persists");
+}
+
+fn seed_span_tree_invalid_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("invalid span evidence store opens");
+    for (message_id, subject, timestamp, span_id, parent) in [
+        (
+            "msg-valid-root",
+            "mesh.request.created",
+            1_700_000_003_000,
+            "aaaaaaaaaaaaaaa0",
+            None,
+        ),
+        (
+            "msg-valid-child",
+            "mesh.work.created",
+            1_700_000_003_010,
+            "aaaaaaaaaaaaaaa1",
+            Some("msg-valid-root"),
+        ),
+        (
+            "msg-self-parent",
+            "mesh.work.created",
+            1_700_000_003_020,
+            "aaaaaaaaaaaaaaa2",
+            Some("msg-self-parent"),
+        ),
+        (
+            "msg-cycle-a",
+            "mesh.work.created",
+            1_700_000_003_030,
+            "aaaaaaaaaaaaaaa3",
+            Some("msg-cycle-b"),
+        ),
+        (
+            "msg-cycle-b",
+            "mesh.work.created",
+            1_700_000_003_040,
+            "aaaaaaaaaaaaaaa4",
+            Some("msg-cycle-a"),
+        ),
+        (
+            "msg-duplicate-child-a",
+            "mesh.work.created",
+            1_700_000_003_050,
+            "aaaaaaaaaaaaaaa5",
+            Some("msg-valid-root"),
+        ),
+        (
+            "msg-duplicate-child-b",
+            "mesh.work.created",
+            1_700_000_003_060,
+            "aaaaaaaaaaaaaaa5",
+            Some("msg-valid-root"),
+        ),
+        (
+            "msg-missing-parent-child",
+            "mesh.work.created",
+            1_700_000_003_070,
+            "aaaaaaaaaaaaaaa7",
+            Some("msg-retained-away"),
+        ),
+    ] {
+        let mut input = EvidenceEnvelopeInput::new(
+            trace_envelope(
+                "agent.local/diagnostic",
+                subject,
+                "corr-invalid-span-tree",
+                timestamp,
+                span_id,
+            ),
+            message_id,
+            "trace-invalid-span-tree",
+            "accepted",
+        )
+        .expect("valid invalid-scenario input")
+        .with_target("agent.local/target");
+        if let Some(parent) = parent {
+            input = input.with_parent_message_id(parent);
+        }
+        store
+            .persist_accepted_envelope(input)
+            .expect("invalid-scenario record persists");
+    }
+}
+
 #[test]
 fn read_json_outputs_are_parseable_and_share_top_level_shape() {
     let cases = [
@@ -1029,6 +1288,184 @@ fn trace_partial_lineage_gap_is_explicit_in_human_and_json() {
         "gap: missing_parent message_id=msg-orphan missing_parent_message_id=msg-missing-parent"
     ));
     assert!(human.contains("next_actions: inspect, doctor, retention checks, audit verification"));
+}
+
+#[test]
+fn trace_span_tree_groups_stream_chunks_and_branch_relationships() {
+    let path = temp_evidence_path("span-tree-streaming");
+    seed_span_tree_streaming_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&[
+        "trace",
+        "corr-span-tree",
+        "--evidence",
+        path,
+        "--span-tree",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let text = stdout(&output);
+    assert_no_ansi(&text);
+    assert!(!text.contains("must-not-leak"));
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "trace");
+    assert_eq!(value["data"]["state"], "complete");
+
+    let nodes = value["data"]["span_tree"]["nodes"]
+        .as_array()
+        .expect("span nodes array");
+    let node = |message_id: &str| {
+        nodes
+            .iter()
+            .find(|node| node["message_id"] == message_id)
+            .expect("span node exists")
+    };
+
+    let node_order = nodes
+        .iter()
+        .map(|node| node["message_id"].as_str().expect("message id"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        node_order[..7],
+        [
+            "msg-root-request",
+            "msg-stream-001",
+            "msg-stream-002",
+            "msg-stream-003",
+            "msg-stream-cancelled",
+            "msg-stream-failed",
+            "msg-stream-gap",
+        ],
+        "stream chunks stay grouped under the request in daemon-sequence order"
+    );
+    assert_eq!(
+        node("msg-root-request")["child_message_ids"],
+        serde_json::json!([
+            "msg-stream-001",
+            "msg-stream-002",
+            "msg-stream-003",
+            "msg-stream-cancelled",
+            "msg-stream-failed",
+            "msg-stream-gap",
+            "msg-fanout-alpha",
+            "msg-fanout-beta",
+            "msg-retry-branch",
+            "msg-replay-branch",
+            "msg-reply",
+            "msg-dlq-branch"
+        ])
+    );
+    assert_eq!(node("msg-root-request")["depth"], 0);
+    assert_eq!(node("msg-stream-001")["depth"], 1);
+    assert_eq!(node("msg-stream-001")["stream_sequence"], 1);
+    assert_eq!(node("msg-stream-002")["stream_sequence"], 2);
+    assert_eq!(node("msg-stream-003")["stream_sequence"], 3);
+    assert_eq!(node("msg-stream-001")["stream_state"], "continue");
+    assert_eq!(node("msg-stream-003")["stream_state"], "final");
+    assert_eq!(node("msg-stream-cancelled")["stream_state"], "cancelled");
+    assert_eq!(node("msg-stream-failed")["stream_state"], "failed");
+    assert_eq!(node("msg-stream-gap")["stream_state"], "gap");
+    assert_eq!(node("msg-fanout-alpha")["relationship"], "caused-by");
+    assert_eq!(node("msg-fanout-beta")["relationship"], "caused-by");
+    assert_eq!(node("msg-retry-branch")["relationship"], "retry-of");
+    assert_eq!(node("msg-replay-branch")["relationship"], "replayed-from");
+    assert_eq!(node("msg-reply")["relationship"], "responds-to");
+    assert_eq!(
+        node("msg-dlq-branch")["relationship"],
+        "dead-letter-terminal"
+    );
+
+    let human = zornmesh(&["trace", "corr-span-tree", "--evidence", path, "--span-tree"]);
+    assert_success(&human);
+    let human = stdout(&human);
+    assert_no_ansi(&human);
+    assert!(human.contains(
+        "span: message_id=msg-stream-003 span_id=dddddddddddddddd parent=msg-root-request relationship=caused-by status=valid depth=1 children=none stream_sequence=3 stream_state=final"
+    ));
+}
+
+#[test]
+fn trace_span_tree_marks_invalid_edges_without_losing_valid_branches() {
+    let path = temp_evidence_path("span-tree-invalid");
+    seed_span_tree_invalid_evidence(&path);
+    let path = path.to_str().expect("evidence path is utf8");
+
+    let output = zornmesh(&[
+        "trace",
+        "corr-invalid-span-tree",
+        "--evidence",
+        path,
+        "--span-tree",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "trace");
+    assert_eq!(value["data"]["state"], "partial");
+    assert_eq!(value["data"]["span_tree"]["reconstruction"], "partial");
+
+    let nodes = value["data"]["span_tree"]["nodes"]
+        .as_array()
+        .expect("span nodes array");
+    let node = |message_id: &str| {
+        nodes
+            .iter()
+            .find(|node| node["message_id"] == message_id)
+            .expect("span node exists")
+    };
+    assert_eq!(node("msg-valid-root")["status"], "valid");
+    assert_eq!(node("msg-valid-child")["status"], "valid");
+    assert_eq!(
+        node("msg-valid-root")["child_message_ids"][0],
+        "msg-valid-child"
+    );
+    assert_eq!(
+        node("msg-self-parent")["invalid_reasons"],
+        serde_json::json!(["self_parent", "cycle"])
+    );
+    assert_eq!(
+        node("msg-cycle-a")["invalid_reasons"],
+        serde_json::json!(["cycle"])
+    );
+    assert_eq!(
+        node("msg-cycle-b")["invalid_reasons"],
+        serde_json::json!(["cycle"])
+    );
+    assert_eq!(
+        node("msg-duplicate-child-a")["invalid_reasons"][0],
+        "duplicate_edge"
+    );
+    assert_eq!(
+        node("msg-duplicate-child-b")["invalid_reasons"][0],
+        "duplicate_edge"
+    );
+    assert_eq!(
+        node("msg-missing-parent-child")["invalid_reasons"],
+        serde_json::json!(["missing_parent"])
+    );
+    assert_eq!(
+        node("msg-missing-parent-child")["depth"],
+        serde_json::Value::Null
+    );
+
+    let human = zornmesh(&[
+        "trace",
+        "corr-invalid-span-tree",
+        "--evidence",
+        path,
+        "--span-tree",
+    ]);
+    assert_success(&human);
+    let human = stdout(&human);
+    assert_no_ansi(&human);
+    assert!(human.contains("span_tree: partial"));
+    assert!(human.contains("invalid_reasons=duplicate_edge"));
+    assert!(human.contains("invalid_reasons=missing_parent"));
 }
 
 #[test]

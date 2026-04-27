@@ -2756,11 +2756,15 @@ struct TraceSpanNode {
     trace_id: String,
     span_id: String,
     parent_message_id: Option<String>,
+    child_message_ids: Vec<String>,
+    depth: Option<usize>,
     relationship: &'static str,
     source_agent: String,
     target_or_subject: String,
     subject: String,
     delivery_state: String,
+    stream_sequence: Option<usize>,
+    stream_state: Option<&'static str>,
     status: &'static str,
     invalid_reasons: Vec<&'static str>,
 }
@@ -2778,7 +2782,30 @@ fn build_span_tree(
             )
         })
         .collect::<HashMap<_, _>>();
+    let record_by_message = envelopes
+        .iter()
+        .map(|record| (record.message_id().to_owned(), record))
+        .collect::<HashMap<_, _>>();
+    let mut child_by_parent = envelopes.iter().fold(
+        HashMap::<String, Vec<String>>::new(),
+        |mut children_by_parent, record| {
+            if let Some(parent) = record.parent_message_id() {
+                children_by_parent
+                    .entry(parent.to_owned())
+                    .or_default()
+                    .push(record.message_id().to_owned());
+            }
+            children_by_parent
+        },
+    );
+    for child_ids in child_by_parent.values_mut() {
+        child_ids.sort_by(|left, right| {
+            span_sort_key(&record_by_message, left).cmp(&span_sort_key(&record_by_message, right))
+        });
+    }
+    let duplicate_edges = duplicate_span_edges(envelopes);
     let cycle_nodes = cycle_nodes(&parent_by_message);
+    let stream_sequence_by_message = stream_sequences(&child_by_parent, &record_by_message);
     let mut nodes = envelopes
         .iter()
         .map(|record| {
@@ -2791,6 +2818,11 @@ fn build_span_tree(
             {
                 invalid_reasons.push("missing_parent");
             }
+            if record.parent_message_id().is_some_and(|parent| {
+                duplicate_edges.contains(&(parent.to_owned(), record.span_id().to_owned()))
+            }) {
+                invalid_reasons.push("duplicate_edge");
+            }
             if cycle_nodes.contains(record.message_id()) {
                 invalid_reasons.push("cycle");
             }
@@ -2799,6 +2831,11 @@ fn build_span_tree(
                 trace_id: record.trace_id().to_owned(),
                 span_id: record.span_id().to_owned(),
                 parent_message_id: record.parent_message_id().map(ToOwned::to_owned),
+                child_message_ids: child_by_parent
+                    .get(record.message_id())
+                    .cloned()
+                    .unwrap_or_default(),
+                depth: span_depth(record.message_id(), &parent_by_message, &cycle_nodes),
                 relationship: trace_relationship(
                     record.parent_message_id(),
                     record.subject(),
@@ -2811,6 +2848,8 @@ fn build_span_tree(
                 target_or_subject: record.target_or_subject().to_owned(),
                 subject: record.subject().to_owned(),
                 delivery_state: record.delivery_state().to_owned(),
+                stream_sequence: stream_sequence_by_message.get(record.message_id()).copied(),
+                stream_state: stream_state(record.subject(), record.delivery_state()),
                 status: if invalid_reasons.is_empty() {
                     "valid"
                 } else {
@@ -2820,7 +2859,17 @@ fn build_span_tree(
             }
         })
         .collect::<Vec<_>>();
-    nodes.sort_by(|left, right| left.message_id.cmp(&right.message_id));
+    let span_order = ordered_span_message_ids(envelopes, &child_by_parent, &record_by_message)
+        .into_iter()
+        .enumerate()
+        .map(|(index, message_id)| (message_id, index))
+        .collect::<HashMap<_, _>>();
+    nodes.sort_by(|left, right| {
+        span_order
+            .get(&left.message_id)
+            .cmp(&span_order.get(&right.message_id))
+            .then_with(|| left.message_id.cmp(&right.message_id))
+    });
     let reconstruction = if nodes.iter().any(|node| !node.invalid_reasons.is_empty()) {
         "partial"
     } else if nodes.is_empty() {
@@ -2831,6 +2880,120 @@ fn build_span_tree(
     TraceSpanTree {
         reconstruction,
         nodes,
+    }
+}
+
+fn span_sort_key(
+    record_by_message: &HashMap<String, &EvidenceEnvelopeRecord>,
+    message_id: &str,
+) -> (u64, String) {
+    record_by_message
+        .get(message_id)
+        .map(|record| (record.daemon_sequence(), record.message_id().to_owned()))
+        .unwrap_or((u64::MAX, message_id.to_owned()))
+}
+
+fn duplicate_span_edges(envelopes: &[EvidenceEnvelopeRecord]) -> HashSet<(String, String)> {
+    let mut edge_counts = HashMap::<(String, String), usize>::new();
+    for record in envelopes {
+        if let Some(parent) = record.parent_message_id() {
+            *edge_counts
+                .entry((parent.to_owned(), record.span_id().to_owned()))
+                .or_default() += 1;
+        }
+    }
+    edge_counts
+        .into_iter()
+        .filter_map(|(edge, count)| (count > 1).then_some(edge))
+        .collect()
+}
+
+fn stream_sequences(
+    child_by_parent: &HashMap<String, Vec<String>>,
+    record_by_message: &HashMap<String, &EvidenceEnvelopeRecord>,
+) -> HashMap<String, usize> {
+    let mut sequences = HashMap::new();
+    for child_ids in child_by_parent.values() {
+        let mut sequence = 0;
+        for child_id in child_ids {
+            let Some(record) = record_by_message.get(child_id) else {
+                continue;
+            };
+            if stream_state(record.subject(), record.delivery_state()).is_some() {
+                sequence += 1;
+                sequences.insert(child_id.clone(), sequence);
+            }
+        }
+    }
+    sequences
+}
+
+fn span_depth(
+    message_id: &str,
+    parent_by_message: &HashMap<String, Option<String>>,
+    cycle_nodes: &HashSet<String>,
+) -> Option<usize> {
+    let mut depth = 0;
+    let mut seen = HashSet::new();
+    let mut cursor = message_id;
+    loop {
+        if cycle_nodes.contains(cursor) || !seen.insert(cursor.to_owned()) {
+            return None;
+        }
+        match parent_by_message.get(cursor) {
+            Some(None) => return Some(depth),
+            Some(Some(parent)) if !parent_by_message.contains_key(parent) => return None,
+            Some(Some(parent)) => {
+                depth += 1;
+                cursor = parent;
+            }
+            None => return None,
+        }
+    }
+}
+
+fn ordered_span_message_ids(
+    envelopes: &[EvidenceEnvelopeRecord],
+    child_by_parent: &HashMap<String, Vec<String>>,
+    record_by_message: &HashMap<String, &EvidenceEnvelopeRecord>,
+) -> Vec<String> {
+    let mut all_ids = envelopes
+        .iter()
+        .map(|record| record.message_id().to_owned())
+        .collect::<Vec<_>>();
+    all_ids.sort_by(|left, right| {
+        span_sort_key(record_by_message, left).cmp(&span_sort_key(record_by_message, right))
+    });
+
+    let mut ordered = Vec::new();
+    let mut visited = HashSet::new();
+    for message_id in all_ids.iter().filter(|message_id| {
+        record_by_message
+            .get(message_id.as_str())
+            .is_some_and(|record| record.parent_message_id().is_none())
+    }) {
+        append_span_subtree(message_id, child_by_parent, &mut visited, &mut ordered);
+    }
+    for message_id in &all_ids {
+        append_span_subtree(message_id, child_by_parent, &mut visited, &mut ordered);
+    }
+    ordered
+}
+
+fn append_span_subtree(
+    message_id: &str,
+    child_by_parent: &HashMap<String, Vec<String>>,
+    visited: &mut HashSet<String>,
+    ordered: &mut Vec<String>,
+) {
+    if !visited.insert(message_id.to_owned()) {
+        return;
+    }
+    ordered.push(message_id.to_owned());
+    if let Some(child_ids) = child_by_parent.get(message_id) {
+        for child_id in child_ids {
+            append_span_subtree(child_id, child_by_parent, visited, ordered);
+        }
     }
 }
 
@@ -2850,6 +3013,24 @@ fn cycle_nodes(parent_by_message: &HashMap<String, Option<String>>) -> HashSet<S
         }
     }
     cyclic
+}
+
+fn stream_state(subject: &str, state: &str) -> Option<&'static str> {
+    let text = format!("{subject} {state}").to_ascii_lowercase();
+    if !text.contains("stream") {
+        return None;
+    }
+    if text.contains("cancel") {
+        Some("cancelled")
+    } else if text.contains("fail") || text.contains("error") {
+        Some("failed")
+    } else if text.contains("gap") {
+        Some("gap")
+    } else if text.contains("final") || text.contains("complete") {
+        Some("final")
+    } else {
+        Some("continue")
+    }
 }
 
 fn empty_span_tree(_requested: bool, reconstruction: &'static str) -> TraceSpanTree {
@@ -3055,11 +3236,15 @@ fn span_node_json(node: &TraceSpanNode) -> serde_json::Value {
         "trace_id": node.trace_id,
         "span_id": node.span_id,
         "parent_message_id": node.parent_message_id,
+        "child_message_ids": node.child_message_ids,
+        "depth": node.depth,
         "relationship": node.relationship,
         "source_agent": node.source_agent,
         "target_or_subject": node.target_or_subject,
         "subject": node.subject,
         "delivery_state": node.delivery_state,
+        "stream_sequence": node.stream_sequence,
+        "stream_state": node.stream_state,
         "status": node.status,
         "invalid_reasons": node.invalid_reasons,
     })
@@ -3121,13 +3306,32 @@ fn print_trace_human(report: TraceHumanReport<'_>) -> Result<(), CliError> {
     if report.span_tree_requested {
         println!("span_tree: {}", report.span_tree.reconstruction);
         for node in &report.span_tree.nodes {
+            let children = if node.child_message_ids.is_empty() {
+                "none".to_owned()
+            } else {
+                node.child_message_ids.join(",")
+            };
+            let invalid_reasons = if node.invalid_reasons.is_empty() {
+                "none".to_owned()
+            } else {
+                node.invalid_reasons.join(",")
+            };
             println!(
-                "span: message_id={} span_id={} parent={} relationship={} status={}",
+                "span: message_id={} span_id={} parent={} relationship={} status={} depth={} children={} stream_sequence={} stream_state={} invalid_reasons={}",
                 node.message_id,
                 node.span_id,
                 node.parent_message_id.as_deref().unwrap_or("none"),
                 node.relationship,
-                node.status
+                node.status,
+                node.depth
+                    .map(|depth| depth.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                children,
+                node.stream_sequence
+                    .map(|sequence| sequence.to_string())
+                    .unwrap_or_else(|| "none".to_owned()),
+                node.stream_state.unwrap_or("none"),
+                invalid_reasons
             );
         }
     }

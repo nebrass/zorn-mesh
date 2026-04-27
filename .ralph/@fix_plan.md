@@ -116,7 +116,7 @@
   > AC: Given records are missing because of retention, corruption, or partial message loss, When the trace command detects a gap, Then the output marks the trace as partial/gap detected, And points to inspect, doctor, retention, or audit verification next steps.
   > AC: Given trace reconstruction tests run, When complete, missing, partial, retry, replay, dead-letter, and cancellation timelines execute, Then timeline output is deterministic and fixture-covered for both human and JSON modes.
   > Spec: specs/planning-artifacts/epics.md#story-4-5
-- [ ] Story 4.6: Reconstruct Span Trees for Request/Reply and Streaming
+- [x] Story 4.6: Reconstruct Span Trees for Request/Reply and Streaming
   > As a developer debugging causality
   > I want trace output to show parent/child span relationships for request/reply and streaming exchanges
   > So that I can see which agent action caused each downstream message or stream chunk.

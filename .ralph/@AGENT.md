@@ -55,6 +55,7 @@ cd sdks/typescript && bun test
 - Story 4.3 adds durable dead-letter records to the evidence log with structured failure categories, redacted safe details, retry/timing metadata, filtered queries, replay recovery, and no-recipient daemon DLQ persistence before publish ACK.
 - Story 4.4 adds `zornmesh inspect <messages|dead-letters|audit|metadata>` with `--evidence`/`ZORN_EVIDENCE_PATH`, structured filters, redacted human/JSON output, and cursor pagination.
 - Story 4.5 adds `zornmesh trace <correlation_id>` with evidence-log reconstruction, explicit exceptional states and gaps, and optional `--span-tree` causality output.
+- Story 4.6 expands `zornmesh trace --span-tree` with deterministic parent/child ordering, stream chunk sequencing/state, stable branch labels, duplicate-edge detection, and partial invalid-edge diagnostics.
 
 ## Feature Development Quality Standards
 
