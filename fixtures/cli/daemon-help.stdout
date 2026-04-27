@@ -1,8 +1,16 @@
 zornmesh daemon
 Start and manage the local zornmesh daemon.
 
-Usage: zornmesh daemon [OPTIONS]
+Usage: zornmesh daemon [OPTIONS] [COMMAND]
+
+Commands:
+  status    Inspect daemon reachability without starting it
+  shutdown  Stop the daemon after confirmation (Story 1.7)
+  help      Print daemon help
 
 Options:
+      --config <PATH>        Read CLI defaults from a key=value config file
       --socket <PATH>  Override the local daemon socket path
+      --output <FORMAT>      Select human, json, or ndjson output
+      --non-interactive      Fail fast instead of prompting
   -h, --help           Print help

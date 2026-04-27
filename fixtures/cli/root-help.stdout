@@ -5,9 +5,24 @@ Usage: zornmesh [OPTIONS] <COMMAND>
 
 Commands:
   daemon   Start or inspect the local zornmesh daemon
+  agents   List and inspect registered agents
+  doctor   Run first-day local mesh diagnostics
   trace    Inspect trace and fixture scaffolding
   help     Print command help
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
+      --config <PATH>   Read CLI defaults from a key=value config file
+      --socket <PATH>   Override the local daemon socket path
+      --output <FORMAT> Select human, json, or ndjson output
+      --non-interactive Fail fast instead of prompting
+  -h, --help            Print help
+  -V, --version         Print version
+
+Exit codes:
+  64  user error or unsupported CLI input
+  65  validation failure
+  66  not found
+  69  daemon unreachable
+  74  daemon I/O failure
+  75  temporary unavailable or daemon already running
+  77  permission denied or unsafe local trust

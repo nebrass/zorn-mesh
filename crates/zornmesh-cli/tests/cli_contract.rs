@@ -1,0 +1,339 @@
+use std::{
+    fs,
+    process::{Command, Output},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+const TEST_SOCKET: &str = "/tmp/zorn-cli-contract.sock";
+
+fn zornmesh(args: &[&str]) -> Output {
+    zornmesh_command(args)
+        .output()
+        .expect("zornmesh binary runs")
+}
+
+fn zornmesh_command(args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zornmesh"));
+    command
+        .args(args)
+        .env_remove("NO_COLOR")
+        .env_remove("ZORN_SOCKET_PATH")
+        .env_remove("XDG_RUNTIME_DIR");
+    command
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8(output.stdout.clone()).expect("stdout is utf8")
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8(output.stderr.clone()).expect("stderr is utf8")
+}
+
+fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "expected success, got status {:?}, stderr {:?}",
+        output.status.code(),
+        stderr(output)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "stderr must stay empty on success"
+    );
+}
+
+fn assert_no_ansi(text: &str) {
+    assert!(
+        !text.contains("\u{1b}["),
+        "output must not contain ANSI escapes"
+    );
+}
+
+fn read_json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).expect("stdout is valid JSON")
+}
+
+fn assert_read_json_contract(value: &serde_json::Value, command: &str) {
+    let object = value.as_object().expect("read response is a JSON object");
+    assert_eq!(object.len(), 5);
+    for key in ["schema_version", "command", "status", "data", "warnings"] {
+        assert!(object.contains_key(key), "missing top-level key {key}");
+    }
+    assert_eq!(value["schema_version"], "zornmesh.cli.read.v1");
+    assert_eq!(value["command"], command);
+    assert_eq!(value["status"], "ok");
+    assert!(value["data"].is_object(), "data must be an object");
+    assert!(value["warnings"].is_array(), "warnings must be an array");
+}
+
+fn temp_config(contents: &str) -> std::path::PathBuf {
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("zornmesh-cli-contract-{}-{id}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp config dir created");
+    let path = dir.join("zornmesh.conf");
+    fs::write(&path, contents).expect("temp config written");
+    path
+}
+
+#[test]
+fn read_json_outputs_are_parseable_and_share_top_level_shape() {
+    let cases = [
+        (vec!["--help", "--output", "json"], "help"),
+        (vec!["--version", "--output", "json"], "version"),
+        (
+            vec![
+                "daemon",
+                "status",
+                "--socket",
+                TEST_SOCKET,
+                "--output",
+                "json",
+            ],
+            "daemon status",
+        ),
+        (vec!["daemon", "--help", "--output", "json"], "daemon help"),
+        (vec!["agents", "--output", "json"], "agents"),
+        (vec!["agents", "--help", "--output", "json"], "agents help"),
+        (vec!["doctor", "--output", "json"], "doctor"),
+        (vec!["doctor", "--help", "--output", "json"], "doctor help"),
+        (vec!["trace", "--help", "--output", "json"], "trace help"),
+    ];
+
+    for (args, command) in cases {
+        let output = zornmesh(&args);
+
+        assert_success(&output);
+        let text = stdout(&output);
+        assert_no_ansi(&text);
+        assert!(!text.contains("zornmesh doctor\n"));
+        assert_read_json_contract(&read_json(&output), command);
+    }
+}
+
+#[test]
+fn streaming_json_outputs_are_parseable_ndjson_events() {
+    for format in ["json", "ndjson"] {
+        let output = zornmesh(&["trace", "events", "--output", format]);
+
+        assert_success(&output);
+        for (index, line) in stdout(&output).lines().enumerate() {
+            let event: serde_json::Value =
+                serde_json::from_str(line).expect("NDJSON line is valid JSON");
+            let object = event.as_object().expect("event is a JSON object");
+            assert_eq!(object.len(), 4);
+            for key in ["schema_version", "event_type", "sequence", "data"] {
+                assert!(object.contains_key(key), "missing event key {key}");
+            }
+            assert_eq!(event["schema_version"], "zornmesh.cli.event.v1");
+            assert_eq!(event["event_type"], "trace.scaffolded");
+            assert_eq!(event["sequence"], (index + 1) as u64);
+            assert!(event["data"].is_object(), "event data must be an object");
+        }
+    }
+}
+
+#[test]
+fn read_commands_emit_stable_human_stdout() {
+    let cases = [
+        (
+            vec!["daemon", "status", "--socket", TEST_SOCKET],
+            format!(
+                "zornmesh daemon status\nstate: unreachable\nsocket: {TEST_SOCKET}\nsocket_source: cli\nremediation: start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\n"
+            ),
+        ),
+        (
+            vec!["agents", "--socket", TEST_SOCKET],
+            "zornmesh agents\nstatus: unavailable\nagents: 0\nwarning: agent registry is not available in this scaffold\nremediation: connect agents after identity registration is enabled\n"
+                .to_string(),
+        ),
+        (
+            vec!["doctor", "--socket", TEST_SOCKET],
+            format!(
+                "zornmesh doctor\nstatus: degraded\ndaemon: unreachable\nsocket: {TEST_SOCKET}\nsocket_source: cli\nagent_registry: unavailable\nremediation: start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\n"
+            ),
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let output = zornmesh(&args);
+
+        assert_success(&output);
+        assert_eq!(stdout(&output), expected);
+        assert_no_ansi(&stdout(&output));
+    }
+}
+
+#[test]
+fn json_read_commands_emit_only_stable_json_stdout() {
+    let cases = [
+        (
+            vec!["daemon", "status", "--socket", TEST_SOCKET, "--output", "json"],
+            format!(
+                "{{\"schema_version\":\"zornmesh.cli.read.v1\",\"command\":\"daemon status\",\"status\":\"ok\",\"data\":{{\"daemon_state\":\"unreachable\",\"socket_path\":\"{TEST_SOCKET}\",\"socket_source\":\"cli\"}},\"warnings\":[]}}\n"
+            ),
+        ),
+        (
+            vec!["agents", "--socket", TEST_SOCKET, "--output", "json"],
+            "{\"schema_version\":\"zornmesh.cli.read.v1\",\"command\":\"agents\",\"status\":\"ok\",\"data\":{\"registry_status\":\"unavailable\",\"agents\":[]},\"warnings\":[{\"code\":\"W_AGENT_REGISTRY_UNAVAILABLE\",\"message\":\"agent registry is not available in this scaffold\"}]}\n"
+                .to_string(),
+        ),
+        (
+            vec!["doctor", "--socket", TEST_SOCKET, "--output", "json"],
+            format!(
+                "{{\"schema_version\":\"zornmesh.cli.read.v1\",\"command\":\"doctor\",\"status\":\"ok\",\"data\":{{\"health\":\"degraded\",\"daemon_state\":\"unreachable\",\"socket_path\":\"{TEST_SOCKET}\",\"socket_source\":\"cli\",\"agent_registry\":\"unavailable\"}},\"warnings\":[{{\"code\":\"W_AGENT_REGISTRY_UNAVAILABLE\",\"message\":\"agent registry is not available in this scaffold\"}}]}}\n"
+            ),
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let output = zornmesh(&args);
+
+        assert_success(&output);
+        let text = stdout(&output);
+        assert_eq!(text, expected);
+        assert!(text.starts_with('{'));
+        assert!(text.ends_with("}\n"));
+        assert_no_ansi(&text);
+        assert!(!text.contains("zornmesh doctor\n"));
+        assert!(!text.contains("zornmesh agents\n"));
+        assert!(!text.contains("zornmesh daemon status\n"));
+    }
+}
+
+#[test]
+fn streaming_json_mode_emits_ndjson_events() {
+    let output = zornmesh(&["trace", "events", "--output", "json"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "{\"schema_version\":\"zornmesh.cli.event.v1\",\"event_type\":\"trace.scaffolded\",\"sequence\":1,\"data\":{\"status\":\"no_events\"}}\n"
+    );
+    for line in stdout(&output).lines() {
+        assert!(line.starts_with('{'));
+        assert!(line.ends_with('}'));
+        assert!(line.contains("\"schema_version\":\"zornmesh.cli.event.v1\""));
+        assert!(line.contains("\"event_type\":"));
+        assert!(line.contains("\"sequence\":"));
+        assert!(line.contains("\"data\":"));
+    }
+}
+
+#[test]
+fn non_interactive_prompt_fail_fast_has_stable_stderr() {
+    let output = zornmesh(&["daemon", "shutdown", "--non-interactive"]);
+
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr(&output),
+        "E_NON_INTERACTIVE_PROMPT_REQUIRED: daemon shutdown requires confirmation; rerun interactively or wait for Story 1.7 shutdown support\n"
+    );
+}
+
+#[test]
+fn no_color_keeps_human_plain_and_json_byte_identical() {
+    let mut human = zornmesh_command(&["doctor", "--socket", TEST_SOCKET]);
+    human.env("NO_COLOR", "1");
+    let human = human.output().expect("zornmesh binary runs");
+    assert_success(&human);
+    assert_no_ansi(&stdout(&human));
+
+    let json = zornmesh(&["doctor", "--socket", TEST_SOCKET, "--output", "json"]);
+    let mut json_no_color =
+        zornmesh_command(&["doctor", "--socket", TEST_SOCKET, "--output", "json"]);
+    json_no_color.env("NO_COLOR", "1");
+    let json_no_color = json_no_color.output().expect("zornmesh binary runs");
+
+    assert_success(&json);
+    assert_success(&json_no_color);
+    assert_eq!(json.stdout, json_no_color.stdout);
+}
+
+#[test]
+fn exit_contract_maps_registered_error_categories() {
+    let cases = [
+        (
+            vec!["missing"],
+            64,
+            "E_UNSUPPORTED_COMMAND: unsupported zornmesh command 'missing'\n",
+        ),
+        (
+            vec![
+                "daemon",
+                "status",
+                "--socket",
+                TEST_SOCKET,
+                "--require-ready",
+            ],
+            69,
+            "E_DAEMON_UNREACHABLE: daemon is unreachable at /tmp/zorn-cli-contract.sock; start the daemon or choose another socket\n",
+        ),
+        (
+            vec!["agents", "inspect", ""],
+            65,
+            "E_VALIDATION_FAILED: agent id must not be empty\n",
+        ),
+        (
+            vec!["agents", "inspect", "missing-agent"],
+            66,
+            "E_NOT_FOUND: agent 'missing-agent' was not found\n",
+        ),
+        (
+            vec!["doctor", "--output", "yaml"],
+            64,
+            "E_UNSUPPORTED_OUTPUT_FORMAT: unsupported output format 'yaml'; supported formats: human, json, ndjson\n",
+        ),
+    ];
+
+    for (args, code, expected_stderr) in cases {
+        let output = zornmesh(&args);
+
+        assert_eq!(output.status.code(), Some(code), "args: {args:?}");
+        assert!(
+            output.stdout.is_empty(),
+            "stdout must stay empty on failure"
+        );
+        assert_eq!(stderr(&output), expected_stderr);
+    }
+}
+
+#[test]
+fn configuration_precedence_is_deterministic() {
+    let config = temp_config("socket_path=/tmp/zorn-config.sock\n");
+    let config = config.to_str().expect("temp path is utf8");
+
+    let config_output = zornmesh(&["daemon", "status", "--config", config, "--output", "json"]);
+    assert_success(&config_output);
+    assert!(stdout(&config_output).contains("\"socket_path\":\"/tmp/zorn-config.sock\""));
+    assert!(stdout(&config_output).contains("\"socket_source\":\"config\""));
+
+    let mut env_command =
+        zornmesh_command(&["daemon", "status", "--config", config, "--output", "json"]);
+    env_command.env("ZORN_SOCKET_PATH", "/tmp/zorn-env.sock");
+    let env_output = env_command.output().expect("zornmesh binary runs");
+    assert_success(&env_output);
+    assert!(stdout(&env_output).contains("\"socket_path\":\"/tmp/zorn-env.sock\""));
+    assert!(stdout(&env_output).contains("\"socket_source\":\"env\""));
+
+    let mut cli_command = zornmesh_command(&[
+        "daemon",
+        "status",
+        "--config",
+        config,
+        "--socket",
+        "/tmp/zorn-cli.sock",
+        "--output",
+        "json",
+    ]);
+    cli_command.env("ZORN_SOCKET_PATH", "/tmp/zorn-env.sock");
+    let cli_output = cli_command.output().expect("zornmesh binary runs");
+    assert_success(&cli_output);
+    assert!(stdout(&cli_output).contains("\"socket_path\":\"/tmp/zorn-cli.sock\""));
+    assert!(stdout(&cli_output).contains("\"socket_source\":\"cli\""));
+}

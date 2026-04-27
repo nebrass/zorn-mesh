@@ -4,7 +4,9 @@ Inspect trace and fixture scaffolding.
 Usage: zornmesh trace <COMMAND>
 
 Commands:
+  events  Emit trace event stream scaffolding
   help    Print trace help
 
 Options:
+      --output <FORMAT>  Select human, json, or ndjson output
   -h, --help  Print help

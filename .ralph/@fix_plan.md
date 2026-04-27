@@ -50,7 +50,7 @@
   > AC: Given no daemon is running, auto-spawn is disabled, a stale socket exists, startup times out, or concurrent TypeScript connects race, When the TypeScript SDK connects during this story, Then TypeScript follows the Rust shared auto-spawn policy and state taxonomy from Story 1.3, And enabled, disabled, stale-socket, timeout, and concurrent outcomes match the shared SDK connect fixtures.
   > AC: Given SDK documentation is generated or checked for public APIs, When the TypeScript SDK bootstrap is complete, Then connect, publish, and subscribe entrypoints have minimal public documentation and usage examples, And the docs use `zornmesh` naming consistently.
   > Spec: specs/planning-artifacts/epics.md#story-1-5
-- [ ] Story 1.6: Stabilize CLI Read Outputs and Exit Contracts
+- [x] Story 1.6: Stabilize CLI Read Outputs and Exit Contracts
   > As a developer or operator
   > I want every CLI subcommand to have stable human, JSON, stderr, non-interactive, and exit-code behavior
   > So that I can use `zornmesh` interactively and in scripts without fragile parsing.

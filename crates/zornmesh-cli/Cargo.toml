@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 zornmesh-daemon = { path = "../zornmesh-daemon" }
+zornmesh-rpc = { path = "../zornmesh-rpc" }
 zornmesh-sdk = { path = "../zornmesh-sdk" }
 
 [lib]
@@ -18,3 +19,6 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json = "1.0.149"
