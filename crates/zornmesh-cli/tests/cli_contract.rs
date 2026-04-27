@@ -426,6 +426,68 @@ fn stdio_initialize_over_ready_socket_emits_mcp_ack() {
 }
 
 #[test]
+fn stdio_unsupported_capability_result_is_structured_and_redacted() {
+    let (_listener, path) = healthy_socket("stdio-unsupported");
+    let socket = path.to_str().expect("socket path is utf8");
+    let mut child = zornmesh_command(&[
+        "stdio",
+        "--as-agent",
+        "agent.local/mcp-host",
+        "--socket",
+        socket,
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("zornmesh stdio starts");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin is piped");
+        stdin
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+            )
+            .expect("initialize written");
+        stdin.write_all(b"\n").expect("newline written");
+        stdin
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"capability_id":"stream.tokens","requires_streaming":true,"password":"do-not-leak"}}"#,
+            )
+            .expect("tool call written");
+        stdin.write_all(b"\n").expect("newline written");
+    }
+
+    let output = child.wait_with_output().expect("stdio exits after EOF");
+    assert_success(&output);
+    let stdout = stdout(&output);
+    let responses: Vec<_> = stdout.lines().collect();
+    assert_eq!(
+        responses.len(),
+        2,
+        "expected initialize and tool-call responses"
+    );
+    let unsupported: serde_json::Value =
+        serde_json::from_str(responses[1]).expect("tool-call response is JSON");
+    assert_eq!(unsupported["jsonrpc"], "2.0");
+    assert_eq!(unsupported["id"], 2);
+    assert_eq!(unsupported["result"]["status"], "unsupported_capability");
+    assert_eq!(
+        unsupported["result"]["code"],
+        "E_BRIDGE_UNSUPPORTED_CAPABILITY"
+    );
+    assert_eq!(unsupported["result"]["capability_id"], "stream.tokens");
+    assert!(
+        unsupported["result"]["remediation"]
+            .as_str()
+            .expect("remediation is a string")
+            .contains("zornmesh CLI")
+    );
+    let serialized = unsupported.to_string();
+    assert!(serialized.contains("[REDACTED]"));
+    assert!(!serialized.contains("do-not-leak"));
+}
+
+#[test]
 fn unsupported_shell_completion_fails_without_stdout() {
     let output = zornmesh(&["completion", "powershell"]);
 

@@ -144,6 +144,7 @@ session|disconnect|last_marks_disconnected
 stdio_bridge|state|pending
 stdio_bridge|state|initialized
 stdio_bridge|state|closed
+stdio_bridge|result|unsupported_capability
 stdio_bridge|error|E_BRIDGE_OUT_OF_SEQUENCE
 stdio_bridge|error|E_BRIDGE_ALREADY_INITIALIZED
 stdio_bridge|error|E_BRIDGE_UNSUPPORTED_PROTOCOL
@@ -151,6 +152,10 @@ stdio_bridge|error|E_BRIDGE_MALFORMED_INITIALIZE
 stdio_bridge|error|E_BRIDGE_CLOSED
 stdio_bridge|error|E_BRIDGE_MALFORMED_MESSAGE
 stdio_bridge|error|E_BRIDGE_UNSUPPORTED_MAPPING
+stdio_bridge|error|E_BRIDGE_UNSUPPORTED_CAPABILITY
 stdio_bridge|error|E_BRIDGE_POLICY_DENIED
 stdio_bridge|error|E_BRIDGE_REGISTRATION_FAILED
 stdio_bridge|error|E_BRIDGE_SOCKET_PERMISSION_DENIED
+stdio_bridge|degradation|streaming
+stdio_bridge|degradation|delivery_ack
+stdio_bridge|degradation|trace_context

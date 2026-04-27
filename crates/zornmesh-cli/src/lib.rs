@@ -1059,6 +1059,17 @@ fn bridge_response_json(id: &serde_json::Value, response: &BridgeResponse) -> St
             },
         })
         .to_string(),
+        BridgeResponse::ToolList { tools } => {
+            let tools = tools.iter().map(baseline_mcp_tool_json).collect::<Vec<_>>();
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "tools": tools,
+                },
+            })
+            .to_string()
+        }
         BridgeResponse::Mapped {
             correlation_id,
             trace_id,
@@ -1076,6 +1087,27 @@ fn bridge_response_json(id: &serde_json::Value, response: &BridgeResponse) -> St
                 "capability_id": capability_id,
                 "capability_version": capability_version,
                 "internal_operation": internal_operation,
+                "safe_params": safe_params,
+            },
+        })
+        .to_string(),
+        BridgeResponse::UnsupportedCapability {
+            code,
+            capability_id,
+            capability_version,
+            reason,
+            remediation,
+            safe_params,
+        } => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "status": "unsupported_capability",
+                "code": code,
+                "capability_id": capability_id,
+                "capability_version": capability_version,
+                "reason": reason,
+                "remediation": remediation,
                 "safe_params": safe_params,
             },
         })
@@ -1501,9 +1533,35 @@ pub enum BridgeMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineMcpTool {
+    name: String,
+    description: String,
+}
+
+impl BaselineMcpTool {
+    fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeResponse {
     InitializeAck {
         protocol_version: String,
+    },
+    ToolList {
+        tools: Vec<BaselineMcpTool>,
     },
     Mapped {
         correlation_id: String,
@@ -1511,6 +1569,14 @@ pub enum BridgeResponse {
         capability_id: Option<String>,
         capability_version: Option<String>,
         internal_operation: String,
+        safe_params: String,
+    },
+    UnsupportedCapability {
+        code: String,
+        capability_id: Option<String>,
+        capability_version: Option<String>,
+        reason: String,
+        remediation: String,
         safe_params: String,
     },
     Error(StdioBridgeError),
@@ -1536,6 +1602,7 @@ pub enum StdioBridgeErrorCode {
     Closed,
     MalformedMessage,
     UnsupportedMapping,
+    UnsupportedCapability,
     PolicyDenied,
     RegistrationFailed,
     SocketPermissionDenied,
@@ -1552,6 +1619,7 @@ impl StdioBridgeErrorCode {
             Self::Closed => "E_BRIDGE_CLOSED",
             Self::MalformedMessage => "E_BRIDGE_MALFORMED_MESSAGE",
             Self::UnsupportedMapping => "E_BRIDGE_UNSUPPORTED_MAPPING",
+            Self::UnsupportedCapability => "E_BRIDGE_UNSUPPORTED_CAPABILITY",
             Self::PolicyDenied => "E_BRIDGE_POLICY_DENIED",
             Self::RegistrationFailed => "E_BRIDGE_REGISTRATION_FAILED",
             Self::SocketPermissionDenied => "E_BRIDGE_SOCKET_PERMISSION_DENIED",
@@ -1567,6 +1635,7 @@ impl StdioBridgeErrorCode {
             | Self::AlreadyInitialized
             | Self::UnsupportedProtocolVersion
             | Self::Closed
+            | Self::UnsupportedCapability
             | Self::PolicyDenied
             | Self::RegistrationFailed
             | Self::SocketPermissionDenied
@@ -1843,6 +1912,12 @@ impl StdioBridge {
         let capability_version = string_field(&params_value, "capability_version")
             .or_else(|| string_field(&params_value, "capabilityVersion"));
 
+        if method == "tools/list" {
+            return BridgeResponse::ToolList {
+                tools: baseline_mcp_tools(),
+            };
+        }
+
         if method == "tools/call"
             && let Some(capability_id) = capability_id.as_deref()
         {
@@ -1861,6 +1936,21 @@ impl StdioBridge {
             }
         }
 
+        if method == "tools/call"
+            && let Some(limitation) = baseline_mcp_limitation(&params_value)
+        {
+            return BridgeResponse::UnsupportedCapability {
+                code: StdioBridgeErrorCode::UnsupportedCapability
+                    .as_str()
+                    .to_owned(),
+                capability_id,
+                capability_version,
+                reason: limitation.reason().to_owned(),
+                remediation: limitation.remediation().to_owned(),
+                safe_params: redacted_json_string(params_value),
+            };
+        }
+
         BridgeResponse::Mapped {
             correlation_id,
             trace_id,
@@ -1870,6 +1960,138 @@ impl StdioBridge {
             safe_params: redacted_json_string(params_value),
         }
     }
+}
+
+fn baseline_mcp_tools() -> Vec<BaselineMcpTool> {
+    vec![BaselineMcpTool::new(
+        "zornmesh.call_capability",
+        "Invoke mesh capabilities that fit baseline MCP unary JSON tools/call semantics; streaming, delivery ACK, and required trace-context semantics return unsupported_capability.",
+    )]
+}
+
+fn baseline_mcp_tool_json(tool: &BaselineMcpTool) -> serde_json::Value {
+    serde_json::json!({
+        "name": tool.name(),
+        "description": tool.description(),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+                "capability_id": {
+                    "type": "string",
+                    "description": "Mesh capability identifier to invoke."
+                },
+                "capability_version": {
+                    "type": "string",
+                    "description": "Mesh capability version; defaults to v1 when omitted."
+                },
+                "correlation_id": {
+                    "type": "string",
+                    "description": "Optional caller-supplied correlation identifier."
+                },
+                "trace_id": {
+                    "type": "string",
+                    "description": "Optional trace identifier carried as best-effort metadata."
+                }
+            }
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaselineMcpLimitation {
+    Streaming,
+    DeliveryAck,
+    TraceContext,
+}
+
+impl BaselineMcpLimitation {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Streaming => {
+                "streaming semantics are not representable on baseline MCP tools/call"
+            }
+            Self::DeliveryAck => {
+                "delivery_ack semantics are not representable on baseline MCP tools/call"
+            }
+            Self::TraceContext => "trace_context propagation is limited on baseline MCP tools/call",
+        }
+    }
+
+    const fn remediation(self) -> &'static str {
+        match self {
+            Self::Streaming => {
+                "Use the zornmesh CLI or Rust/TypeScript SDK for streaming mesh capabilities; baseline MCP tools/call supports only unary JSON calls."
+            }
+            Self::DeliveryAck => {
+                "Use the zornmesh CLI or Rust/TypeScript SDK when delivery ACK semantics are required; baseline MCP tools/call cannot confirm mesh delivery state."
+            }
+            Self::TraceContext => {
+                "Use the zornmesh CLI or Rust/TypeScript SDK when W3C tracecontext continuity is required; baseline MCP tools/call carries trace metadata only as best-effort fields."
+            }
+        }
+    }
+}
+
+fn baseline_mcp_limitation(params: &serde_json::Value) -> Option<BaselineMcpLimitation> {
+    if bool_field(params, "requires_streaming")
+        || bool_field(params, "requiresStreaming")
+        || semantic_requirement_present(params, &["streaming", "stream"])
+    {
+        return Some(BaselineMcpLimitation::Streaming);
+    }
+    if bool_field(params, "requires_delivery_ack")
+        || bool_field(params, "requiresDeliveryAck")
+        || semantic_requirement_present(params, &["delivery_ack", "deliveryack", "ack"])
+    {
+        return Some(BaselineMcpLimitation::DeliveryAck);
+    }
+    if bool_field(params, "requires_trace_context")
+        || bool_field(params, "requiresTraceContext")
+        || semantic_requirement_present(params, &["trace_context", "tracecontext"])
+    {
+        return Some(BaselineMcpLimitation::TraceContext);
+    }
+    None
+}
+
+fn bool_field(value: &serde_json::Value, field: &str) -> bool {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn semantic_requirement_present(value: &serde_json::Value, needles: &[&str]) -> bool {
+    [
+        "semantic_requirements",
+        "semanticRequirements",
+        "required_semantics",
+        "requiredSemantics",
+    ]
+    .iter()
+    .filter_map(|field| value.get(field))
+    .any(|requirements| semantic_value_matches(requirements, needles))
+}
+
+fn semantic_value_matches(value: &serde_json::Value, needles: &[&str]) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| semantic_value_matches(value, needles)),
+        serde_json::Value::String(value) => {
+            let normalized = normalize_semantic_requirement(value);
+            needles.iter().any(|needle| normalized == *needle)
+        }
+        _ => false,
+    }
+}
+
+fn normalize_semantic_requirement(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', '.', ' '], "_")
 }
 
 fn parse_params(params: &str) -> Result<serde_json::Value, StdioBridgeError> {

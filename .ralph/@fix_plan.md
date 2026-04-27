@@ -44,7 +44,7 @@
   > AC: Given the host process exits or stdio closes, When the bridge detects closure, Then the corresponding mesh connection and presence state are cleaned up deterministically, And no orphaned agent remains visible as connected.
   > AC: Given MCP bridge conformance tests run, When initialize success, out-of-sequence MCP input, duplicate initialize, unsupported protocol version, daemon unavailable, supported request mapping, policy-denied capability, redacted secret field, host exit, and malformed MCP input scenarios execute, Then bridge behavior is deterministic and pinned to the supported MCP version fixture set.
   > Spec: specs/planning-artifacts/epics.md#story-3-7
-- [ ] Story 3.8: Degrade Gracefully for Baseline MCP Capability Limits
+- [x] Story 3.8: Degrade Gracefully for Baseline MCP Capability Limits
   > As a developer bridging an MCP host
   > I want unsupported mesh capabilities to return explicit unsupported-capability results
   > So that baseline MCP hosts fail clearly instead of appearing broken or silently losing behavior.

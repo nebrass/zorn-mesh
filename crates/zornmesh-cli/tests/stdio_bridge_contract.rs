@@ -157,6 +157,118 @@ fn supported_request_mapping_preserves_trace_and_capability_metadata_with_redact
 }
 
 #[test]
+fn tools_list_after_initialize_exposes_only_baseline_representable_tools() {
+    let broker = Broker::new();
+    let mut bridge = make_bridge(&broker);
+    bridge.handle_message(BridgeMessage::Initialize {
+        protocol_version: MCP_BRIDGE_PROTOCOL_VERSION.to_owned(),
+    });
+
+    let response = bridge.handle_message(BridgeMessage::Request {
+        method: "tools/list".to_owned(),
+        params: "{}".to_owned(),
+    });
+
+    match response {
+        BridgeResponse::ToolList { tools } => {
+            let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
+            assert_eq!(names, vec!["zornmesh.call_capability"]);
+            assert!(
+                tools[0].description().contains("baseline MCP"),
+                "tool description must document the baseline MCP limit"
+            );
+            assert!(
+                !names.iter().any(|name| name.contains("stream")),
+                "streaming-only mesh capabilities must not be exposed as baseline MCP tools"
+            );
+        }
+        other => panic!("expected ToolList, got {other:?}"),
+    }
+}
+
+#[test]
+fn unsupported_streaming_capability_returns_named_result_with_safe_remediation() {
+    let broker = Broker::new();
+    let mut bridge = make_bridge(&broker);
+    bridge.handle_message(BridgeMessage::Initialize {
+        protocol_version: MCP_BRIDGE_PROTOCOL_VERSION.to_owned(),
+    });
+
+    let response = bridge.handle_message(BridgeMessage::Request {
+        method: "tools/call".to_owned(),
+        params:
+            r#"{"capability_id":"stream.tokens","requires_streaming":true,"secret":"do-not-leak"}"#
+                .to_owned(),
+    });
+
+    match response {
+        BridgeResponse::UnsupportedCapability {
+            code,
+            capability_id,
+            reason,
+            remediation,
+            safe_params,
+            ..
+        } => {
+            assert_eq!(code, StdioBridgeErrorCode::UnsupportedCapability.as_str());
+            assert_eq!(capability_id.as_deref(), Some("stream.tokens"));
+            assert!(reason.contains("streaming"));
+            assert!(remediation.contains("zornmesh CLI"));
+            assert!(safe_params.contains(REDACTION_MARKER));
+            assert!(!safe_params.contains("do-not-leak"));
+        }
+        other => panic!("expected UnsupportedCapability, got {other:?}"),
+    }
+}
+
+#[test]
+fn delivery_ack_partial_mapping_refuses_explicitly() {
+    let broker = Broker::new();
+    let mut bridge = make_bridge(&broker);
+    bridge.handle_message(BridgeMessage::Initialize {
+        protocol_version: MCP_BRIDGE_PROTOCOL_VERSION.to_owned(),
+    });
+
+    let response = bridge.handle_message(BridgeMessage::Request {
+        method: "tools/call".to_owned(),
+        params: r#"{"capability_id":"queue.publish","requires_delivery_ack":true}"#.to_owned(),
+    });
+
+    match response {
+        BridgeResponse::UnsupportedCapability { reason, .. } => {
+            assert!(reason.contains("delivery_ack"));
+        }
+        other => panic!("expected UnsupportedCapability, got {other:?}"),
+    }
+}
+
+#[test]
+fn required_trace_context_partial_mapping_refuses_instead_of_silently_degrading() {
+    let broker = Broker::new();
+    let mut bridge = make_bridge(&broker);
+    bridge.handle_message(BridgeMessage::Initialize {
+        protocol_version: MCP_BRIDGE_PROTOCOL_VERSION.to_owned(),
+    });
+
+    let response = bridge.handle_message(BridgeMessage::Request {
+        method: "tools/call".to_owned(),
+        params: r#"{"capability_id":"trace.forward","requires_trace_context":true,"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"}"#.to_owned(),
+    });
+
+    match response {
+        BridgeResponse::UnsupportedCapability {
+            reason,
+            safe_params,
+            ..
+        } => {
+            assert!(reason.contains("trace_context"));
+            assert!(safe_params.contains("traceparent"));
+        }
+        other => panic!("expected UnsupportedCapability, got {other:?}"),
+    }
+}
+
+#[test]
 fn policy_denied_capability_call_returns_stable_error_without_dispatch() {
     let broker = Broker::new();
     broker.mark_capability_high_privilege("admin.shutdown", "v1");
@@ -241,11 +353,16 @@ fn fixture_pins_stdio_bridge_taxonomy() {
         "stdio_bridge|state|pending",
         "stdio_bridge|state|initialized",
         "stdio_bridge|state|closed",
+        "stdio_bridge|result|unsupported_capability",
         "stdio_bridge|error|E_BRIDGE_OUT_OF_SEQUENCE",
         "stdio_bridge|error|E_BRIDGE_ALREADY_INITIALIZED",
         "stdio_bridge|error|E_BRIDGE_UNSUPPORTED_PROTOCOL",
         "stdio_bridge|error|E_BRIDGE_MALFORMED_INITIALIZE",
         "stdio_bridge|error|E_BRIDGE_CLOSED",
+        "stdio_bridge|error|E_BRIDGE_UNSUPPORTED_CAPABILITY",
+        "stdio_bridge|degradation|streaming",
+        "stdio_bridge|degradation|delivery_ack",
+        "stdio_bridge|degradation|trace_context",
     ] {
         assert!(fixture.contains(row), "missing fixture row {row}");
     }
