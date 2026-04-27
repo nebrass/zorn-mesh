@@ -28,7 +28,10 @@ use zornmesh_proto::{
 use zornmesh_rpc::local::{
     self, ENV_SHUTDOWN_BUDGET_MS, LocalError, LocalErrorCode, connect_trusted_socket,
 };
-use zornmesh_store::{EvidenceEnvelopeInput, EvidenceStore, EvidenceStoreError, FileEvidenceStore};
+use zornmesh_store::{
+    DeadLetterFailureCategory, EvidenceDeadLetterInput, EvidenceEnvelopeInput, EvidenceStore,
+    EvidenceStoreError, FileEvidenceStore,
+};
 
 pub const CRATE_BOUNDARY: &str = "zornmesh-daemon";
 const DEFAULT_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
@@ -503,8 +506,20 @@ fn handle_publish(
         None => None,
     };
 
-    match broker.publish(envelope) {
+    match broker.publish(envelope.clone()) {
         Ok(receipt) => {
+            if receipt.delivery_attempts() == 0
+                && let Some(store) = evidence_store
+                && let Err(error) = persist_no_recipient_dead_letter(store, &envelope)
+            {
+                let _ = write_result(
+                    stream,
+                    FrameStatus::Rejected,
+                    "E_PERSISTENCE_UNAVAILABLE",
+                    format!("accepted work was not durably dead-lettered: {error}"),
+                );
+                return;
+            }
             let durable_outcome = durable_sequence
                 .map(|sequence| {
                     CoordinationOutcome::durable_accepted(
@@ -542,6 +557,29 @@ fn persist_publish_evidence(
         "accepted",
     )?)?;
     Ok(commit.envelope().daemon_sequence())
+}
+
+fn persist_no_recipient_dead_letter(
+    store: &FileEvidenceStore,
+    envelope: &Envelope,
+) -> Result<(), EvidenceStoreError> {
+    store.persist_dead_letter(
+        EvidenceDeadLetterInput::new(
+            envelope.clone(),
+            envelope.correlation_id(),
+            envelope.trace_id(),
+            "dead_lettered",
+            DeadLetterFailureCategory::NoEligibleRecipient,
+            "no eligible recipient matched subject",
+        )?
+        .with_attempt_count(0)
+        .with_timing(
+            envelope.timestamp_unix_ms(),
+            envelope.timestamp_unix_ms(),
+            envelope.timestamp_unix_ms(),
+        ),
+    )?;
+    Ok(())
 }
 
 fn handle_subscription_control(stream: &mut UnixStream, broker: &Broker) -> bool {

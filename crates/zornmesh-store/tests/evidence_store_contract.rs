@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use zornmesh_core::{Envelope, REDACTION_MARKER};
 use zornmesh_store::{
-    EvidenceEnvelopeInput, EvidenceQuery, EvidenceStateTransitionInput, EvidenceStore,
-    EvidenceStoreErrorCode, FileEvidenceStore,
+    DeadLetterFailureCategory, DeadLetterQuery, EvidenceDeadLetterInput, EvidenceEnvelopeInput,
+    EvidenceQuery, EvidenceStateTransitionInput, EvidenceStore, EvidenceStoreErrorCode,
+    FileEvidenceStore,
 };
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -161,6 +162,118 @@ fn audit_state_transitions_link_hashes_and_redact_outcome_details() {
 }
 
 #[test]
+fn dead_letters_are_redacted_queryable_deduplicated_and_recovered() {
+    let dir = temp_dir("deadletter");
+    let path = evidence_path(&dir);
+    let store = FileEvidenceStore::open_evidence(&path).unwrap();
+    let accepted = store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(envelope(), "msg-dlq-1", "trace-dlq-1", "accepted")
+                .unwrap()
+                .with_target("agent.local/target"),
+        )
+        .unwrap();
+
+    let commit = store
+        .persist_dead_letter(
+            EvidenceDeadLetterInput::new(
+                envelope(),
+                "msg-dlq-1",
+                "trace-dlq-1",
+                "dead_lettered",
+                DeadLetterFailureCategory::RetryExhausted,
+                "retry budget exhausted; token=must-not-persist",
+            )
+            .unwrap()
+            .with_intended_target("agent.local/target")
+            .with_attempt_count(3)
+            .with_last_failure_category(DeadLetterFailureCategory::Timeout)
+            .with_timing(1_700_000_000_001, 1_700_000_000_101, 1_700_000_000_201),
+        )
+        .expect("dead letter persists");
+
+    let record = commit.dead_letter();
+    assert_eq!(
+        record.daemon_sequence(),
+        accepted.envelope().daemon_sequence()
+    );
+    assert_eq!(record.message_id(), "msg-dlq-1");
+    assert_eq!(record.source_agent(), "agent.local/source");
+    assert_eq!(record.intended_target(), Some("agent.local/target"));
+    assert_eq!(record.subject(), "mesh.work.created");
+    assert_eq!(record.correlation_id(), "corr-evidence-1");
+    assert_eq!(record.trace_id(), "trace-dlq-1");
+    assert_eq!(record.terminal_state(), "dead_lettered");
+    assert_eq!(
+        record.failure_category(),
+        DeadLetterFailureCategory::RetryExhausted
+    );
+    assert_eq!(record.safe_details(), REDACTION_MARKER);
+    assert_eq!(record.attempt_count(), 3);
+    assert_eq!(
+        record.last_failure_category(),
+        DeadLetterFailureCategory::Timeout
+    );
+    assert_eq!(record.first_attempted_unix_ms(), 1_700_000_000_001);
+    assert_eq!(record.last_attempted_unix_ms(), 1_700_000_000_101);
+    assert_eq!(record.terminal_unix_ms(), 1_700_000_000_201);
+    assert_eq!(record.payload_len(), 31);
+    assert_eq!(record.payload_content_type(), REDACTION_MARKER);
+    assert_eq!(commit.audit_entry().action(), "dead_lettered");
+    assert_eq!(commit.audit_entry().state_from(), Some("accepted"));
+    assert_eq!(commit.audit_entry().state_to(), "dead_lettered");
+    assert_eq!(
+        store
+            .get_envelope("msg-dlq-1")
+            .unwrap()
+            .unwrap()
+            .delivery_state(),
+        "dead_lettered"
+    );
+
+    let query = DeadLetterQuery::new()
+        .subject("mesh.work.created")
+        .agent_id("agent.local/target")
+        .correlation_id("corr-evidence-1")
+        .failure_category(DeadLetterFailureCategory::RetryExhausted)
+        .time_window(1_700_000_000_200, 1_700_000_000_202);
+    assert_eq!(store.query_dead_letters(query), vec![record.clone()]);
+
+    let duplicate = store
+        .persist_dead_letter(
+            EvidenceDeadLetterInput::new(
+                envelope(),
+                "msg-dlq-1",
+                "trace-dlq-1",
+                "dead_lettered",
+                DeadLetterFailureCategory::RetryExhausted,
+                "duplicate terminal failure",
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert_eq!(duplicate.code(), EvidenceStoreErrorCode::Validation);
+    assert_eq!(store.query_dead_letters(DeadLetterQuery::new()).len(), 1);
+
+    let persisted = std::fs::read_to_string(&path).expect("evidence file readable");
+    assert!(!persisted.contains("must-not-persist"));
+
+    let reopened = FileEvidenceStore::open_evidence(&path).expect("reopen evidence store");
+    assert_eq!(
+        reopened.query_dead_letters(DeadLetterQuery::new()),
+        vec![record.clone()]
+    );
+    assert_eq!(
+        reopened
+            .get_envelope("msg-dlq-1")
+            .unwrap()
+            .unwrap()
+            .delivery_state(),
+        "dead_lettered"
+    );
+}
+
+#[test]
 fn committed_records_recover_once_after_restart() {
     let dir = temp_dir("restart");
     let path = evidence_path(&dir);
@@ -223,14 +336,24 @@ fn fixture_pins_evidence_persistence_taxonomy() {
     for row in [
         "evidence|state|accepted",
         "evidence|state|authorized",
+        "evidence|state|dead_lettered",
         "evidence|audit_action|accepted_envelope",
         "evidence|audit_action|authorization_decision",
+        "evidence|audit_action|dead_lettered",
         "evidence|index|idx_evidence_correlation_id",
         "evidence|index|idx_evidence_trace_id",
         "evidence|index|idx_evidence_agent_id",
         "evidence|index|idx_evidence_subject",
         "evidence|index|idx_evidence_delivery_state",
+        "evidence|index|idx_evidence_failure_category",
         "evidence|index|idx_evidence_timestamp",
+        "dead_letter|failure_category|no_eligible_recipient",
+        "dead_letter|failure_category|ttl_expired",
+        "dead_letter|failure_category|retry_exhausted",
+        "dead_letter|failure_category|validation_terminal",
+        "dead_letter|failure_category|delivery_failed",
+        "dead_letter|failure_category|timeout",
+        "dead_letter|failure_category|unknown",
         "evidence|error|E_EVIDENCE_VALIDATION",
         "evidence|error|E_EVIDENCE_CORRUPT",
         "evidence|error|E_EVIDENCE_FUTURE_SCHEMA",

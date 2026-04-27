@@ -85,7 +85,7 @@
   > AC: Given metrics include labels derived from agents, subjects, capability IDs, error categories, or delivery states, When label values exceed the documented cardinality cap, Then excess values are bucketed or suppressed according to the telemetry schema, And correlation IDs, trace IDs, message IDs, raw subjects, and payload fragments never become metric labels.
   > AC: Given observability conformance tests run, When trace propagation, schema validation, malformed traceparent, malformed tracestate, no-export-default, exporter unreachable, exporter slow, high-cardinality, cardinality cap, and multi-hop causality scenarios execute, Then output matches the documented telemetry schema and fixture expectations.
   > Spec: specs/planning-artifacts/epics.md#story-4-2
-- [ ] Story 4.3: Capture Dead Letters with Structured Failure Reasons
+- [x] Story 4.3: Capture Dead Letters with Structured Failure Reasons
   > As a developer
   > I want undeliverable or exhausted envelopes to land in a dead-letter queue with clear causes
   > So that failures remain inspectable and recoverable instead of disappearing.

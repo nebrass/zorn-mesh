@@ -21,6 +21,7 @@ pub const EVIDENCE_INDEX_TRACE_ID: &str = "idx_evidence_trace_id";
 pub const EVIDENCE_INDEX_AGENT_ID: &str = "idx_evidence_agent_id";
 pub const EVIDENCE_INDEX_SUBJECT: &str = "idx_evidence_subject";
 pub const EVIDENCE_INDEX_DELIVERY_STATE: &str = "idx_evidence_delivery_state";
+pub const EVIDENCE_INDEX_FAILURE_CATEGORY: &str = "idx_evidence_failure_category";
 pub const EVIDENCE_INDEX_TIMESTAMP: &str = "idx_evidence_timestamp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +203,44 @@ impl fmt::Display for EvidenceStoreError {
 
 impl std::error::Error for EvidenceStoreError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadLetterFailureCategory {
+    NoEligibleRecipient,
+    TtlExpired,
+    RetryExhausted,
+    ValidationTerminal,
+    DeliveryFailed,
+    Timeout,
+    Unknown,
+}
+
+impl DeadLetterFailureCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoEligibleRecipient => "no_eligible_recipient",
+            Self::TtlExpired => "ttl_expired",
+            Self::RetryExhausted => "retry_exhausted",
+            Self::ValidationTerminal => "validation_terminal",
+            Self::DeliveryFailed => "delivery_failed",
+            Self::Timeout => "timeout",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "no_eligible_recipient" => Some(Self::NoEligibleRecipient),
+            "ttl_expired" => Some(Self::TtlExpired),
+            "retry_exhausted" => Some(Self::RetryExhausted),
+            "validation_terminal" => Some(Self::ValidationTerminal),
+            "delivery_failed" => Some(Self::DeliveryFailed),
+            "timeout" => Some(Self::Timeout),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceEnvelopeInput {
     envelope: Envelope,
@@ -308,6 +347,87 @@ impl EvidenceStateTransitionInput {
         validate_evidence_field("state to", &input.state_to)?;
         validate_evidence_field("outcome details", &input.outcome_details)?;
         Ok(input)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceDeadLetterInput {
+    envelope: Envelope,
+    message_id: String,
+    trace_id: String,
+    terminal_state: String,
+    failure_category: DeadLetterFailureCategory,
+    safe_details: String,
+    intended_target: Option<String>,
+    attempt_count: u32,
+    last_failure_category: DeadLetterFailureCategory,
+    first_attempted_unix_ms: u64,
+    last_attempted_unix_ms: u64,
+    terminal_unix_ms: u64,
+}
+
+impl EvidenceDeadLetterInput {
+    pub fn new(
+        envelope: Envelope,
+        message_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        terminal_state: impl Into<String>,
+        failure_category: DeadLetterFailureCategory,
+        safe_details: impl Into<String>,
+    ) -> Result<Self, EvidenceStoreError> {
+        let message_id = message_id.into();
+        let trace_id = trace_id.into();
+        let terminal_state = terminal_state.into();
+        let safe_details = safe_details.into();
+        validate_evidence_field("message ID", &message_id)?;
+        validate_evidence_field("trace ID", &trace_id)?;
+        validate_evidence_field("terminal state", &terminal_state)?;
+        validate_evidence_field("safe details", &safe_details)?;
+        let timestamp = envelope.timestamp_unix_ms();
+        Ok(Self {
+            envelope,
+            message_id,
+            trace_id,
+            terminal_state,
+            failure_category,
+            safe_details,
+            intended_target: None,
+            attempt_count: 1,
+            last_failure_category: failure_category,
+            first_attempted_unix_ms: timestamp,
+            last_attempted_unix_ms: timestamp,
+            terminal_unix_ms: timestamp,
+        })
+    }
+
+    pub fn with_intended_target(mut self, target: impl Into<String>) -> Self {
+        let target = target.into();
+        if !target.trim().is_empty() {
+            self.intended_target = Some(target);
+        }
+        self
+    }
+
+    pub const fn with_attempt_count(mut self, attempt_count: u32) -> Self {
+        self.attempt_count = attempt_count;
+        self
+    }
+
+    pub const fn with_last_failure_category(mut self, category: DeadLetterFailureCategory) -> Self {
+        self.last_failure_category = category;
+        self
+    }
+
+    pub const fn with_timing(
+        mut self,
+        first_attempted_unix_ms: u64,
+        last_attempted_unix_ms: u64,
+        terminal_unix_ms: u64,
+    ) -> Self {
+        self.first_attempted_unix_ms = first_attempted_unix_ms;
+        self.last_attempted_unix_ms = last_attempted_unix_ms;
+        self.terminal_unix_ms = terminal_unix_ms;
+        self
     }
 }
 
@@ -444,6 +564,97 @@ impl EvidenceAuditEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceDeadLetterRecord {
+    daemon_sequence: u64,
+    message_id: String,
+    source_agent: String,
+    intended_target: Option<String>,
+    subject: String,
+    correlation_id: String,
+    trace_id: String,
+    terminal_state: String,
+    failure_category: DeadLetterFailureCategory,
+    safe_details: String,
+    attempt_count: u32,
+    last_failure_category: DeadLetterFailureCategory,
+    first_attempted_unix_ms: u64,
+    last_attempted_unix_ms: u64,
+    terminal_unix_ms: u64,
+    payload_len: usize,
+    payload_content_type: String,
+}
+
+impl EvidenceDeadLetterRecord {
+    pub const fn daemon_sequence(&self) -> u64 {
+        self.daemon_sequence
+    }
+
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+
+    pub fn source_agent(&self) -> &str {
+        &self.source_agent
+    }
+
+    pub fn intended_target(&self) -> Option<&str> {
+        self.intended_target.as_deref()
+    }
+
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
+    }
+
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    pub fn terminal_state(&self) -> &str {
+        &self.terminal_state
+    }
+
+    pub const fn failure_category(&self) -> DeadLetterFailureCategory {
+        self.failure_category
+    }
+
+    pub fn safe_details(&self) -> &str {
+        &self.safe_details
+    }
+
+    pub const fn attempt_count(&self) -> u32 {
+        self.attempt_count
+    }
+
+    pub const fn last_failure_category(&self) -> DeadLetterFailureCategory {
+        self.last_failure_category
+    }
+
+    pub const fn first_attempted_unix_ms(&self) -> u64 {
+        self.first_attempted_unix_ms
+    }
+
+    pub const fn last_attempted_unix_ms(&self) -> u64 {
+        self.last_attempted_unix_ms
+    }
+
+    pub const fn terminal_unix_ms(&self) -> u64 {
+        self.terminal_unix_ms
+    }
+
+    pub const fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    pub fn payload_content_type(&self) -> &str {
+        &self.payload_content_type
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceCommit {
     envelope: EvidenceEnvelopeRecord,
     audit_entry: EvidenceAuditEntry,
@@ -452,6 +663,22 @@ pub struct EvidenceCommit {
 impl EvidenceCommit {
     pub const fn envelope(&self) -> &EvidenceEnvelopeRecord {
         &self.envelope
+    }
+
+    pub const fn audit_entry(&self) -> &EvidenceAuditEntry {
+        &self.audit_entry
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceDeadLetterCommit {
+    dead_letter: EvidenceDeadLetterRecord,
+    audit_entry: EvidenceAuditEntry,
+}
+
+impl EvidenceDeadLetterCommit {
+    pub const fn dead_letter(&self) -> &EvidenceDeadLetterRecord {
+        &self.dead_letter
     }
 
     pub const fn audit_entry(&self) -> &EvidenceAuditEntry {
@@ -505,6 +732,52 @@ impl EvidenceQuery {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeadLetterQuery {
+    correlation_id: Option<String>,
+    trace_id: Option<String>,
+    agent_id: Option<String>,
+    subject: Option<String>,
+    failure_category: Option<DeadLetterFailureCategory>,
+    time_window: Option<(u64, u64)>,
+}
+
+impl DeadLetterQuery {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn correlation_id(mut self, value: impl Into<String>) -> Self {
+        self.correlation_id = Some(value.into());
+        self
+    }
+
+    pub fn trace_id(mut self, value: impl Into<String>) -> Self {
+        self.trace_id = Some(value.into());
+        self
+    }
+
+    pub fn agent_id(mut self, value: impl Into<String>) -> Self {
+        self.agent_id = Some(value.into());
+        self
+    }
+
+    pub fn subject(mut self, value: impl Into<String>) -> Self {
+        self.subject = Some(value.into());
+        self
+    }
+
+    pub const fn failure_category(mut self, value: DeadLetterFailureCategory) -> Self {
+        self.failure_category = Some(value);
+        self
+    }
+
+    pub const fn time_window(mut self, start_unix_ms: u64, end_unix_ms: u64) -> Self {
+        self.time_window = Some((start_unix_ms, end_unix_ms));
+        self
+    }
+}
+
 pub trait EvidenceStore {
     fn persist_accepted_envelope(
         &self,
@@ -516,7 +789,14 @@ pub trait EvidenceStore {
         input: EvidenceStateTransitionInput,
     ) -> Result<EvidenceAuditEntry, EvidenceStoreError>;
 
+    fn persist_dead_letter(
+        &self,
+        input: EvidenceDeadLetterInput,
+    ) -> Result<EvidenceDeadLetterCommit, EvidenceStoreError>;
+
     fn query_envelopes(&self, query: EvidenceQuery) -> Vec<EvidenceEnvelopeRecord>;
+
+    fn query_dead_letters(&self, query: DeadLetterQuery) -> Vec<EvidenceDeadLetterRecord>;
 
     fn get_envelope(
         &self,
@@ -540,6 +820,8 @@ struct FileEvidenceInner {
     path: PathBuf,
     envelopes: Vec<EvidenceEnvelopeRecord>,
     message_index: HashMap<String, usize>,
+    dead_letters: Vec<EvidenceDeadLetterRecord>,
+    dead_letter_index: HashMap<String, usize>,
     audit_entries: Vec<EvidenceAuditEntry>,
     next_daemon_sequence: u64,
     last_audit_hash: String,
@@ -654,6 +936,8 @@ impl FileEvidenceInner {
             path,
             envelopes: Vec::new(),
             message_index: HashMap::new(),
+            dead_letters: Vec::new(),
+            dead_letter_index: HashMap::new(),
             audit_entries: Vec::new(),
             next_daemon_sequence: 1,
             last_audit_hash: "0".to_owned(),
@@ -697,6 +981,41 @@ impl FileEvidenceInner {
                 };
                 validate_audit_hash(&self.last_audit_hash, &audit)?;
                 self.envelopes[index].delivery_state = audit.state_to.clone();
+                self.last_audit_hash = audit.current_audit_hash.clone();
+                self.audit_entries.push(audit);
+                Ok(())
+            }
+            EvidenceLogRecord::DeadLetter { dead_letter, audit } => {
+                let dead_letter = *dead_letter;
+                let audit = *audit;
+                let Some(index) = self.message_index.get(dead_letter.message_id()).copied() else {
+                    return Err(format!(
+                        "dead letter references unknown message ID '{}'",
+                        dead_letter.message_id()
+                    ));
+                };
+                if self
+                    .dead_letter_index
+                    .contains_key(dead_letter.message_id())
+                {
+                    return Err(format!(
+                        "duplicate dead letter for message ID '{}'",
+                        dead_letter.message_id()
+                    ));
+                }
+                if self.envelopes[index].daemon_sequence != dead_letter.daemon_sequence {
+                    return Err(format!(
+                        "dead letter daemon sequence {} does not match message ID '{}'",
+                        dead_letter.daemon_sequence,
+                        dead_letter.message_id()
+                    ));
+                }
+                validate_audit_hash(&self.last_audit_hash, &audit)?;
+                self.envelopes[index].delivery_state = dead_letter.terminal_state.clone();
+                let dead_letter_index = self.dead_letters.len();
+                self.dead_letter_index
+                    .insert(dead_letter.message_id.clone(), dead_letter_index);
+                self.dead_letters.push(dead_letter);
                 self.last_audit_hash = audit.current_audit_hash.clone();
                 self.audit_entries.push(audit);
                 Ok(())
@@ -817,6 +1136,106 @@ impl EvidenceStore for FileEvidenceStore {
         Ok(audit)
     }
 
+    fn persist_dead_letter(
+        &self,
+        input: EvidenceDeadLetterInput,
+    ) -> Result<EvidenceDeadLetterCommit, EvidenceStoreError> {
+        if input.first_attempted_unix_ms > input.last_attempted_unix_ms
+            || input.last_attempted_unix_ms > input.terminal_unix_ms
+        {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                "dead letter timing must be ordered first_attempted <= last_attempted <= terminal",
+            ));
+        }
+
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("evidence store mutex not poisoned");
+        let Some(envelope_index) = inner.message_index.get(&input.message_id).copied() else {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                format!("message ID '{}' is unknown", input.message_id),
+            ));
+        };
+        if inner.dead_letter_index.contains_key(&input.message_id) {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                format!(
+                    "message ID '{}' already has a dead letter",
+                    input.message_id
+                ),
+            ));
+        }
+
+        let envelope_record = inner.envelopes[envelope_index].clone();
+        if input.envelope.source_agent() != envelope_record.source_agent()
+            || input.envelope.subject() != envelope_record.subject()
+            || input.envelope.correlation_id() != envelope_record.correlation_id()
+        {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                format!(
+                    "dead letter envelope metadata does not match message ID '{}'",
+                    input.message_id
+                ),
+            ));
+        }
+        let state_from = envelope_record.delivery_state().to_owned();
+        let payload_metadata = input.envelope.payload_metadata();
+        let safe_details = redact_sensitive(&input.safe_details);
+        let dead_letter = EvidenceDeadLetterRecord {
+            daemon_sequence: envelope_record.daemon_sequence(),
+            message_id: input.message_id.clone(),
+            source_agent: input.envelope.source_agent().to_owned(),
+            intended_target: input.intended_target.clone(),
+            subject: input.envelope.subject().to_owned(),
+            correlation_id: input.envelope.correlation_id().to_owned(),
+            trace_id: input.trace_id.clone(),
+            terminal_state: input.terminal_state.clone(),
+            failure_category: input.failure_category,
+            safe_details: safe_details.clone(),
+            attempt_count: input.attempt_count,
+            last_failure_category: input.last_failure_category,
+            first_attempted_unix_ms: input.first_attempted_unix_ms,
+            last_attempted_unix_ms: input.last_attempted_unix_ms,
+            terminal_unix_ms: input.terminal_unix_ms,
+            payload_len: payload_metadata.payload_len(),
+            payload_content_type: REDACTION_MARKER.to_owned(),
+        };
+        let audit = build_audit_entry(AuditBuildInput {
+            previous_hash: &inner.last_audit_hash,
+            daemon_sequence: envelope_record.daemon_sequence(),
+            message_id: &input.message_id,
+            actor: input.envelope.source_agent(),
+            action: "dead_lettered",
+            capability_or_subject: input.envelope.subject(),
+            correlation_id: input.envelope.correlation_id(),
+            trace_id: &input.trace_id,
+            state_from: Some(&state_from),
+            state_to: &input.terminal_state,
+            outcome_details: &safe_details,
+        });
+        let record = EvidenceLogRecord::DeadLetter {
+            dead_letter: Box::new(dead_letter.clone()),
+            audit: Box::new(audit.clone()),
+        };
+        write_evidence_line(&inner.path, &record.encode())?;
+        inner.envelopes[envelope_index].delivery_state = audit.state_to.clone();
+        let dead_letter_index = inner.dead_letters.len();
+        inner
+            .dead_letter_index
+            .insert(input.message_id.clone(), dead_letter_index);
+        inner.dead_letters.push(dead_letter.clone());
+        inner.last_audit_hash = audit.current_audit_hash.clone();
+        inner.audit_entries.push(audit.clone());
+        Ok(EvidenceDeadLetterCommit {
+            dead_letter,
+            audit_entry: audit,
+        })
+    }
+
     fn query_envelopes(&self, query: EvidenceQuery) -> Vec<EvidenceEnvelopeRecord> {
         let inner = self
             .inner
@@ -826,6 +1245,19 @@ impl EvidenceStore for FileEvidenceStore {
             .envelopes
             .iter()
             .filter(|record| evidence_matches_query(record, &query))
+            .cloned()
+            .collect()
+    }
+
+    fn query_dead_letters(&self, query: DeadLetterQuery) -> Vec<EvidenceDeadLetterRecord> {
+        let inner = self
+            .inner
+            .lock()
+            .expect("evidence store mutex not poisoned");
+        inner
+            .dead_letters
+            .iter()
+            .filter(|record| dead_letter_matches_query(record, &query))
             .cloned()
             .collect()
     }
@@ -867,9 +1299,51 @@ impl EvidenceStore for FileEvidenceStore {
             EVIDENCE_INDEX_AGENT_ID,
             EVIDENCE_INDEX_SUBJECT,
             EVIDENCE_INDEX_DELIVERY_STATE,
+            EVIDENCE_INDEX_FAILURE_CATEGORY,
             EVIDENCE_INDEX_TIMESTAMP,
         ]
     }
+}
+
+fn dead_letter_matches_query(record: &EvidenceDeadLetterRecord, query: &DeadLetterQuery) -> bool {
+    if query
+        .correlation_id
+        .as_deref()
+        .is_some_and(|value| record.correlation_id() != value)
+    {
+        return false;
+    }
+    if query
+        .trace_id
+        .as_deref()
+        .is_some_and(|value| record.trace_id() != value)
+    {
+        return false;
+    }
+    if query.agent_id.as_deref().is_some_and(|value| {
+        record.source_agent() != value && record.intended_target() != Some(value)
+    }) {
+        return false;
+    }
+    if query
+        .subject
+        .as_deref()
+        .is_some_and(|value| record.subject() != value)
+    {
+        return false;
+    }
+    if query
+        .failure_category
+        .is_some_and(|value| record.failure_category() != value)
+    {
+        return false;
+    }
+    if query.time_window.is_some_and(|(start, end)| {
+        record.terminal_unix_ms() < start || record.terminal_unix_ms() > end
+    }) {
+        return false;
+    }
+    true
 }
 
 fn evidence_matches_query(record: &EvidenceEnvelopeRecord, query: &EvidenceQuery) -> bool {
@@ -1106,6 +1580,10 @@ enum EvidenceLogRecord {
     Transition {
         audit: Box<EvidenceAuditEntry>,
     },
+    DeadLetter {
+        dead_letter: Box<EvidenceDeadLetterRecord>,
+        audit: Box<EvidenceAuditEntry>,
+    },
 }
 
 impl EvidenceLogRecord {
@@ -1155,6 +1633,36 @@ impl EvidenceLogRecord {
                 encode_field(audit.current_audit_hash()),
             ]
             .join("|"),
+            Self::DeadLetter { dead_letter, audit } => [
+                format!("v{EVIDENCE_STORE_SCHEMA_VERSION}"),
+                "dead_letter".to_owned(),
+                dead_letter.daemon_sequence().to_string(),
+                encode_field(dead_letter.message_id()),
+                encode_field(dead_letter.source_agent()),
+                encode_field(dead_letter.intended_target().unwrap_or("")),
+                encode_field(dead_letter.subject()),
+                encode_field(dead_letter.correlation_id()),
+                encode_field(dead_letter.trace_id()),
+                encode_field(dead_letter.terminal_state()),
+                encode_field(dead_letter.failure_category().as_str()),
+                encode_field(dead_letter.safe_details()),
+                dead_letter.attempt_count().to_string(),
+                encode_field(dead_letter.last_failure_category().as_str()),
+                dead_letter.first_attempted_unix_ms().to_string(),
+                dead_letter.last_attempted_unix_ms().to_string(),
+                dead_letter.terminal_unix_ms().to_string(),
+                dead_letter.payload_len().to_string(),
+                encode_field(dead_letter.payload_content_type()),
+                encode_field(audit.previous_audit_hash()),
+                encode_field(audit.current_audit_hash()),
+                encode_field(audit.actor()),
+                encode_field(audit.action()),
+                encode_field(audit.capability_or_subject()),
+                encode_field(audit.state_from().unwrap_or("")),
+                encode_field(audit.state_to()),
+                encode_field(audit.outcome_details()),
+            ]
+            .join("|"),
         }
     }
 
@@ -1175,6 +1683,7 @@ impl EvidenceLogRecord {
             "schema" if parts.get(2) == Some(&"evidence-store") => Some(Self::Schema),
             "accepted" => Self::parse_accepted(&parts),
             "transition" => Self::parse_transition(&parts),
+            "dead_letter" => Self::parse_dead_letter(&parts),
             _ => None,
         }
     }
@@ -1236,6 +1745,53 @@ impl EvidenceLogRecord {
                 previous_audit_hash: decode_field(parts.get(12)?)?,
                 current_audit_hash: decode_field(parts.get(13)?)?,
             }),
+        })
+    }
+
+    fn parse_dead_letter(parts: &[&str]) -> Option<Self> {
+        if parts.len() != 27 {
+            return None;
+        }
+        let failure_category =
+            DeadLetterFailureCategory::from_wire(&decode_field(parts.get(10)?)?)?;
+        let last_failure_category =
+            DeadLetterFailureCategory::from_wire(&decode_field(parts.get(13)?)?)?;
+        let dead_letter = EvidenceDeadLetterRecord {
+            daemon_sequence: parts.get(2)?.parse().ok()?,
+            message_id: decode_field(parts.get(3)?)?,
+            source_agent: decode_field(parts.get(4)?)?,
+            intended_target: decode_optional_field(parts.get(5)?)?,
+            subject: decode_field(parts.get(6)?)?,
+            correlation_id: decode_field(parts.get(7)?)?,
+            trace_id: decode_field(parts.get(8)?)?,
+            terminal_state: decode_field(parts.get(9)?)?,
+            failure_category,
+            safe_details: decode_field(parts.get(11)?)?,
+            attempt_count: parts.get(12)?.parse().ok()?,
+            last_failure_category,
+            first_attempted_unix_ms: parts.get(14)?.parse().ok()?,
+            last_attempted_unix_ms: parts.get(15)?.parse().ok()?,
+            terminal_unix_ms: parts.get(16)?.parse().ok()?,
+            payload_len: parts.get(17)?.parse().ok()?,
+            payload_content_type: decode_field(parts.get(18)?)?,
+        };
+        let audit = EvidenceAuditEntry {
+            daemon_sequence: dead_letter.daemon_sequence,
+            message_id: dead_letter.message_id.clone(),
+            previous_audit_hash: decode_field(parts.get(19)?)?,
+            current_audit_hash: decode_field(parts.get(20)?)?,
+            actor: decode_field(parts.get(21)?)?,
+            action: decode_field(parts.get(22)?)?,
+            capability_or_subject: decode_field(parts.get(23)?)?,
+            correlation_id: dead_letter.correlation_id.clone(),
+            trace_id: dead_letter.trace_id.clone(),
+            state_from: decode_optional_field(parts.get(24)?)?,
+            state_to: decode_field(parts.get(25)?)?,
+            outcome_details: decode_field(parts.get(26)?)?,
+        };
+        Some(Self::DeadLetter {
+            dead_letter: Box::new(dead_letter),
+            audit: Box::new(audit),
         })
     }
 }
