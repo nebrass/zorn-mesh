@@ -420,7 +420,7 @@ fn handle_client(
     match read_client_frame(&mut stream) {
         Ok(ClientFrame::Subscribe { pattern }) => handle_subscribe(stream, broker, pattern),
         Ok(ClientFrame::Publish { envelope }) => {
-            handle_publish(&mut stream, broker, evidence_store.as_ref(), envelope);
+            handle_publish(&mut stream, broker, evidence_store.as_ref(), *envelope);
         }
         Ok(ClientFrame::Ack { .. } | ClientFrame::Nack { .. }) => {
             let _ = write_result(
@@ -538,7 +538,7 @@ fn persist_publish_evidence(
     let commit = store.persist_accepted_envelope(EvidenceEnvelopeInput::new(
         envelope.clone(),
         envelope.correlation_id(),
-        envelope.correlation_id(),
+        envelope.trace_id(),
         "accepted",
     )?)?;
     Ok(commit.envelope().daemon_sequence())

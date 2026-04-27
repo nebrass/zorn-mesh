@@ -12,8 +12,8 @@ fn registration(stream_id: &str, correlation_id: &str) -> StreamRegistration {
         correlation_id,
         "agent.local/sender",
         "agent.local/receiver",
-        4 * KIB,    // max chunk size
-        16 * KIB,   // byte budget
+        4 * KIB,  // max chunk size
+        16 * KIB, // byte budget
     )
 }
 
@@ -26,7 +26,9 @@ fn happy_path_chunks_carry_sequence_and_terminal_chunk_completes_stream() {
 
     for seq in 0..3 {
         let chunk = ChunkSubmission::new("stream-1", seq, vec![0u8; KIB], StreamFinality::Continue);
-        let outcome = broker.submit_chunk(chunk).expect("chunk submission completes");
+        let outcome = broker
+            .submit_chunk(chunk)
+            .expect("chunk submission completes");
         match outcome {
             ChunkSubmissionOutcome::Accepted {
                 sequence,
@@ -52,13 +54,18 @@ fn happy_path_chunks_carry_sequence_and_terminal_chunk_completes_stream() {
         }
         other => panic!("expected Completed, got {other:?}"),
     }
-    assert_eq!(broker.stream_state("stream-1"), Some(StreamState::Completed));
+    assert_eq!(
+        broker.stream_state("stream-1"),
+        Some(StreamState::Completed)
+    );
 }
 
 #[test]
 fn oversize_chunk_is_rejected_with_payload_limit_error_and_does_not_advance_stream() {
     let broker = Broker::new();
-    broker.open_stream(registration("stream-2", "corr-2")).unwrap();
+    broker
+        .open_stream(registration("stream-2", "corr-2"))
+        .unwrap();
 
     let oversize = ChunkSubmission::new(
         "stream-2",
@@ -71,25 +78,36 @@ fn oversize_chunk_is_rejected_with_payload_limit_error_and_does_not_advance_stre
     assert_eq!(broker.stream_state("stream-2"), Some(StreamState::Open));
 
     // Original sequence cursor unchanged: a valid first chunk still uses sequence 0.
-    let recovered =
-        ChunkSubmission::new("stream-2", 0, vec![0u8; KIB], StreamFinality::Continue);
+    let recovered = ChunkSubmission::new("stream-2", 0, vec![0u8; KIB], StreamFinality::Continue);
     let outcome = broker.submit_chunk(recovered).unwrap();
-    assert!(matches!(outcome, ChunkSubmissionOutcome::Accepted { sequence: 0, .. }));
+    assert!(matches!(
+        outcome,
+        ChunkSubmissionOutcome::Accepted { sequence: 0, .. }
+    ));
 }
 
 #[test]
 fn byte_budget_exhaustion_yields_typed_backpressure_outcome() {
     let broker = Broker::new();
-    broker.open_stream(registration("stream-3", "corr-3")).unwrap();
+    broker
+        .open_stream(registration("stream-3", "corr-3"))
+        .unwrap();
 
     // 16 KiB budget; send four 4 KiB chunks then attempt a fifth.
     for seq in 0..4 {
-        let chunk = ChunkSubmission::new("stream-3", seq, vec![0u8; 4 * KIB], StreamFinality::Continue);
+        let chunk = ChunkSubmission::new(
+            "stream-3",
+            seq,
+            vec![0u8; 4 * KIB],
+            StreamFinality::Continue,
+        );
         broker.submit_chunk(chunk).expect("chunk fits in budget");
     }
 
     let overflow = ChunkSubmission::new("stream-3", 4, vec![0u8; KIB], StreamFinality::Continue);
-    let outcome = broker.submit_chunk(overflow).expect("budget exhausted outcome");
+    let outcome = broker
+        .submit_chunk(overflow)
+        .expect("budget exhausted outcome");
     match outcome {
         ChunkSubmissionOutcome::BudgetExhausted {
             outstanding_bytes,
@@ -107,16 +125,20 @@ fn byte_budget_exhaustion_yields_typed_backpressure_outcome() {
     broker
         .acknowledge_consumed("stream-3", 4 * KIB)
         .expect("consume succeeds");
-    let resumed =
-        ChunkSubmission::new("stream-3", 4, vec![0u8; KIB], StreamFinality::Continue);
+    let resumed = ChunkSubmission::new("stream-3", 4, vec![0u8; KIB], StreamFinality::Continue);
     let resumed_outcome = broker.submit_chunk(resumed).unwrap();
-    assert!(matches!(resumed_outcome, ChunkSubmissionOutcome::Accepted { sequence: 4, .. }));
+    assert!(matches!(
+        resumed_outcome,
+        ChunkSubmissionOutcome::Accepted { sequence: 4, .. }
+    ));
 }
 
 #[test]
 fn out_of_order_sequence_is_detected_as_gap_and_does_not_corrupt_stream() {
     let broker = Broker::new();
-    broker.open_stream(registration("stream-4", "corr-4")).unwrap();
+    broker
+        .open_stream(registration("stream-4", "corr-4"))
+        .unwrap();
 
     let first = ChunkSubmission::new("stream-4", 0, vec![0u8; KIB], StreamFinality::Continue);
     broker.submit_chunk(first).unwrap();
@@ -125,10 +147,7 @@ fn out_of_order_sequence_is_detected_as_gap_and_does_not_corrupt_stream() {
     let gap = ChunkSubmission::new("stream-4", 2, vec![0u8; KIB], StreamFinality::Continue);
     let outcome = broker.submit_chunk(gap).expect("gap outcome");
     match outcome {
-        ChunkSubmissionOutcome::SequenceGap {
-            expected,
-            received,
-        } => {
+        ChunkSubmissionOutcome::SequenceGap { expected, received } => {
             assert_eq!(expected, 1);
             assert_eq!(received, 2);
         }
@@ -140,19 +159,18 @@ fn out_of_order_sequence_is_detected_as_gap_and_does_not_corrupt_stream() {
 #[test]
 fn submitting_to_unknown_or_closed_stream_returns_typed_error() {
     let broker = Broker::new();
-    let unknown =
-        ChunkSubmission::new("nope", 0, vec![0u8; KIB], StreamFinality::Continue);
+    let unknown = ChunkSubmission::new("nope", 0, vec![0u8; KIB], StreamFinality::Continue);
     let err = broker.submit_chunk(unknown).unwrap_err();
     assert_eq!(err.code(), StreamErrorCode::StreamUnknown);
 
-    broker.open_stream(registration("stream-5", "corr-5")).unwrap();
-    let final_chunk =
-        ChunkSubmission::new("stream-5", 0, vec![0u8; KIB], StreamFinality::Final);
+    broker
+        .open_stream(registration("stream-5", "corr-5"))
+        .unwrap();
+    let final_chunk = ChunkSubmission::new("stream-5", 0, vec![0u8; KIB], StreamFinality::Final);
     broker.submit_chunk(final_chunk).unwrap();
 
     // Stream completed; cannot submit more.
-    let after_close =
-        ChunkSubmission::new("stream-5", 1, vec![0u8; KIB], StreamFinality::Continue);
+    let after_close = ChunkSubmission::new("stream-5", 1, vec![0u8; KIB], StreamFinality::Continue);
     let err = broker.submit_chunk(after_close).unwrap_err();
     assert_eq!(err.code(), StreamErrorCode::StreamClosed);
 }
@@ -160,9 +178,10 @@ fn submitting_to_unknown_or_closed_stream_returns_typed_error() {
 #[test]
 fn abort_stream_marks_terminal_failed_state_observable_to_both_sides() {
     let broker = Broker::new();
-    broker.open_stream(registration("stream-6", "corr-6")).unwrap();
-    let chunk =
-        ChunkSubmission::new("stream-6", 0, vec![0u8; KIB], StreamFinality::Continue);
+    broker
+        .open_stream(registration("stream-6", "corr-6"))
+        .unwrap();
+    let chunk = ChunkSubmission::new("stream-6", 0, vec![0u8; KIB], StreamFinality::Continue);
     broker.submit_chunk(chunk).unwrap();
 
     let outcome = broker
@@ -173,8 +192,7 @@ fn abort_stream_marks_terminal_failed_state_observable_to_both_sides() {
     assert_eq!(broker.stream_state("stream-6"), Some(StreamState::Aborted));
 
     // Subsequent chunks are rejected as closed.
-    let after_abort =
-        ChunkSubmission::new("stream-6", 1, vec![0u8; KIB], StreamFinality::Continue);
+    let after_abort = ChunkSubmission::new("stream-6", 1, vec![0u8; KIB], StreamFinality::Continue);
     let err = broker.submit_chunk(after_abort).unwrap_err();
     assert_eq!(err.code(), StreamErrorCode::StreamClosed);
 }

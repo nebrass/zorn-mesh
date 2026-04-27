@@ -76,7 +76,10 @@ fn two_rust_clients_publish_and_receive_first_local_envelope() {
     assert_eq!(result.outcome().kind(), CoordinationOutcomeKind::Accepted);
     assert_eq!(result.outcome().stage(), CoordinationStage::Transport);
     assert_eq!(
-        result.durable_outcome().expect("durable outcome is explicit").code(),
+        result
+            .durable_outcome()
+            .expect("durable outcome is explicit")
+            .code(),
         "E_PERSISTENCE_UNAVAILABLE"
     );
     let delivery = subscription
@@ -132,7 +135,10 @@ fn subscription_ack_and_nack_return_delivery_outcomes() {
     )
     .expect("valid nack envelope");
 
-    assert_eq!(publisher.publish(&ack_envelope).status(), SendStatus::Accepted);
+    assert_eq!(
+        publisher.publish(&ack_envelope).status(),
+        SendStatus::Accepted
+    );
     let ack_delivery = subscription
         .recv_delivery(Duration::from_millis(500))
         .expect("receive wait completes")
@@ -146,7 +152,10 @@ fn subscription_ack_and_nack_return_delivery_outcomes() {
     assert_eq!(ack.stage(), CoordinationStage::Delivery);
     assert_eq!(ack.reason(), None);
 
-    assert_eq!(publisher.publish(&nack_envelope).status(), SendStatus::Accepted);
+    assert_eq!(
+        publisher.publish(&nack_envelope).status(),
+        SendStatus::Accepted
+    );
     let nack_delivery = subscription
         .recv_delivery(Duration::from_millis(500))
         .expect("receive wait completes")

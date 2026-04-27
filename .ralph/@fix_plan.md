@@ -72,7 +72,7 @@
   > AC: Given SQLite WAL recovery benchmarks run against the reference 7-day default-retention audit database, When the daemon performs startup recovery, Then recovery completes in <= 2 seconds on the v0.1 reference platform, And benchmark failures block release readiness.
   > AC: Given persistence conformance tests run, When accepted envelope, commit failure, audit-hash-linkage, atomic-sequence-assignment, corrupt-store-open, redaction, indexed query, daemon restart, crash-before-after-commit, and daemon crash scenarios execute, Then accepted records are recoverable after restart and failed records are not reported as durable.
   > Spec: specs/planning-artifacts/epics.md#story-4-1
-- [ ] Story 4.2: Propagate Tracecontext and Emit OpenTelemetry Schema
+- [x] Story 4.2: Propagate Tracecontext and Emit OpenTelemetry Schema
   > As a developer
   > I want every mesh operation to carry trace context and emit documented telemetry
   > So that I can follow causality across agents without instrumenting each hop by hand.

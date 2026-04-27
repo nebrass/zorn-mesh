@@ -1,6 +1,4 @@
-use zornmesh_broker::{
-    AgentRegistrationOutcome, Broker,
-};
+use zornmesh_broker::{AgentRegistrationOutcome, Broker};
 use zornmesh_core::{AGENT_CARD_PROFILE_VERSION, AgentCard, AgentCardInput};
 
 fn input(stable_id: &str, display: &str, transport: &str) -> AgentCardInput {

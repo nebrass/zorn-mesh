@@ -51,6 +51,7 @@ cd sdks/typescript && bun test
 - Story 3.7 adds `zornmesh stdio --as-agent <id>` for MCP-compatible hosts, with initialize sequencing, AgentCard registration, policy-aware tool mapping, redaction, and deterministic host-close cleanup.
 - Story 3.8 adds baseline MCP graceful degradation: `tools/list` exposes only unary JSON-compatible mesh invocation, while streaming, delivery ACK, and required trace-context semantics return structured `unsupported_capability` results with redacted params and remediation.
 - Story 4.1 adds the first evidence persistence boundary: accepted envelopes, audit hash links, trace/correlation indexes, recovery replay, corrupt/future-schema diagnostics, and daemon durable ACK-after-commit wiring.
+- Story 4.2 adds W3C tracecontext propagation and local `zornmesh.telemetry.v1` spans/metrics with cardinality-safe labels and bounded exporter diagnostics.
 
 ## Feature Development Quality Standards
 

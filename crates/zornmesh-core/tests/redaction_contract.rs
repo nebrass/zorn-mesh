@@ -1,6 +1,5 @@
 use zornmesh_core::{
-    REDACTION_MARKER, RedactionError, RedactionErrorCode, RedactionPolicy, Redactor,
-    SecretValue,
+    REDACTION_MARKER, RedactionError, RedactionErrorCode, RedactionPolicy, Redactor, SecretValue,
 };
 
 #[test]

@@ -38,13 +38,15 @@ fn publish_emits_durable_ack_only_after_evidence_commit() {
     let evidence_path = dir.join("evidence.log");
     let daemon = DaemonRuntime::start(test_config(socket_path.clone(), evidence_path.clone()))
         .expect("daemon starts with evidence store");
-    let envelope = Envelope::with_metadata(
+    let envelope = Envelope::with_trace_context(
         "agent.local/source",
         "mesh.work.created",
         b"{}".to_vec(),
         42,
         "corr-daemon-evidence",
         "application/json",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        Some("rojo=00f067aa0ba902b7"),
     )
     .expect("valid envelope");
 
@@ -52,7 +54,7 @@ fn publish_emits_durable_ack_only_after_evidence_commit() {
     write_client_frame(
         &mut stream,
         &ClientFrame::Publish {
-            envelope: envelope.clone(),
+            envelope: Box::new(envelope.clone()),
         },
     )
     .expect("write publish frame");
@@ -74,6 +76,7 @@ fn publish_emits_durable_ack_only_after_evidence_commit() {
         store.query_envelopes(EvidenceQuery::new().correlation_id("corr-daemon-evidence"));
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].message_id(), "corr-daemon-evidence");
+    assert_eq!(records[0].trace_id(), "4bf92f3577b34da6a3ce929d0e0e4736");
     assert_eq!(records[0].delivery_state(), "accepted");
 }
 

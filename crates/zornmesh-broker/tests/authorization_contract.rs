@@ -93,11 +93,11 @@ fn allowlisted_high_privilege_capability_is_accepted_and_emits_authorization_eve
     assert!(denied.is_empty());
 
     let events = broker.authorization_events();
-    assert!(events
-        .iter()
-        .any(|event| event.agent_canonical_id() == agent.canonical_stable_id()
+    assert!(events.iter().any(
+        |event| event.agent_canonical_id() == agent.canonical_stable_id()
             && event.capability_id() == "admin.shutdown"
-            && matches!(event.decision(), AuthorizationDecision::Allowed)));
+            && matches!(event.decision(), AuthorizationDecision::Allowed)
+    ));
 }
 
 #[test]
@@ -106,11 +106,7 @@ fn invocation_of_high_privilege_capability_is_denied_without_allowlist() {
     broker.mark_capability_high_privilege("admin.shutdown", "v1");
     let agent = register_agent(&broker, "agent.local/alpha");
 
-    let decision = broker.authorize_invocation(
-        agent.canonical_stable_id(),
-        "admin.shutdown",
-        "v1",
-    );
+    let decision = broker.authorize_invocation(agent.canonical_stable_id(), "admin.shutdown", "v1");
     match decision {
         AuthorizationDecision::Denied { reason } => {
             assert_eq!(reason, AuthorizationDenialReason::NotAllowlisted);
@@ -123,8 +119,7 @@ fn invocation_of_high_privilege_capability_is_denied_without_allowlist() {
 fn invocation_of_unmarked_capability_is_allowed_by_default() {
     let broker = Broker::new();
     let agent = register_agent(&broker, "agent.local/alpha");
-    let decision =
-        broker.authorize_invocation(agent.canonical_stable_id(), "compute.run", "v1");
+    let decision = broker.authorize_invocation(agent.canonical_stable_id(), "compute.run", "v1");
     assert!(matches!(decision, AuthorizationDecision::Allowed));
 }
 
@@ -139,8 +134,7 @@ fn invocation_after_allowlist_is_allowed_and_recorded() {
         "v1",
     ));
 
-    let decision =
-        broker.authorize_invocation(agent.canonical_stable_id(), "admin.shutdown", "v1");
+    let decision = broker.authorize_invocation(agent.canonical_stable_id(), "admin.shutdown", "v1");
     assert!(matches!(decision, AuthorizationDecision::Allowed));
     assert!(!broker.authorization_events().is_empty());
 }
@@ -162,14 +156,9 @@ fn revocation_removes_capability_for_future_dispatch_and_logs_audit_event() {
         )
         .unwrap();
 
-    broker.revoke_high_privilege(
-        agent.canonical_stable_id(),
-        "admin.shutdown",
-        "v1",
-    );
+    broker.revoke_high_privilege(agent.canonical_stable_id(), "admin.shutdown", "v1");
 
-    let decision =
-        broker.authorize_invocation(agent.canonical_stable_id(), "admin.shutdown", "v1");
+    let decision = broker.authorize_invocation(agent.canonical_stable_id(), "admin.shutdown", "v1");
     assert!(matches!(
         decision,
         AuthorizationDecision::Denied {

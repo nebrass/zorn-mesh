@@ -24,8 +24,12 @@ const SERVER_DELIVERY_OUTCOME: u8 = 103;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientFrame {
-    Subscribe { pattern: String },
-    Publish { envelope: Envelope },
+    Subscribe {
+        pattern: String,
+    },
+    Publish {
+        envelope: Box<Envelope>,
+    },
     Ack {
         delivery_id: String,
     },
@@ -198,7 +202,7 @@ pub fn read_client_frame<R: Read>(reader: &mut R) -> Result<ClientFrame, ProtoEr
             pattern: cursor.take_string("pattern")?,
         },
         CLIENT_PUBLISH => ClientFrame::Publish {
-            envelope: cursor.take_envelope()?,
+            envelope: Box::new(cursor.take_envelope()?),
         },
         CLIENT_ACK => ClientFrame::Ack {
             delivery_id: cursor.take_string("delivery_id")?,
@@ -349,6 +353,8 @@ fn put_envelope_fields(output: &mut Vec<u8>, envelope: &Envelope) {
         output,
         envelope.payload_metadata().content_type().as_bytes(),
     );
+    put_bytes(output, envelope.trace_context().traceparent().as_bytes());
+    put_optional_string(output, envelope.trace_context().tracestate());
     put_bytes(output, envelope.payload());
 }
 
@@ -377,6 +383,16 @@ fn put_optional_outcome(output: &mut Vec<u8>, outcome: Option<&CoordinationOutco
         Some(outcome) => {
             put_bool(output, true);
             put_outcome(output, outcome);
+        }
+        None => put_bool(output, false),
+    }
+}
+
+fn put_optional_string(output: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            put_bool(output, true);
+            put_bytes(output, value.as_bytes());
         }
         None => put_bool(output, false),
     }
@@ -416,15 +432,19 @@ impl<'a> Cursor<'a> {
         let timestamp_unix_ms = self.take_u64("timestamp_unix_ms")?;
         let correlation_id = self.take_string("correlation_id")?;
         let content_type = self.take_string("payload_content_type")?;
+        let traceparent = self.take_string("traceparent")?;
+        let tracestate = self.take_optional_string("tracestate")?;
         let payload = self.take_bytes("payload")?;
 
-        Envelope::with_metadata(
+        Envelope::with_trace_context(
             source_agent,
             subject,
             payload,
             timestamp_unix_ms,
             correlation_id,
             content_type,
+            traceparent,
+            tracestate.as_deref(),
         )
         .map_err(ProtoError::InvalidEnvelope)
     }
@@ -490,6 +510,14 @@ impl<'a> Cursor<'a> {
     fn take_optional_outcome(&mut self) -> Result<Option<CoordinationOutcome>, ProtoError> {
         if self.take_bool("has_durable_outcome")? {
             Ok(Some(self.take_outcome()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn take_optional_string(&mut self, field: &'static str) -> Result<Option<String>, ProtoError> {
+        if self.take_bool(field)? {
+            Ok(Some(self.take_string(field)?))
         } else {
             Ok(None)
         }
@@ -601,7 +629,10 @@ impl fmt::Display for ProtoError {
                 write!(f, "unknown zornmesh NACK reason {reason}")
             }
             Self::InvalidBoolean(field, value) => {
-                write!(f, "zornmesh frame field {field} has invalid boolean {value}")
+                write!(
+                    f,
+                    "zornmesh frame field {field} has invalid boolean {value}"
+                )
             }
             Self::Truncated(field) => write!(f, "truncated zornmesh frame field {field}"),
             Self::LengthOverflow(field) => {

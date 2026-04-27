@@ -176,7 +176,7 @@ pub mod local {
             let base = env::var_os("TMPDIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/tmp"));
-            return Ok(base.join("zorn-mesh.sock"));
+            Ok(base.join("zorn-mesh.sock"))
         }
 
         #[cfg(not(target_os = "macos"))]

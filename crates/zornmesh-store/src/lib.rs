@@ -667,6 +667,8 @@ impl FileEvidenceInner {
                 Err("future schema marker reached replay".to_owned())
             }
             EvidenceLogRecord::Accepted { envelope, audit } => {
+                let envelope = *envelope;
+                let audit = *audit;
                 if envelope.daemon_sequence != self.next_daemon_sequence {
                     return Err(format!(
                         "daemon sequence {} does not match expected {}",
@@ -686,6 +688,7 @@ impl FileEvidenceInner {
                 Ok(())
             }
             EvidenceLogRecord::Transition { audit } => {
+                let audit = *audit;
                 let Some(index) = self.message_index.get(audit.message_id()).copied() else {
                     return Err(format!(
                         "state transition references unknown message ID '{}'",
@@ -750,8 +753,8 @@ impl EvidenceStore for FileEvidenceStore {
             outcome_details: "accepted for durable processing",
         });
         let record = EvidenceLogRecord::Accepted {
-            envelope: envelope.clone(),
-            audit: audit.clone(),
+            envelope: Box::new(envelope.clone()),
+            audit: Box::new(audit.clone()),
         };
         write_evidence_line(&inner.path, &record.encode())?;
         let envelope_index = inner.envelopes.len();
@@ -805,7 +808,7 @@ impl EvidenceStore for FileEvidenceStore {
             outcome_details: &input.outcome_details,
         });
         let record = EvidenceLogRecord::Transition {
-            audit: audit.clone(),
+            audit: Box::new(audit.clone()),
         };
         write_evidence_line(&inner.path, &record.encode())?;
         inner.envelopes[envelope_index].delivery_state = audit.state_to.clone();
@@ -1097,11 +1100,11 @@ enum EvidenceLogRecord {
     Schema,
     FutureSchema,
     Accepted {
-        envelope: EvidenceEnvelopeRecord,
-        audit: EvidenceAuditEntry,
+        envelope: Box<EvidenceEnvelopeRecord>,
+        audit: Box<EvidenceAuditEntry>,
     },
     Transition {
-        audit: EvidenceAuditEntry,
+        audit: Box<EvidenceAuditEntry>,
     },
 }
 
@@ -1208,7 +1211,10 @@ impl EvidenceLogRecord {
             state_to: decode_field(parts.get(20)?)?,
             outcome_details: decode_field(parts.get(21)?)?,
         };
-        Some(Self::Accepted { envelope, audit })
+        Some(Self::Accepted {
+            envelope: Box::new(envelope),
+            audit: Box::new(audit),
+        })
     }
 
     fn parse_transition(parts: &[&str]) -> Option<Self> {
@@ -1216,7 +1222,7 @@ impl EvidenceLogRecord {
             return None;
         }
         Some(Self::Transition {
-            audit: EvidenceAuditEntry {
+            audit: Box::new(EvidenceAuditEntry {
                 daemon_sequence: parts.get(2)?.parse().ok()?,
                 message_id: decode_field(parts.get(3)?)?,
                 actor: decode_field(parts.get(4)?)?,
@@ -1229,7 +1235,7 @@ impl EvidenceLogRecord {
                 outcome_details: decode_field(parts.get(11)?)?,
                 previous_audit_hash: decode_field(parts.get(12)?)?,
                 current_audit_hash: decode_field(parts.get(13)?)?,
-            },
+            }),
         })
     }
 }
@@ -1324,15 +1330,15 @@ struct FileDurableInner {
 impl FileDurableStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SubscriptionStoreError> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    SubscriptionStoreError::new(
-                        SubscriptionStoreErrorCode::Io,
-                        format!("create durable store parent dir failed: {error}"),
-                    )
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                SubscriptionStoreError::new(
+                    SubscriptionStoreErrorCode::Io,
+                    format!("create durable store parent dir failed: {error}"),
+                )
+            })?;
         }
         let subscriptions = Self::replay(&path)?;
         Ok(Self {

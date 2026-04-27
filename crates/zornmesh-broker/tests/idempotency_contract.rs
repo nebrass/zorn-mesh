@@ -1,8 +1,8 @@
 use std::time::{Duration, SystemTime};
 
 use zornmesh_broker::{
-    Broker, IdempotencyConflictReason, IdempotencyDecision, IdempotencyError,
-    IdempotencyErrorCode, IdempotencyRequest, IdempotencySendOutcome,
+    Broker, IdempotencyConflictReason, IdempotencyDecision, IdempotencyError, IdempotencyErrorCode,
+    IdempotencyRequest, IdempotencySendOutcome,
 };
 use zornmesh_core::{CoordinationOutcome, CoordinationOutcomeKind};
 
@@ -43,7 +43,11 @@ fn first_attempt_is_recorded_pending_and_subsequent_duplicate_with_known_outcome
     assert!(matches!(first, IdempotencyDecision::FirstAttempt));
 
     broker
-        .commit_send("agent.local/a", "key-1", IdempotencySendOutcome::Accepted(accepted_outcome()))
+        .commit_send(
+            "agent.local/a",
+            "key-1",
+            IdempotencySendOutcome::Accepted(accepted_outcome()),
+        )
         .expect("commit succeeds");
 
     let second = broker
@@ -90,7 +94,11 @@ fn fingerprint_mismatch_returns_idempotency_conflict_without_routing_new_work() 
 
     broker.register_send(original.clone(), at(10)).unwrap();
     broker
-        .commit_send("agent.local/a", "key-shared", IdempotencySendOutcome::Accepted(accepted_outcome()))
+        .commit_send(
+            "agent.local/a",
+            "key-shared",
+            IdempotencySendOutcome::Accepted(accepted_outcome()),
+        )
         .unwrap();
 
     let subject_conflict = broker.register_send(conflicting_subject, at(11)).unwrap();
@@ -104,7 +112,10 @@ fn fingerprint_mismatch_returns_idempotency_conflict_without_routing_new_work() 
     let payload_conflict = broker.register_send(conflicting_payload, at(12)).unwrap();
     match payload_conflict {
         IdempotencyDecision::Conflict { reason } => {
-            assert_eq!(reason, IdempotencyConflictReason::PayloadFingerprintMismatch);
+            assert_eq!(
+                reason,
+                IdempotencyConflictReason::PayloadFingerprintMismatch
+            );
         }
         other => panic!("expected PayloadFingerprintMismatch conflict, got {other:?}"),
     }
@@ -113,8 +124,20 @@ fn fingerprint_mismatch_returns_idempotency_conflict_without_routing_new_work() 
 #[test]
 fn different_senders_using_same_key_do_not_collide() {
     let broker = Broker::new();
-    let a = req("agent.local/a", "key-shared", "agent.work.compute", "sha256:abc", "corr-1");
-    let b = req("agent.local/b", "key-shared", "agent.work.other", "sha256:xyz", "corr-2");
+    let a = req(
+        "agent.local/a",
+        "key-shared",
+        "agent.work.compute",
+        "sha256:abc",
+        "corr-1",
+    );
+    let b = req(
+        "agent.local/b",
+        "key-shared",
+        "agent.work.other",
+        "sha256:xyz",
+        "corr-2",
+    );
 
     let a1 = broker.register_send(a.clone(), at(10)).unwrap();
     let b1 = broker.register_send(b.clone(), at(10)).unwrap();
@@ -172,7 +195,11 @@ fn commit_send_for_unknown_or_already_committed_record_returns_typed_error() {
     );
     broker.register_send(request, at(10)).unwrap();
     broker
-        .commit_send("agent.local/a", "key-1", IdempotencySendOutcome::Accepted(accepted_outcome()))
+        .commit_send(
+            "agent.local/a",
+            "key-1",
+            IdempotencySendOutcome::Accepted(accepted_outcome()),
+        )
         .unwrap();
     let twice = broker.commit_send(
         "agent.local/a",

@@ -20,7 +20,10 @@ fn agent_input(stable_id: &str) -> AgentCardInput {
 fn cap(id: &str, version: &str, direction: CapabilityDirection) -> CapabilityDescriptor {
     CapabilityDescriptor::builder(id, version, direction)
         .with_summary(format!("capability {id}@{version}"))
-        .with_schema_ref(CapabilitySchemaDialect::TypeBox, format!("{id}.{version}.schema"))
+        .with_schema_ref(
+            CapabilitySchemaDialect::TypeBox,
+            format!("{id}.{version}.schema"),
+        )
         .build()
         .expect("valid capability descriptor")
 }
@@ -73,24 +76,18 @@ fn invalid_capability_id_or_version_is_rejected_without_partial_mutation() {
     let broker = Broker::new();
     let agent = register_agent(&broker, "agent.local/alpha");
 
-    let invalid_id = CapabilityDescriptor::builder(
-        "bad id with spaces",
-        "v1",
-        CapabilityDirection::Offered,
-    )
-    .with_summary("x")
-    .with_schema_ref(CapabilitySchemaDialect::TypeBox, "bad.schema")
-    .build();
+    let invalid_id =
+        CapabilityDescriptor::builder("bad id with spaces", "v1", CapabilityDirection::Offered)
+            .with_summary("x")
+            .with_schema_ref(CapabilitySchemaDialect::TypeBox, "bad.schema")
+            .build();
     assert!(invalid_id.is_err());
 
-    let invalid_version = CapabilityDescriptor::builder(
-        "compute.run",
-        "",
-        CapabilityDirection::Offered,
-    )
-    .with_summary("x")
-    .with_schema_ref(CapabilitySchemaDialect::TypeBox, "bad.schema")
-    .build();
+    let invalid_version =
+        CapabilityDescriptor::builder("compute.run", "", CapabilityDirection::Offered)
+            .with_summary("x")
+            .with_schema_ref(CapabilitySchemaDialect::TypeBox, "bad.schema")
+            .build();
     assert!(invalid_version.is_err());
 
     // Mixed list: one valid + one invalid → entire declaration rejected.
@@ -181,7 +178,11 @@ fn list_agents_with_capabilities_returns_all_registered_agents() {
         .unwrap();
 
     let mut listed = broker.list_agents_with_capabilities();
-    listed.sort_by(|a, b| a.agent.canonical_stable_id().cmp(b.agent.canonical_stable_id()));
+    listed.sort_by(|a, b| {
+        a.agent
+            .canonical_stable_id()
+            .cmp(b.agent.canonical_stable_id())
+    });
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].agent.canonical_stable_id(), "agent.local/alpha");
     assert_eq!(listed[0].offered.len(), 1);

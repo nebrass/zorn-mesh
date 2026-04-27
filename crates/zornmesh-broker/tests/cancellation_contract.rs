@@ -1,8 +1,8 @@
 use std::time::{Duration, SystemTime};
 
 use zornmesh_broker::{
-    Broker, CancellationOutcome, ChunkSubmission, ChunkSubmissionOutcome, RequestRegistration,
-    RequestResolution, ReplySubmissionOutcome, StreamErrorCode, StreamFinality, StreamRegistration,
+    Broker, CancellationOutcome, ChunkSubmission, ChunkSubmissionOutcome, ReplySubmissionOutcome,
+    RequestRegistration, RequestResolution, StreamErrorCode, StreamFinality, StreamRegistration,
     StreamState,
 };
 use zornmesh_core::{CoordinationOutcomeKind, Envelope};
@@ -52,7 +52,10 @@ fn cancelling_in_flight_request_yields_terminal_cancelled_outcome() {
 
     let resolution = handle.recv_timeout(Duration::from_millis(50)).unwrap();
     match resolution {
-        RequestResolution::Cancelled { correlation_id, outcome } => {
+        RequestResolution::Cancelled {
+            correlation_id,
+            outcome,
+        } => {
             assert_eq!(correlation_id, "corr-cancel-1");
             assert_eq!(outcome.kind(), CoordinationOutcomeKind::Terminal);
         }
@@ -79,11 +82,7 @@ fn reply_after_cancellation_is_recorded_as_late_event() {
     broker.cancel_request("corr-cancel-2", at(11)).unwrap();
 
     let late = broker
-        .submit_reply(
-            "corr-cancel-2",
-            reply_envelope("corr-cancel-2"),
-            at(12),
-        )
+        .submit_reply("corr-cancel-2", reply_envelope("corr-cancel-2"), at(12))
         .expect("late reply outcome returns");
     assert!(matches!(
         late,
@@ -109,11 +108,7 @@ fn reply_then_cancel_race_first_terminal_wins() {
 
     // Reply lands first.
     broker
-        .submit_reply(
-            "corr-race-1",
-            reply_envelope("corr-race-1"),
-            at(11),
-        )
+        .submit_reply("corr-race-1", reply_envelope("corr-race-1"), at(11))
         .unwrap();
 
     // Cancellation arrives second; reply already won.
@@ -135,7 +130,12 @@ fn cancelling_stream_marks_aborted_and_rejects_subsequent_chunks() {
         ))
         .unwrap();
 
-    let chunk = ChunkSubmission::new("stream-cancel-1", 0, vec![0u8; 1024], StreamFinality::Continue);
+    let chunk = ChunkSubmission::new(
+        "stream-cancel-1",
+        0,
+        vec![0u8; 1024],
+        StreamFinality::Continue,
+    );
     broker.submit_chunk(chunk).unwrap();
 
     let outcome = broker
@@ -154,7 +154,12 @@ fn cancelling_stream_marks_aborted_and_rejects_subsequent_chunks() {
     );
 
     // Further chunks rejected.
-    let after = ChunkSubmission::new("stream-cancel-1", 1, vec![0u8; 1024], StreamFinality::Continue);
+    let after = ChunkSubmission::new(
+        "stream-cancel-1",
+        1,
+        vec![0u8; 1024],
+        StreamFinality::Continue,
+    );
     let err = broker.submit_chunk(after).unwrap_err();
     assert_eq!(err.code(), StreamErrorCode::StreamClosed);
 }
@@ -199,12 +204,8 @@ fn unknown_or_already_completed_correlation_returns_stable_typed_results() {
             16384,
         ))
         .unwrap();
-    let final_chunk = ChunkSubmission::new(
-        "stream-done-1",
-        0,
-        vec![0u8; 1024],
-        StreamFinality::Final,
-    );
+    let final_chunk =
+        ChunkSubmission::new("stream-done-1", 0, vec![0u8; 1024], StreamFinality::Final);
     let _ = broker.submit_chunk(final_chunk).unwrap();
     let outcome = broker
         .cancel_stream_by_correlation("corr-stream-done")
@@ -243,28 +244,17 @@ fn submit_chunk_to_unrelated_stream_after_cancel_is_unaffected() {
     let broker = Broker::new();
     broker
         .open_stream(StreamRegistration::new(
-            "stream-X",
-            "corr-X",
-            "a",
-            "b",
-            4096,
-            16384,
+            "stream-X", "corr-X", "a", "b", 4096, 16384,
         ))
         .unwrap();
     broker
         .open_stream(StreamRegistration::new(
-            "stream-Y",
-            "corr-Y",
-            "a",
-            "b",
-            4096,
-            16384,
+            "stream-Y", "corr-Y", "a", "b", 4096, 16384,
         ))
         .unwrap();
 
     broker.cancel_stream_by_correlation("corr-X").unwrap();
-    let on_y =
-        ChunkSubmission::new("stream-Y", 0, vec![0u8; 1024], StreamFinality::Continue);
+    let on_y = ChunkSubmission::new("stream-Y", 0, vec![0u8; 1024], StreamFinality::Continue);
     let outcome = broker.submit_chunk(on_y).unwrap();
     assert!(matches!(outcome, ChunkSubmissionOutcome::Accepted { .. }));
 }

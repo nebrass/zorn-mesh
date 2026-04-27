@@ -1,6 +1,4 @@
-use zornmesh_broker::{
-    AgentRegistrationOutcome, Broker, CapabilityDeclarationOutcome,
-};
+use zornmesh_broker::{AgentRegistrationOutcome, Broker, CapabilityDeclarationOutcome};
 use zornmesh_core::{
     AGENT_CARD_PROFILE_VERSION, AgentCard, AgentCardInput, CapabilityDescriptor,
     CapabilityDirection, CapabilitySchemaDialect, REDACTION_MARKER,

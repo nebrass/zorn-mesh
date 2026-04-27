@@ -123,7 +123,10 @@ fn consecutive_missed_signals_promote_consumer_to_backpressured_then_failed() {
     let broker = Broker::new();
     let id = "consumer.A";
 
-    assert_eq!(broker.consumer_health_state(id), ConsumerHealthState::Healthy);
+    assert_eq!(
+        broker.consumer_health_state(id),
+        ConsumerHealthState::Healthy
+    );
 
     let s1 = broker
         .record_consumer_health_signal(id, ConsumerHealthSignal::MissedAck)
@@ -158,7 +161,10 @@ fn clearing_consumer_backpressure_restores_healthy_state() {
     ));
 
     broker.clear_consumer_backpressure(id);
-    assert_eq!(broker.consumer_health_state(id), ConsumerHealthState::Healthy);
+    assert_eq!(
+        broker.consumer_health_state(id),
+        ConsumerHealthState::Healthy
+    );
 
     // Subsequent publish doesn't carry stale state.
     broker

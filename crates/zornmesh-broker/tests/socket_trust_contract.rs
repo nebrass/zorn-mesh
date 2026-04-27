@@ -81,7 +81,12 @@ fn unsafe_socket_mode_with_group_or_other_bits_is_rejected() {
     let creds = PeerCredentials::new(OWNER_UID, OWNER_GID, 9999);
 
     let group_writable = broker
-        .accept_connection(agent.canonical_stable_id(), creds.clone(), safe_policy(), 0o620)
+        .accept_connection(
+            agent.canonical_stable_id(),
+            creds.clone(),
+            safe_policy(),
+            0o620,
+        )
         .unwrap();
     match group_writable {
         ConnectionAcceptanceOutcome::Rejected { code, .. } => {
@@ -136,10 +141,12 @@ fn record_disconnect_transitions_state_and_subsequent_routing_can_observe_discon
     );
 
     let presence_events = broker.agent_presence_events();
-    assert!(presence_events
-        .iter()
-        .any(|e| e.agent_canonical_id() == agent.canonical_stable_id()
-            && e.state() == AgentPresenceState::Disconnected));
+    assert!(
+        presence_events
+            .iter()
+            .any(|e| e.agent_canonical_id() == agent.canonical_stable_id()
+                && e.state() == AgentPresenceState::Disconnected)
+    );
 }
 
 #[test]
