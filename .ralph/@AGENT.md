@@ -48,6 +48,7 @@ cd sdks/typescript && bun test
 - Story 1.5 adds Bun TypeScript SDK parity: `connect()`, `publish()`, and `subscribe()` use the same local UDS frame contract, connect taxonomy, and first-message expectations as the Rust SDK.
 - Story 1.6 stabilizes CLI read contracts: read commands keep success on stdout, failures on stderr with product error codes, JSON under `zornmesh.cli.read.v1`, and streaming events as NDJSON under `zornmesh.cli.event.v1`.
 - Story 1.7 adds first-day operator basics: `zornmesh doctor` reports required diagnostic evidence with stable degraded/unavailable statuses, `daemon shutdown --non-interactive` reports documented outcomes, and `completion <bash|zsh|fish>` emits shell completions.
+- Story 3.7 adds `zornmesh stdio --as-agent <id>` for MCP-compatible hosts, with initialize sequencing, AgentCard registration, policy-aware tool mapping, redaction, and deterministic host-close cleanup.
 
 ## Feature Development Quality Standards
 

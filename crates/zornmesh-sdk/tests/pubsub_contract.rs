@@ -15,12 +15,14 @@ fn unique_socket(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock is after epoch")
         .as_nanos();
-    std::env::temp_dir()
-        .join(format!(
-            "zornmesh-sdk-pubsub-{name}-{}-{nanos}",
-            std::process::id()
-        ))
-        .join("zorn.sock")
+    let short_name: String = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(6)
+        .collect();
+    PathBuf::from("/tmp")
+        .join(format!("zmp{short_name}-{}-{nanos}", std::process::id()))
+        .join("z")
 }
 
 struct AutoSpawnCleanup {

@@ -2,12 +2,14 @@
 
 use std::{
     fs,
+    io::{self, BufRead, Write},
     os::unix::{
         fs::{FileTypeExt, MetadataExt, PermissionsExt},
         net::UnixStream,
     },
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -20,16 +22,18 @@ const READ_SCHEMA_VERSION: &str = "zornmesh.cli.read.v1";
 const EVENT_SCHEMA_VERSION: &str = "zornmesh.cli.event.v1";
 const DOCTOR_SCHEMA_VERSION: &str = "zornmesh.cli.doctor.v1";
 const CLI_VERSION: &str = "0.1.0";
+pub const MCP_BRIDGE_PROTOCOL_VERSION: &str = "2025-03-26";
 const DEFAULT_SHUTDOWN_BUDGET_MS: u64 = 10_000;
 const MAX_SHUTDOWN_BUDGET_MS: u64 = 60_000;
 const SUPPORTED_SHELLS: &str = "bash, zsh, fish";
+static NEXT_BRIDGE_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 const BASH_COMPLETION: &str = r#"_zornmesh()
 {
     local cur prev commands global_opts daemon_commands shells formats
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents trace completion help"
+    commands="daemon doctor agents stdio trace completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -65,7 +69,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents trace completion help)
+  commands=(daemon doctor agents stdio trace completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -85,7 +89,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents trace completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio trace completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -449,6 +453,8 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "daemon" => run_daemon(rest, &invocation),
         [command] if command == "agents" => run_agents(&[], &invocation),
         [command, rest @ ..] if command == "agents" => run_agents(rest, &invocation),
+        [command] if command == "stdio" => run_stdio(&[], &invocation),
+        [command, rest @ ..] if command == "stdio" => run_stdio(rest, &invocation),
         [command] if command == "doctor" => run_doctor(&[], &invocation),
         [command, rest @ ..] if command == "doctor" => run_doctor(rest, &invocation),
         [command] if command == "completion" => print_completion_help(invocation.output),
@@ -885,6 +891,223 @@ fn print_agents_help(output: OutputFormat) -> Result<(), CliError> {
     print_help("agents help", help, output)
 }
 
+fn run_stdio(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [flag] if is_help(flag) => print_stdio_help(invocation.output),
+        [flag, agent_id] if flag == "--as-agent" => {
+            if agent_id.trim().is_empty() {
+                return Err(CliError::new(
+                    "E_VALIDATION_FAILED",
+                    "stdio --as-agent requires a non-empty agent id",
+                    ExitKind::Validation,
+                ));
+            }
+            if invocation.output != OutputFormat::Human {
+                return Err(CliError::new(
+                    "E_UNSUPPORTED_OUTPUT_FORMAT",
+                    "stdio bridge writes MCP JSON-RPC to stdout and does not support --output",
+                    ExitKind::UserError,
+                ));
+            }
+            stdio_agent_session(agent_id, invocation)
+        }
+        [flag] if flag == "--as-agent" => Err(CliError::new(
+            "E_VALIDATION_FAILED",
+            "stdio --as-agent requires an agent id",
+            ExitKind::Validation,
+        )),
+        [] => Err(CliError::new(
+            "E_VALIDATION_FAILED",
+            "stdio requires --as-agent <id>",
+            ExitKind::Validation,
+        )),
+        [arg, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh stdio argument '{arg}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn print_stdio_help(output: OutputFormat) -> Result<(), CliError> {
+    let help = "zornmesh stdio\nBridge an MCP-compatible host into the local mesh over stdio.\n\nUsage: zornmesh stdio --as-agent <AGENT_ID>\n\nOptions:\n      --as-agent <AGENT_ID>  Register the MCP host as this mesh agent\n  -h, --help                Print help\n";
+    print_help("stdio help", help, output)
+}
+
+fn stdio_agent_session(agent_id: &str, invocation: &Invocation) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let (uid, _daemon) = match connect_stdio_daemon(&invocation.config.socket_path) {
+        Ok(connected) => connected,
+        Err(error) => {
+            writeln!(
+                stdout,
+                "{}",
+                mcp_error_json(&serde_json::Value::Null, &error)
+            )
+            .map_err(stdio_io_error)?;
+            return Ok(());
+        }
+    };
+
+    let broker = zornmesh_broker::Broker::new();
+    let credentials = zornmesh_broker::PeerCredentials::new(uid, uid, std::process::id());
+    let policy = zornmesh_broker::SocketTrustPolicy::new(uid, uid, 0o600);
+    let mut bridge = StdioBridge::new(broker, agent_id, "MCP Host", credentials, policy);
+    let stdin = io::stdin();
+    run_stdio_loop(stdin.lock(), stdout, &mut bridge).map_err(stdio_io_error)
+}
+
+fn connect_stdio_daemon(socket_path: &Path) -> Result<(u32, UnixStream), StdioBridgeError> {
+    let uid = zornmesh_rpc::local::effective_uid().map_err(stdio_daemon_error_from_local)?;
+    let stream = zornmesh_rpc::local::connect_trusted_socket(socket_path, uid)
+        .map_err(stdio_daemon_error_from_local)?;
+    Ok((uid, stream))
+}
+
+fn stdio_daemon_error_from_local(error: zornmesh_rpc::local::LocalError) -> StdioBridgeError {
+    StdioBridgeError::new(
+        StdioBridgeErrorCode::DaemonUnavailable,
+        format!("daemon connection failed with {}", error.code().as_str()),
+    )
+}
+
+fn stdio_io_error(error: io::Error) -> CliError {
+    CliError::new(
+        "E_DAEMON_IO",
+        format!("stdio bridge I/O failed: {error}"),
+        ExitKind::Io,
+    )
+}
+
+fn run_stdio_loop<R, W>(reader: R, mut writer: W, bridge: &mut StdioBridge) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let response = handle_jsonrpc_line(bridge, &line);
+        writeln!(writer, "{response}")?;
+    }
+    let _ = bridge.handle_message(BridgeMessage::HostClosed);
+    Ok(())
+}
+
+fn handle_jsonrpc_line(bridge: &mut StdioBridge, line: &str) -> String {
+    let raw: serde_json::Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(_) => {
+            return mcp_error_json(
+                &serde_json::Value::Null,
+                &StdioBridgeError::new(
+                    StdioBridgeErrorCode::MalformedMessage,
+                    "malformed MCP JSON-RPC input",
+                ),
+            );
+        }
+    };
+    let id = raw.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let Some(method) = raw.get("method").and_then(serde_json::Value::as_str) else {
+        return mcp_error_json(
+            &id,
+            &StdioBridgeError::new(
+                StdioBridgeErrorCode::MalformedMessage,
+                "MCP JSON-RPC request must include a method",
+            ),
+        );
+    };
+    let message = if method == "initialize" {
+        let protocol_version = raw
+            .get("params")
+            .and_then(|params| params.get("protocolVersion"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        BridgeMessage::Initialize { protocol_version }
+    } else {
+        let params = raw
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}))
+            .to_string();
+        BridgeMessage::Request {
+            method: method.to_owned(),
+            params,
+        }
+    };
+    bridge_response_json(&id, &bridge.handle_message(message))
+}
+
+fn bridge_response_json(id: &serde_json::Value, response: &BridgeResponse) -> String {
+    match response {
+        BridgeResponse::InitializeAck { protocol_version } => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": protocol_version,
+                "serverInfo": {
+                    "name": "zornmesh-stdio",
+                    "version": CLI_VERSION,
+                },
+                "capabilities": {
+                    "tools": {},
+                },
+            },
+        })
+        .to_string(),
+        BridgeResponse::Mapped {
+            correlation_id,
+            trace_id,
+            capability_id,
+            capability_version,
+            internal_operation,
+            safe_params,
+        } => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "status": "mapped",
+                "correlation_id": correlation_id,
+                "trace_id": trace_id,
+                "capability_id": capability_id,
+                "capability_version": capability_version,
+                "internal_operation": internal_operation,
+                "safe_params": safe_params,
+            },
+        })
+        .to_string(),
+        BridgeResponse::Error(error) => mcp_error_json(id, error),
+        BridgeResponse::Closed => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "status": "closed",
+            },
+        })
+        .to_string(),
+    }
+}
+
+fn mcp_error_json(id: &serde_json::Value, error: &StdioBridgeError) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": error.code().jsonrpc_code(),
+            "message": error.safe_message(),
+            "data": {
+                "code": error.code().as_str(),
+                "retryable": error.code().retryable(),
+            },
+        },
+    })
+    .to_string()
+}
+
 fn run_doctor(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
     match args {
         [] => doctor(invocation),
@@ -1268,4 +1491,447 @@ fn warnings_json(warnings: &[DiagnosticWarning]) -> String {
     }
     json.push(']');
     json
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeMessage {
+    Initialize { protocol_version: String },
+    Request { method: String, params: String },
+    HostClosed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeResponse {
+    InitializeAck {
+        protocol_version: String,
+    },
+    Mapped {
+        correlation_id: String,
+        trace_id: Option<String>,
+        capability_id: Option<String>,
+        capability_version: Option<String>,
+        internal_operation: String,
+        safe_params: String,
+    },
+    Error(StdioBridgeError),
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeState {
+    Pending,
+    Initialized {
+        agent_id: String,
+        session_id: String,
+    },
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioBridgeErrorCode {
+    OutOfSequence,
+    AlreadyInitialized,
+    UnsupportedProtocolVersion,
+    MalformedInitialize,
+    Closed,
+    MalformedMessage,
+    UnsupportedMapping,
+    PolicyDenied,
+    RegistrationFailed,
+    SocketPermissionDenied,
+    DaemonUnavailable,
+}
+
+impl StdioBridgeErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OutOfSequence => "E_BRIDGE_OUT_OF_SEQUENCE",
+            Self::AlreadyInitialized => "E_BRIDGE_ALREADY_INITIALIZED",
+            Self::UnsupportedProtocolVersion => "E_BRIDGE_UNSUPPORTED_PROTOCOL",
+            Self::MalformedInitialize => "E_BRIDGE_MALFORMED_INITIALIZE",
+            Self::Closed => "E_BRIDGE_CLOSED",
+            Self::MalformedMessage => "E_BRIDGE_MALFORMED_MESSAGE",
+            Self::UnsupportedMapping => "E_BRIDGE_UNSUPPORTED_MAPPING",
+            Self::PolicyDenied => "E_BRIDGE_POLICY_DENIED",
+            Self::RegistrationFailed => "E_BRIDGE_REGISTRATION_FAILED",
+            Self::SocketPermissionDenied => "E_BRIDGE_SOCKET_PERMISSION_DENIED",
+            Self::DaemonUnavailable => "E_DAEMON_UNREACHABLE",
+        }
+    }
+
+    pub const fn jsonrpc_code(self) -> i32 {
+        match self {
+            Self::MalformedMessage | Self::MalformedInitialize => -32602,
+            Self::UnsupportedMapping => -32601,
+            Self::OutOfSequence
+            | Self::AlreadyInitialized
+            | Self::UnsupportedProtocolVersion
+            | Self::Closed
+            | Self::PolicyDenied
+            | Self::RegistrationFailed
+            | Self::SocketPermissionDenied
+            | Self::DaemonUnavailable => -32000,
+        }
+    }
+
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::DaemonUnavailable)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StdioBridgeError {
+    code: StdioBridgeErrorCode,
+    safe_message: String,
+}
+
+impl StdioBridgeError {
+    pub fn new(code: StdioBridgeErrorCode, safe_message: impl Into<String>) -> Self {
+        Self {
+            code,
+            safe_message: safe_message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> StdioBridgeErrorCode {
+        self.code
+    }
+
+    pub fn safe_message(&self) -> &str {
+        &self.safe_message
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StdioBridge {
+    broker: zornmesh_broker::Broker,
+    agent_id: String,
+    display_name: String,
+    credentials: zornmesh_broker::PeerCredentials,
+    trust_policy: zornmesh_broker::SocketTrustPolicy,
+    state: BridgeState,
+}
+
+impl StdioBridge {
+    pub fn new(
+        broker: zornmesh_broker::Broker,
+        agent_id: impl Into<String>,
+        display_name: impl Into<String>,
+        credentials: zornmesh_broker::PeerCredentials,
+        trust_policy: zornmesh_broker::SocketTrustPolicy,
+    ) -> Self {
+        Self {
+            broker,
+            agent_id: agent_id.into(),
+            display_name: display_name.into(),
+            credentials,
+            trust_policy,
+            state: BridgeState::Pending,
+        }
+    }
+
+    pub fn state(&self) -> BridgeState {
+        self.state.clone()
+    }
+
+    pub fn handle_message(&mut self, message: BridgeMessage) -> BridgeResponse {
+        match (&self.state, message) {
+            (BridgeState::Closed, BridgeMessage::HostClosed) => BridgeResponse::Closed,
+            (BridgeState::Closed, _) => BridgeResponse::Error(StdioBridgeError::new(
+                StdioBridgeErrorCode::Closed,
+                "stdio bridge is closed",
+            )),
+            (BridgeState::Pending, BridgeMessage::HostClosed) => {
+                self.state = BridgeState::Closed;
+                BridgeResponse::Closed
+            }
+            (BridgeState::Pending, BridgeMessage::Request { .. }) => {
+                BridgeResponse::Error(StdioBridgeError::new(
+                    StdioBridgeErrorCode::OutOfSequence,
+                    "MCP initialize must complete before mesh requests are dispatched",
+                ))
+            }
+            (BridgeState::Pending, BridgeMessage::Initialize { protocol_version }) => {
+                self.initialize(protocol_version)
+            }
+            (BridgeState::Initialized { .. }, BridgeMessage::Initialize { .. }) => {
+                BridgeResponse::Error(StdioBridgeError::new(
+                    StdioBridgeErrorCode::AlreadyInitialized,
+                    "MCP initialize has already completed for this stdio bridge",
+                ))
+            }
+            (
+                BridgeState::Initialized {
+                    agent_id,
+                    session_id,
+                },
+                BridgeMessage::HostClosed,
+            ) => {
+                self.broker.record_session_disconnect(agent_id, session_id);
+                self.state = BridgeState::Closed;
+                BridgeResponse::Closed
+            }
+            (
+                BridgeState::Initialized { agent_id, .. },
+                BridgeMessage::Request { method, params },
+            ) => {
+                let agent_id = agent_id.clone();
+                self.map_request(&agent_id, method, params)
+            }
+        }
+    }
+
+    fn initialize(&mut self, protocol_version: String) -> BridgeResponse {
+        if protocol_version.trim().is_empty() {
+            return BridgeResponse::Error(StdioBridgeError::new(
+                StdioBridgeErrorCode::MalformedInitialize,
+                "MCP initialize requires protocolVersion",
+            ));
+        }
+        if protocol_version != MCP_BRIDGE_PROTOCOL_VERSION {
+            return BridgeResponse::Error(StdioBridgeError::new(
+                StdioBridgeErrorCode::UnsupportedProtocolVersion,
+                format!("unsupported MCP protocolVersion '{protocol_version}'"),
+            ));
+        }
+
+        match self.register_identity_and_session() {
+            Ok((agent_id, session_id)) => {
+                self.state = BridgeState::Initialized {
+                    agent_id,
+                    session_id,
+                };
+                BridgeResponse::InitializeAck { protocol_version }
+            }
+            Err(error) => BridgeResponse::Error(error),
+        }
+    }
+
+    fn register_identity_and_session(&self) -> Result<(String, String), StdioBridgeError> {
+        let card = zornmesh_core::AgentCard::from_input(zornmesh_core::AgentCardInput {
+            profile_version: zornmesh_core::AGENT_CARD_PROFILE_VERSION.to_owned(),
+            stable_id: self.agent_id.clone(),
+            display_name: self.display_name.clone(),
+            transport: "unix".to_owned(),
+            source: "zornmesh stdio --as-agent".to_owned(),
+        })
+        .map_err(|error| {
+            StdioBridgeError::new(
+                StdioBridgeErrorCode::RegistrationFailed,
+                format!(
+                    "AgentCard registration failed with {}",
+                    error.code().as_str()
+                ),
+            )
+        })?;
+
+        let canonical = match self.broker.register_agent_card(card).map_err(|error| {
+            StdioBridgeError::new(
+                StdioBridgeErrorCode::RegistrationFailed,
+                format!("AgentCard registration failed: {error}"),
+            )
+        })? {
+            zornmesh_broker::AgentRegistrationOutcome::Registered { canonical }
+            | zornmesh_broker::AgentRegistrationOutcome::Compatible { canonical } => canonical,
+            zornmesh_broker::AgentRegistrationOutcome::Conflict { .. } => {
+                return Err(StdioBridgeError::new(
+                    StdioBridgeErrorCode::RegistrationFailed,
+                    "AgentCard conflicts with an existing mesh identity",
+                ));
+            }
+        };
+        let canonical_id = canonical.canonical_stable_id().to_owned();
+
+        match self.broker.accept_connection(
+            &canonical_id,
+            self.credentials.clone(),
+            self.trust_policy,
+            self.trust_policy.expected_mode(),
+        ) {
+            Ok(zornmesh_broker::ConnectionAcceptanceOutcome::Accepted { .. }) => {}
+            Ok(zornmesh_broker::ConnectionAcceptanceOutcome::Rejected { code, remediation }) => {
+                return Err(StdioBridgeError::new(
+                    StdioBridgeErrorCode::SocketPermissionDenied,
+                    format!("{}: {remediation}", code.as_str()),
+                ));
+            }
+            Err(error) => {
+                return Err(StdioBridgeError::new(
+                    StdioBridgeErrorCode::SocketPermissionDenied,
+                    format!("socket permission validation failed: {error}"),
+                ));
+            }
+        }
+
+        self.declare_bridge_capabilities(&canonical_id)?;
+        let session_id = self
+            .broker
+            .routing_session(&canonical_id)
+            .map(|session| session.session_id().to_owned())
+            .ok_or_else(|| {
+                StdioBridgeError::new(
+                    StdioBridgeErrorCode::RegistrationFailed,
+                    "mesh session was not recorded after bridge initialization",
+                )
+            })?;
+        Ok((canonical_id, session_id))
+    }
+
+    fn declare_bridge_capabilities(&self, agent_id: &str) -> Result<(), StdioBridgeError> {
+        let descriptors = [
+            ("mcp.ping", "MCP ping bridge operation"),
+            ("mcp.tools.list", "MCP tools/list bridge operation"),
+            ("mcp.tools.call", "MCP tools/call bridge operation"),
+        ]
+        .into_iter()
+        .map(|(capability_id, summary)| {
+            zornmesh_core::CapabilityDescriptor::builder(
+                capability_id,
+                "v1",
+                zornmesh_core::CapabilityDirection::Both,
+            )
+            .with_summary(summary)
+            .with_schema_ref(
+                zornmesh_core::CapabilitySchemaDialect::JsonSchema,
+                format!("{capability_id}.v1.schema"),
+            )
+            .build()
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            StdioBridgeError::new(
+                StdioBridgeErrorCode::RegistrationFailed,
+                format!(
+                    "bridge capability declaration failed with {}",
+                    error.code().as_str()
+                ),
+            )
+        })?;
+
+        self.broker
+            .declare_capabilities(agent_id, descriptors)
+            .map(|_| ())
+            .map_err(|error| {
+                StdioBridgeError::new(
+                    StdioBridgeErrorCode::RegistrationFailed,
+                    format!(
+                        "bridge capability declaration failed with {}",
+                        error.code().as_str()
+                    ),
+                )
+            })
+    }
+
+    fn map_request(&self, agent_id: &str, method: String, params: String) -> BridgeResponse {
+        if !matches!(method.as_str(), "ping" | "tools/list" | "tools/call") {
+            return BridgeResponse::Error(StdioBridgeError::new(
+                StdioBridgeErrorCode::UnsupportedMapping,
+                format!("MCP method '{method}' cannot be mapped to a mesh operation"),
+            ));
+        }
+        let params_value = match parse_params(&params) {
+            Ok(value) => value,
+            Err(error) => return BridgeResponse::Error(error),
+        };
+        let correlation_id = string_field(&params_value, "correlation_id")
+            .or_else(|| string_field(&params_value, "correlationId"))
+            .unwrap_or_else(next_bridge_correlation_id);
+        let trace_id = string_field(&params_value, "trace_id")
+            .or_else(|| string_field(&params_value, "traceId"));
+        let capability_id = string_field(&params_value, "capability_id")
+            .or_else(|| string_field(&params_value, "capabilityId"));
+        let capability_version = string_field(&params_value, "capability_version")
+            .or_else(|| string_field(&params_value, "capabilityVersion"));
+
+        if method == "tools/call"
+            && let Some(capability_id) = capability_id.as_deref()
+        {
+            let version = capability_version.as_deref().unwrap_or("v1");
+            if let zornmesh_broker::AuthorizationDecision::Denied { reason } = self
+                .broker
+                .authorize_invocation(agent_id, capability_id, version)
+            {
+                return BridgeResponse::Error(StdioBridgeError::new(
+                    StdioBridgeErrorCode::PolicyDenied,
+                    format!(
+                        "capability invocation denied by local policy: {}",
+                        reason.as_str()
+                    ),
+                ));
+            }
+        }
+
+        BridgeResponse::Mapped {
+            correlation_id,
+            trace_id,
+            capability_id,
+            capability_version,
+            internal_operation: method,
+            safe_params: redacted_json_string(params_value),
+        }
+    }
+}
+
+fn parse_params(params: &str) -> Result<serde_json::Value, StdioBridgeError> {
+    if params.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(params).map_err(|_| {
+        StdioBridgeError::new(
+            StdioBridgeErrorCode::MalformedMessage,
+            "MCP request params must be valid JSON",
+        )
+    })
+}
+
+fn string_field(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn next_bridge_correlation_id() -> String {
+    format!(
+        "bridge-corr-{}",
+        NEXT_BRIDGE_CORRELATION_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn redacted_json_string(mut value: serde_json::Value) -> String {
+    redact_value(&mut value);
+    value.to_string()
+}
+
+fn redact_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if is_secret_field(key) {
+                    *value = serde_json::Value::String(zornmesh_core::REDACTION_MARKER.to_owned());
+                } else {
+                    redact_value(value);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_secret_field(field: &str) -> bool {
+    let normalized = field.to_ascii_lowercase();
+    normalized == "secret"
+        || normalized == "password"
+        || normalized == "token"
+        || normalized == "api_key"
+        || normalized == "apikey"
+        || normalized.ends_with("_secret")
+        || normalized.ends_with("_password")
+        || normalized.ends_with("_token")
 }

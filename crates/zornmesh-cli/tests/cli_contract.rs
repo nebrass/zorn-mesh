@@ -1,8 +1,9 @@
 use std::{
     fs,
+    io::Write,
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::PathBuf,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -74,12 +75,14 @@ fn unique_socket(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock after epoch")
         .as_nanos();
-    std::env::temp_dir()
-        .join(format!(
-            "zornmesh-cli-contract-{name}-{}-{id}",
-            std::process::id()
-        ))
-        .join("zorn.sock")
+    let short_name: String = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(6)
+        .collect();
+    PathBuf::from("/tmp")
+        .join(format!("zm{short_name}-{}-{id}", std::process::id()))
+        .join("z")
 }
 
 fn healthy_socket(name: &str) -> (UnixListener, PathBuf) {
@@ -350,6 +353,7 @@ fn supported_shell_completion_contains_initial_commands_and_flags() {
             "daemon",
             "doctor",
             "agents",
+            "stdio",
             "help",
             "--output",
             "--socket",
@@ -361,6 +365,64 @@ fn supported_shell_completion_contains_initial_commands_and_flags() {
             );
         }
     }
+}
+
+#[test]
+fn stdio_daemon_unavailable_reports_protocol_error_to_host() {
+    let output = zornmesh(&[
+        "stdio",
+        "--as-agent",
+        "agent.local/mcp-host",
+        "--socket",
+        TEST_SOCKET,
+    ]);
+
+    assert!(
+        output.status.success(),
+        "protocol errors are reported on stdout for MCP hosts, got stderr {:?}",
+        stderr(&output)
+    );
+    assert!(output.stderr.is_empty());
+    let value = read_json(&output);
+    assert_eq!(value["jsonrpc"], "2.0");
+    assert!(value["id"].is_null());
+    assert_eq!(value["error"]["data"]["code"], "E_DAEMON_UNREACHABLE");
+    assert!(!stdout(&output).contains(TEST_SOCKET));
+}
+
+#[test]
+fn stdio_initialize_over_ready_socket_emits_mcp_ack() {
+    let (_listener, path) = healthy_socket("stdio-init");
+    let socket = path.to_str().expect("socket path is utf8");
+    let mut child = zornmesh_command(&[
+        "stdio",
+        "--as-agent",
+        "agent.local/mcp-host",
+        "--socket",
+        socket,
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("zornmesh stdio starts");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin is piped");
+        stdin
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+            )
+            .expect("initialize written");
+        stdin.write_all(b"\n").expect("newline written");
+    }
+
+    let output = child.wait_with_output().expect("stdio exits after EOF");
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["jsonrpc"], "2.0");
+    assert_eq!(value["id"], 1);
+    assert_eq!(value["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(value["result"]["serverInfo"]["name"], "zornmesh-stdio");
 }
 
 #[test]

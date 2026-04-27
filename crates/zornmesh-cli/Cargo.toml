@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde_json = "1.0.149"
 zornmesh-broker = { path = "../zornmesh-broker" }
 zornmesh-core = { path = "../zornmesh-core" }
 zornmesh-daemon = { path = "../zornmesh-daemon" }
@@ -21,6 +22,3 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-serde_json = "1.0.149"

@@ -275,9 +275,10 @@ function registerCleanup(cleanup: Cleanup): void {
 
 function uniqueSocketPath(name: string): string {
   sequence += 1;
-  const dir = `/tmp/zornmesh-typescript-sdk-${name}-${process.pid}-${Date.now()}-${sequence}`;
+  const shortName = name.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6);
+  const dir = `/tmp/zmts-${shortName}-${process.pid}-${Date.now()}-${sequence}`;
   runtimeDirs.add(dir);
-  return `${dir}/zorn.sock`;
+  return `${dir}/z`;
 }
 
 function socketDir(socketPath: string): string {
@@ -406,6 +407,22 @@ class HarnessDaemon {
       }
       socket.data.buffer = frame.remaining;
       const clientFrame = decodeClientFrame(frame.body);
+      if (clientFrame.kind === "ack") {
+        socket.write(encodeDeliveryOutcome(clientFrame.delivery_id, "acknowledged", "ACKNOWLEDGED", "delivery acknowledged"));
+        continue;
+      }
+      if (clientFrame.kind === "nack") {
+        socket.write(
+          encodeDeliveryOutcome(
+            clientFrame.delivery_id,
+            "rejected",
+            "REJECTED",
+            "delivery rejected",
+            clientFrame.reason,
+          ),
+        );
+        continue;
+      }
       if (clientFrame.kind === "subscribe") {
         socket.data.pattern = clientFrame.pattern;
         this.subscriptions.add(socket);
@@ -417,7 +434,7 @@ class HarnessDaemon {
       for (const subscriber of this.subscriptions) {
         const pattern = subscriber.data?.pattern;
         if (pattern && subjectMatches(pattern, clientFrame.envelope.subject)) {
-          subscriber.write(encodeDelivery(clientFrame.envelope, 1));
+          subscriber.write(encodeDelivery(`${clientFrame.envelope.correlation_id}:1`, clientFrame.envelope, 1));
           deliveries += 1;
         }
       }
@@ -426,6 +443,8 @@ class HarnessDaemon {
           "accepted",
           "ACCEPTED",
           `accepted for routing; delivery_attempts=${deliveries}`,
+          deliveries,
+          true,
         ),
       );
       socket.end();
@@ -435,7 +454,9 @@ class HarnessDaemon {
 
 type ClientFrame =
   | { kind: "subscribe"; pattern: string }
-  | { kind: "publish"; envelope: Envelope };
+  | { kind: "publish"; envelope: Envelope }
+  | { kind: "ack"; delivery_id: string }
+  | { kind: "nack"; delivery_id: string; reason: string };
 
 function appendBytes(left: Uint8Array | undefined, right: Uint8Array): Uint8Array {
   if (!left || left.byteLength === 0) {
@@ -476,21 +497,83 @@ function decodeClientFrame(body: Uint8Array): ClientFrame {
     cursor.expectEnd();
     return { kind: "publish", envelope };
   }
+  if (kind === 3) {
+    const delivery_id = cursor.string();
+    cursor.expectEnd();
+    return { kind: "ack", delivery_id };
+  }
+  if (kind === 4) {
+    const delivery_id = cursor.string();
+    const reason = cursor.string();
+    cursor.expectEnd();
+    return { kind: "nack", delivery_id, reason };
+  }
   throw new Error(`unexpected client frame kind ${kind}`);
 }
 
-function encodeSendResult(status: "accepted" | "rejected" | "validation_failed", code: string, message: string): Uint8Array {
+function encodeSendResult(
+  status: "accepted" | "rejected" | "validation_failed",
+  code: string,
+  message: string,
+  deliveryAttempts = 0,
+  includeDurableOutcome = false,
+): Uint8Array {
   const body = frameBody(101);
   body.push(status === "accepted" ? 1 : status === "rejected" ? 2 : 3);
   putString(body, code);
   putString(body, message);
+  putOutcome(
+    body,
+    status === "accepted" ? "accepted" : "failed",
+    status === "validation_failed" ? "protocol" : "transport",
+    code,
+    message,
+    false,
+    status !== "accepted",
+    deliveryAttempts,
+  );
+  if (includeDurableOutcome) {
+    putBool(body, true);
+    putOutcome(
+      body,
+      "failed",
+      "durable",
+      "E_PERSISTENCE_UNAVAILABLE",
+      "durable coordination state is unavailable for the in-memory broker",
+      false,
+      true,
+      0,
+    );
+  } else {
+    putBool(body, false);
+  }
   return withLength(body);
 }
 
-function encodeDelivery(envelope: Envelope, attempt: number): Uint8Array {
+function encodeDelivery(deliveryId: string, envelope: Envelope, attempt: number): Uint8Array {
   const body = frameBody(102);
+  putString(body, deliveryId);
   putU32(body, attempt);
   putEnvelope(body, envelope);
+  return withLength(body);
+}
+
+function encodeDeliveryOutcome(
+  deliveryId: string,
+  kind: "acknowledged" | "rejected",
+  code: string,
+  message: string,
+  reason?: string,
+): Uint8Array {
+  const body = frameBody(103);
+  putString(body, deliveryId);
+  putOutcome(body, kind, "delivery", code, message, false, true, 1);
+  if (reason) {
+    putBool(body, true);
+    putString(body, reason);
+  } else {
+    putBool(body, false);
+  }
   return withLength(body);
 }
 
@@ -521,6 +604,29 @@ function putString(output: number[], value: string): void {
 function putBytes(output: number[], value: Uint8Array): void {
   putU32(output, value.byteLength);
   output.push(...value);
+}
+
+function putOutcome(
+  output: number[],
+  kind: string,
+  stage: string,
+  code: string,
+  message: string,
+  retryable: boolean,
+  terminal: boolean,
+  deliveryAttempts: number,
+): void {
+  putString(output, kind);
+  putString(output, stage);
+  putString(output, code);
+  putString(output, message);
+  putBool(output, retryable);
+  putBool(output, terminal);
+  putU32(output, deliveryAttempts);
+}
+
+function putBool(output: number[], value: boolean): void {
+  output.push(value ? 1 : 0);
 }
 
 function putU32(output: number[], value: number): void {

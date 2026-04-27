@@ -3,6 +3,7 @@ use zornmesh_cli::{
     BridgeMessage, BridgeResponse, BridgeState, MCP_BRIDGE_PROTOCOL_VERSION, StdioBridge,
     StdioBridgeError, StdioBridgeErrorCode,
 };
+use zornmesh_core::REDACTION_MARKER;
 
 const OWNER_UID: u32 = 1000;
 const OWNER_GID: u32 = 1000;
@@ -119,6 +120,62 @@ fn supported_request_after_initialize_maps_to_internal_operation_with_correlatio
             assert_eq!(internal_operation, "ping");
         }
         other => panic!("expected Mapped, got {other:?}"),
+    }
+}
+
+#[test]
+fn supported_request_mapping_preserves_trace_and_capability_metadata_with_redaction() {
+    let broker = Broker::new();
+    let mut bridge = make_bridge(&broker);
+    bridge.handle_message(BridgeMessage::Initialize {
+        protocol_version: MCP_BRIDGE_PROTOCOL_VERSION.to_owned(),
+    });
+
+    let response = bridge.handle_message(BridgeMessage::Request {
+        method: "tools/call".to_owned(),
+        params: r#"{"correlation_id":"corr-1","trace_id":"trace-1","capability_id":"compute.run","capability_version":"v1","password":"hunter2"}"#.to_owned(),
+    });
+
+    match response {
+        BridgeResponse::Mapped {
+            correlation_id,
+            trace_id,
+            capability_id,
+            capability_version,
+            safe_params,
+            ..
+        } => {
+            assert_eq!(correlation_id, "corr-1");
+            assert_eq!(trace_id.as_deref(), Some("trace-1"));
+            assert_eq!(capability_id.as_deref(), Some("compute.run"));
+            assert_eq!(capability_version.as_deref(), Some("v1"));
+            assert!(!safe_params.contains("hunter2"));
+            assert!(safe_params.contains(REDACTION_MARKER));
+        }
+        other => panic!("expected Mapped, got {other:?}"),
+    }
+}
+
+#[test]
+fn policy_denied_capability_call_returns_stable_error_without_dispatch() {
+    let broker = Broker::new();
+    broker.mark_capability_high_privilege("admin.shutdown", "v1");
+    let mut bridge = make_bridge(&broker);
+    bridge.handle_message(BridgeMessage::Initialize {
+        protocol_version: MCP_BRIDGE_PROTOCOL_VERSION.to_owned(),
+    });
+
+    let response = bridge.handle_message(BridgeMessage::Request {
+        method: "tools/call".to_owned(),
+        params: r#"{"capability_id":"admin.shutdown","capability_version":"v1"}"#.to_owned(),
+    });
+
+    match response {
+        BridgeResponse::Error(err) => {
+            assert_eq!(err.code(), StdioBridgeErrorCode::PolicyDenied);
+            assert!(err.safe_message().contains("not_allowlisted"));
+        }
+        other => panic!("expected PolicyDenied error, got {other:?}"),
     }
 }
 

@@ -7,6 +7,7 @@ Commands:
   daemon   Start or inspect the local zornmesh daemon
   agents   List and inspect registered agents
   doctor   Run first-day local mesh diagnostics
+  stdio    Bridge an MCP-compatible host over stdio
   trace    Inspect trace and fixture scaffolding
   completion  Generate shell completions
   help     Print command help

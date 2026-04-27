@@ -32,7 +32,7 @@
 - [x] Story 3.4: Enforce Local Socket Permission Model on Agent Connections
 - [x] Story 3.5: Redact Secrets Across Identity, Capability, and Delivery Surfaces
 - [x] Story 3.6: Canonicalize Agent Identity Across Multiple Host Connections
-- [ ] Story 3.7: Connect MCP Hosts Through `zornmesh stdio --as-agent`
+- [x] Story 3.7: Connect MCP Hosts Through `zornmesh stdio --as-agent`
   > As a developer using an existing MCP host
   > I want to connect that host to zorn-mesh through `zornmesh stdio --as-agent`
   > So that existing tools can join the local mesh without host modification.
