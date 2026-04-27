@@ -1,7 +1,7 @@
 #![doc = "In-memory broker boundary for first local zornmesh routing work."]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     fmt,
     sync::{
         Arc, Mutex,
@@ -340,6 +340,278 @@ impl Broker {
             .map(|pending| pending.registration.clone())
             .collect()
     }
+
+    pub fn enqueue(
+        &self,
+        queue: impl Into<String>,
+        envelope: Envelope,
+    ) -> Result<(), BrokerError> {
+        let queue = queue.into();
+        if queue.trim().is_empty() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::DeliveryValidation,
+                "queue name must not be empty",
+            ));
+        }
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        inner
+            .queues
+            .entry(queue)
+            .or_default()
+            .push_back(QueuedEnvelope {
+                envelope,
+                attempt: 1,
+            });
+        Ok(())
+    }
+
+    pub fn fetch_leases(
+        &self,
+        request: FetchRequest,
+        now: SystemTime,
+    ) -> Result<Vec<Lease>, LeaseError> {
+        request.validate()?;
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let mut leases = Vec::new();
+        for _ in 0..request.batch_size {
+            let item = {
+                let queue = inner.queues.entry(request.queue.clone()).or_default();
+                queue.pop_front()
+            };
+            let Some(item) = item else { break };
+            inner.next_lease_id += 1;
+            let lease_id = format!("lease-{}", inner.next_lease_id);
+            let expiry = now + request.lease_duration;
+            let lease = Lease {
+                lease_id: lease_id.clone(),
+                consumer_id: request.consumer_id.clone(),
+                queue: request.queue.clone(),
+                envelope: item.envelope,
+                attempt: item.attempt,
+                expiry,
+            };
+            inner.active_leases.insert(
+                lease_id,
+                ActiveLease {
+                    lease: lease.clone(),
+                },
+            );
+            leases.push(lease);
+        }
+        Ok(leases)
+    }
+
+    pub fn ack_lease(
+        &self,
+        lease_id: &str,
+        consumer_id: &str,
+        _now: SystemTime,
+    ) -> Result<LeaseAckOutcome, LeaseError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        if inner.expired_lease_ids.contains(lease_id) {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseExpired,
+                format!("lease {lease_id} has already expired"),
+            ));
+        }
+        if inner.terminal_lease_ids.contains(lease_id) {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseAlreadyTerminal,
+                format!("lease {lease_id} is already terminal"),
+            ));
+        }
+        let Some(active) = inner.active_leases.get(lease_id) else {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseUnknown,
+                format!("lease {lease_id} is unknown"),
+            ));
+        };
+        if active.lease.consumer_id != consumer_id {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseNotOwned,
+                format!(
+                    "lease {lease_id} is owned by a different consumer than {consumer_id}"
+                ),
+            ));
+        }
+        let lease_id_owned = lease_id.to_owned();
+        inner.active_leases.remove(&lease_id_owned);
+        inner.terminal_lease_ids.insert(lease_id_owned.clone());
+        let outcome = CoordinationOutcome::acknowledged(
+            format!("lease {lease_id_owned} acknowledged"),
+            1,
+        );
+        inner.lease_audit.push(LeaseAuditEvent {
+            lease_id: lease_id_owned,
+            kind: LeaseAuditKind::Acknowledged,
+        });
+        Ok(LeaseAckOutcome::Acknowledged(outcome))
+    }
+
+    pub fn nack_lease(
+        &self,
+        lease_id: &str,
+        consumer_id: &str,
+        reason: NackReasonCategory,
+        _now: SystemTime,
+    ) -> Result<LeaseAckOutcome, LeaseError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        if inner.expired_lease_ids.contains(lease_id) {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseExpired,
+                format!("lease {lease_id} has already expired"),
+            ));
+        }
+        if inner.terminal_lease_ids.contains(lease_id) {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseAlreadyTerminal,
+                format!("lease {lease_id} is already terminal"),
+            ));
+        }
+        let Some(active) = inner.active_leases.get(lease_id) else {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseUnknown,
+                format!("lease {lease_id} is unknown"),
+            ));
+        };
+        if active.lease.consumer_id != consumer_id {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseNotOwned,
+                format!(
+                    "lease {lease_id} is owned by a different consumer than {consumer_id}"
+                ),
+            ));
+        }
+        let lease_id_owned = lease_id.to_owned();
+        let active = inner.active_leases.remove(&lease_id_owned).expect("lease present");
+        inner.terminal_lease_ids.insert(lease_id_owned.clone());
+        let queue = inner
+            .queues
+            .entry(active.lease.queue.clone())
+            .or_default();
+        queue.push_back(QueuedEnvelope {
+            envelope: active.lease.envelope.clone(),
+            attempt: active.lease.attempt + 1,
+        });
+        let outcome = CoordinationOutcome::new(
+            CoordinationOutcomeKind::Rejected,
+            CoordinationStage::Delivery,
+            "LEASE_NACKED",
+            format!("lease {lease_id_owned} rejected with reason {}", reason.as_str()),
+            true,
+            true,
+            active.lease.attempt,
+        );
+        inner.lease_audit.push(LeaseAuditEvent {
+            lease_id: lease_id_owned,
+            kind: LeaseAuditKind::Nacked(reason),
+        });
+        Ok(LeaseAckOutcome::Nacked { outcome, reason })
+    }
+
+    pub fn renew_lease(
+        &self,
+        lease_id: &str,
+        consumer_id: &str,
+        extension: Duration,
+        now: SystemTime,
+    ) -> Result<LeaseRenewOutcome, LeaseError> {
+        if extension.is_zero() {
+            return Err(LeaseError::new(
+                LeaseErrorCode::FetchValidation,
+                "renewal extension must be greater than zero",
+            ));
+        }
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        if inner.expired_lease_ids.contains(lease_id) {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseExpired,
+                format!("lease {lease_id} has already expired"),
+            ));
+        }
+        if inner.terminal_lease_ids.contains(lease_id) {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseAlreadyTerminal,
+                format!("lease {lease_id} is already terminal"),
+            ));
+        }
+        let Some(active) = inner.active_leases.get_mut(lease_id) else {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseUnknown,
+                format!("lease {lease_id} is unknown"),
+            ));
+        };
+        if active.lease.consumer_id != consumer_id {
+            return Err(LeaseError::new(
+                LeaseErrorCode::LeaseNotOwned,
+                format!(
+                    "lease {lease_id} is owned by a different consumer than {consumer_id}"
+                ),
+            ));
+        }
+        let new_expiry = now + extension;
+        active.lease.expiry = new_expiry;
+        inner.lease_audit.push(LeaseAuditEvent {
+            lease_id: lease_id.to_owned(),
+            kind: LeaseAuditKind::Renewed,
+        });
+        Ok(LeaseRenewOutcome::Renewed { new_expiry })
+    }
+
+    pub fn expire_due_leases(&self, now: SystemTime) -> Vec<Lease> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let expired_ids: Vec<String> = inner
+            .active_leases
+            .iter()
+            .filter_map(|(id, active)| (active.lease.expiry <= now).then(|| id.clone()))
+            .collect();
+        let mut expired = Vec::with_capacity(expired_ids.len());
+        for id in expired_ids {
+            if let Some(active) = inner.active_leases.remove(&id) {
+                inner.expired_lease_ids.insert(id.clone());
+                let queue = inner
+                    .queues
+                    .entry(active.lease.queue.clone())
+                    .or_default();
+                queue.push_back(QueuedEnvelope {
+                    envelope: active.lease.envelope.clone(),
+                    attempt: active.lease.attempt + 1,
+                });
+                inner.lease_audit.push(LeaseAuditEvent {
+                    lease_id: id.clone(),
+                    kind: LeaseAuditKind::Expired,
+                });
+                expired.push(active.lease);
+            }
+        }
+        expired
+    }
+
+    pub fn queue_depth(&self, queue: &str) -> usize {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .queues
+            .get(queue)
+            .map(|q| q.len())
+            .unwrap_or(0)
+    }
+
+    pub fn active_lease_count(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .active_leases
+            .len()
+    }
+
+    pub fn lease_audit_events(&self) -> Vec<LeaseAuditEvent> {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .lease_audit
+            .clone()
+    }
 }
 
 impl Default for Broker {
@@ -354,9 +626,241 @@ struct BrokerInner {
     subscriptions: Vec<SubscriptionEntry>,
     delivery_outcomes: Vec<DeliveryOutcome>,
     pending_requests: HashMap<String, PendingRequest>,
-    completed_correlations: std::collections::HashSet<String>,
-    timed_out_correlations: std::collections::HashSet<String>,
+    completed_correlations: HashSet<String>,
+    timed_out_correlations: HashSet<String>,
     late_events: Vec<LateRequestEvent>,
+    queues: HashMap<String, VecDeque<QueuedEnvelope>>,
+    next_lease_id: u64,
+    active_leases: HashMap<String, ActiveLease>,
+    terminal_lease_ids: HashSet<String>,
+    expired_lease_ids: HashSet<String>,
+    lease_audit: Vec<LeaseAuditEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct QueuedEnvelope {
+    envelope: Envelope,
+    attempt: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveLease {
+    lease: Lease,
+}
+
+pub const MAX_FETCH_BATCH: u32 = 1024;
+pub const MAX_LEASE_DURATION: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchRequest {
+    consumer_id: String,
+    queue: String,
+    batch_size: u32,
+    lease_duration: Duration,
+}
+
+impl FetchRequest {
+    pub fn new(
+        consumer_id: impl Into<String>,
+        queue: impl Into<String>,
+        batch_size: u32,
+        lease_duration: Duration,
+    ) -> Self {
+        Self {
+            consumer_id: consumer_id.into(),
+            queue: queue.into(),
+            batch_size,
+            lease_duration,
+        }
+    }
+
+    pub fn consumer_id(&self) -> &str {
+        &self.consumer_id
+    }
+
+    pub fn queue(&self) -> &str {
+        &self.queue
+    }
+
+    pub const fn batch_size(&self) -> u32 {
+        self.batch_size
+    }
+
+    pub const fn lease_duration(&self) -> Duration {
+        self.lease_duration
+    }
+
+    fn validate(&self) -> Result<(), LeaseError> {
+        if self.consumer_id.trim().is_empty() {
+            return Err(LeaseError::new(
+                LeaseErrorCode::FetchValidation,
+                "consumer ID must not be empty",
+            ));
+        }
+        if self.queue.trim().is_empty() {
+            return Err(LeaseError::new(
+                LeaseErrorCode::FetchValidation,
+                "queue name must not be empty",
+            ));
+        }
+        if self.batch_size == 0 {
+            return Err(LeaseError::new(
+                LeaseErrorCode::FetchValidation,
+                "fetch batch size must be greater than zero",
+            ));
+        }
+        if self.batch_size > MAX_FETCH_BATCH {
+            return Err(LeaseError::new(
+                LeaseErrorCode::FetchValidation,
+                format!(
+                    "fetch batch size {} exceeds maximum {MAX_FETCH_BATCH}",
+                    self.batch_size
+                ),
+            ));
+        }
+        if self.lease_duration.is_zero() {
+            return Err(LeaseError::new(
+                LeaseErrorCode::FetchValidation,
+                "lease duration must be greater than zero",
+            ));
+        }
+        if self.lease_duration > MAX_LEASE_DURATION {
+            return Err(LeaseError::new(
+                LeaseErrorCode::FetchValidation,
+                format!(
+                    "lease duration {:?} exceeds maximum {:?}",
+                    self.lease_duration, MAX_LEASE_DURATION
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    lease_id: String,
+    consumer_id: String,
+    queue: String,
+    envelope: Envelope,
+    attempt: u32,
+    expiry: SystemTime,
+}
+
+impl Lease {
+    pub fn lease_id(&self) -> &str {
+        &self.lease_id
+    }
+
+    pub fn consumer_id(&self) -> &str {
+        &self.consumer_id
+    }
+
+    pub fn queue(&self) -> &str {
+        &self.queue
+    }
+
+    pub const fn envelope(&self) -> &Envelope {
+        &self.envelope
+    }
+
+    pub const fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    pub const fn expiry(&self) -> SystemTime {
+        self.expiry
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseAckOutcome {
+    Acknowledged(CoordinationOutcome),
+    Nacked {
+        outcome: CoordinationOutcome,
+        reason: NackReasonCategory,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseRenewOutcome {
+    Renewed { new_expiry: SystemTime },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseErrorCode {
+    FetchValidation,
+    LeaseUnknown,
+    LeaseNotOwned,
+    LeaseExpired,
+    LeaseAlreadyTerminal,
+}
+
+impl LeaseErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FetchValidation => "E_FETCH_VALIDATION",
+            Self::LeaseUnknown => "E_LEASE_UNKNOWN",
+            Self::LeaseNotOwned => "E_LEASE_NOT_OWNED",
+            Self::LeaseExpired => "E_LEASE_EXPIRED",
+            Self::LeaseAlreadyTerminal => "E_LEASE_ALREADY_TERMINAL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseError {
+    code: LeaseErrorCode,
+    message: String,
+}
+
+impl LeaseError {
+    fn new(code: LeaseErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> LeaseErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for LeaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for LeaseError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseAuditKind {
+    Acknowledged,
+    Nacked(NackReasonCategory),
+    Renewed,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseAuditEvent {
+    lease_id: String,
+    kind: LeaseAuditKind,
+}
+
+impl LeaseAuditEvent {
+    pub fn lease_id(&self) -> &str {
+        &self.lease_id
+    }
+
+    pub const fn kind(&self) -> LeaseAuditKind {
+        self.kind
+    }
 }
 
 #[derive(Debug)]

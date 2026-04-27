@@ -17,18 +17,7 @@
 
 - [x] Story 2.1: Establish Coordination Result and ACK/NACK Contract
 - [x] Story 2.2: Send Correlated Request/Reply with Timeout
-  > As an agent author
-  > I want one agent to request work from another and receive one correlated reply or typed timeout
-  > So that agents can coordinate task handoffs without ad-hoc files, ports, or polling.
-  > AC: Given two connected agents and a registered request target, When agent A sends a request to agent B with a correlation ID and timeout, Then agent B receives the request with source, target, subject/method, correlation ID, trace context, and payload metadata, And agent A receives exactly one correlated reply when B responds before timeout.
-  > AC: Given a request target does not reply before the configured timeout, When the timeout elapses, Then agent A receives a typed timeout result, And the daemon does not later deliver a stale reply as a successful response for the completed request.
-  > AC: Given a request target rejects the request or returns a structured failure, When the reply path completes, Then agent A receives a typed rejected/failed result with safe details, And retryability is represented by the shared coordination outcome contract from Story 2.1.
-  > AC: Given a request target sends multiple replies before timeout, When replies are accepted or persisted, Then the first terminal reply by daemon sequence wins, And later replies are recorded as duplicate or late events and never reach the requester as separate successes.
-  > AC: Given two requests are in flight concurrently between the same agents, When replies arrive in reverse order, Then each reply is matched to the correct request by correlation ID, And no response is delivered to the wrong caller.
-  > AC: Given request/reply conformance tests run, When happy path, timeout, rejected reply, out-of-order reply, daemon disconnect, and concurrent-client scenarios execute, Then all scenarios pass for the Rust SDK path with documented timeout bounds and use fixtures that future TypeScript parity tests can consume.
-  > AC: Given request/reply benchmark tests run, When loopback requests with <= 4 KiB payloads execute with persistence enabled, Then p50 latency is <= 2 ms and p99 latency is <= 20 ms on the v0.1 reference platform.
-  > Spec: specs/planning-artifacts/epics.md#story-2-2
-- [ ] Story 2.3: Fetch, Lease, ACK, and NACK Pulled Envelopes
+- [x] Story 2.3: Fetch, Lease, ACK, and NACK Pulled Envelopes
   > As an agent author
   > I want consumers to fetch work with explicit leases and acknowledge or reject each envelope
   > So that agents can process work safely without losing or duplicating delivery state invisibly.

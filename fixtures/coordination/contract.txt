@@ -32,3 +32,12 @@ request_reply|resolution|timed_out
 request_reply|late_event|duplicate_after_terminal
 request_reply|late_event|late_after_timeout
 request_reply|late_event|unknown_correlation
+lease|error|E_FETCH_VALIDATION
+lease|error|E_LEASE_UNKNOWN
+lease|error|E_LEASE_NOT_OWNED
+lease|error|E_LEASE_EXPIRED
+lease|error|E_LEASE_ALREADY_TERMINAL
+lease|audit|acknowledged
+lease|audit|nacked
+lease|audit|renewed
+lease|audit|expired
