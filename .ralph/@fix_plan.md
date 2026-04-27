@@ -26,7 +26,7 @@
 ### Reliable Agent Coordination
 > Goal: Agents can coordinate beyond the first message using request/reply, pull leases, streaming, ACK/NACK, cancellation, idempotency, durable subscriptions, backpressure, and per-call context. **Durability contract:** Stories 2.1-2.8 may claim durable ACK, lease, idempotency, subscription, retry, or backpressure state only after the relevant SQLite/sqlx commit succeeds. In-memory-only state must return typed persistence-unavailable or unsupported outcomes and must never claim durable success.
 
-- [ ] Story 2.1: Establish Coordination Result and ACK/NACK Contract
+- [x] Story 2.1: Establish Coordination Result and ACK/NACK Contract
   > As an agent author
   > I want every send-side and receive-side operation to return stable coordination outcomes
   > So that my agent can distinguish accepted, rejected, durable, delivered, retryable, and terminal failure states without parsing logs.

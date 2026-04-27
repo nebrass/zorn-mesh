@@ -237,6 +237,9 @@ fn oversized_inbound_frame_is_rejected_without_delivery() {
             assert_eq!(result.code(), "E_PAYLOAD_LIMIT");
         }
         ServerFrame::Delivery { .. } => panic!("oversize frame must not produce a delivery"),
+        ServerFrame::DeliveryOutcome(_) => {
+            panic!("oversize frame must not produce a delivery outcome")
+        }
     }
     assert!(
         subscription
