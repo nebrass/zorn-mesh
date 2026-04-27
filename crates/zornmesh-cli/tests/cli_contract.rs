@@ -2275,6 +2275,186 @@ fn replay_missing_message_returns_not_found_refusal() {
     assert!(stderr(&output).contains("E_REPLAY_NOT_FOUND"));
 }
 
+fn seed_retention_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("retention evidence store opens");
+    for index in 0..3u64 {
+        let timestamp = 1_700_000_000_000 + index;
+        let message_id = format!("msg-retention-{index}");
+        let correlation_id = format!("corr-retention-{index}");
+        let trace_id = format!("trace-retention-{index}");
+        store
+            .persist_accepted_envelope(
+                EvidenceEnvelopeInput::new(
+                    evidence_envelope(
+                        "agent.local/source",
+                        "mesh.retention.created",
+                        &correlation_id,
+                        timestamp,
+                    ),
+                    &message_id,
+                    &trace_id,
+                    "accepted",
+                )
+                .expect("retention envelope input")
+                .with_target("agent.local/target"),
+            )
+            .expect("retention envelope persists");
+    }
+}
+
+#[test]
+fn retention_plan_marks_aged_records_with_retention_checkpoint() {
+    let path = temp_evidence_path("retention-aged");
+    seed_retention_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "retention",
+        "plan",
+        "--evidence",
+        &path_str,
+        "--max-age-ms",
+        "100",
+        "--now-unix-ms",
+        "1700000001000",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "retention");
+    assert_eq!(value["data"]["state"], "purge_required");
+    assert_eq!(value["data"]["mode"], "plan");
+    assert_eq!(value["data"]["policy"]["max_age_ms"], 100);
+    assert_eq!(value["data"]["retained_envelope_count"], 0);
+    let purgeable_ids = value["data"]["purgeable_envelope_ids"]
+        .as_array()
+        .expect("purgeable envelope id list");
+    assert_eq!(purgeable_ids.len(), 3);
+
+    let checkpoint = &value["data"]["retention_checkpoint"];
+    assert!(!checkpoint.is_null(), "retention checkpoint metadata present");
+    assert_eq!(checkpoint["sequence_start"], 1);
+    assert_eq!(checkpoint["sequence_end"], 3);
+    assert_eq!(checkpoint["purge_reason"], "max_age_exceeded");
+    assert_eq!(checkpoint["purged_audit_count"], 3);
+    assert!(
+        checkpoint["prior_audit_hash"]
+            .as_str()
+            .map(str::is_empty)
+            == Some(false),
+        "prior audit hash anchors the chain"
+    );
+    assert_ne!(
+        checkpoint["last_audit_hash"], checkpoint["prior_audit_hash"],
+        "retention checkpoint preserves first->last hash boundaries"
+    );
+
+    let warnings = value["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning["code"] == "W_RETENTION_GAP_PROJECTED"),
+        "retention plan warns about projected retention gap"
+    );
+}
+
+#[test]
+fn retention_plan_with_no_records_reports_no_purge_required() {
+    let path = temp_evidence_path("retention-empty");
+    FileEvidenceStore::open_evidence(&path).expect("empty evidence store opens");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "retention",
+        "plan",
+        "--evidence",
+        &path_str,
+        "--max-age-ms",
+        "1000",
+        "--now-unix-ms",
+        "1700000000000",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["data"]["state"], "no_purge_required");
+    assert!(
+        value["data"]["retention_checkpoint"].is_null(),
+        "no records means no checkpoint metadata"
+    );
+    assert!(
+        value["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .is_empty(),
+        "no purge means no retention-gap warning"
+    );
+}
+
+#[test]
+fn retention_plan_invalid_config_is_rejected_with_stable_validation_error() {
+    let path = temp_evidence_path("retention-invalid");
+    FileEvidenceStore::open_evidence(&path).expect("evidence store opens");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let zero_age = zornmesh(&[
+        "retention",
+        "plan",
+        "--evidence",
+        &path_str,
+        "--max-age-ms",
+        "0",
+    ]);
+    assert!(!zero_age.status.success());
+    assert_eq!(zero_age.status.code(), Some(65));
+    assert!(stderr(&zero_age).contains("E_VALIDATION_FAILED"));
+
+    let no_policy = zornmesh(&["retention", "plan", "--evidence", &path_str]);
+    assert!(!no_policy.status.success());
+    assert_eq!(no_policy.status.code(), Some(65));
+    assert!(stderr(&no_policy).contains("E_VALIDATION_FAILED"));
+}
+
+#[test]
+fn retention_plan_max_count_marks_oldest_envelopes_for_purge() {
+    let path = temp_evidence_path("retention-count");
+    seed_retention_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "retention",
+        "plan",
+        "--evidence",
+        &path_str,
+        "--max-count",
+        "1",
+        "--now-unix-ms",
+        "1700000010000",
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["data"]["state"], "purge_required");
+    assert_eq!(value["data"]["retained_envelope_count"], 1);
+    let ids = value["data"]["purgeable_envelope_ids"]
+        .as_array()
+        .expect("purgeable envelope id list")
+        .iter()
+        .map(|value| value.as_str().expect("id string"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["msg-retention-0", "msg-retention-1"]);
+    assert_eq!(
+        value["data"]["retention_checkpoint"]["purge_reason"],
+        "max_count_exceeded"
+    );
+}
+
 #[test]
 fn tail_invalid_subject_pattern_returns_validation_error() {
     let path = temp_evidence_path("tail-invalid");

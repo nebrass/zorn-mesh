@@ -1029,6 +1029,169 @@ impl FileEvidenceInner {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    max_age_ms: Option<u64>,
+    max_envelope_count: Option<usize>,
+}
+
+impl RetentionPolicy {
+    pub fn new(
+        max_age_ms: Option<u64>,
+        max_envelope_count: Option<usize>,
+    ) -> Result<Self, EvidenceStoreError> {
+        if let Some(age) = max_age_ms
+            && age == 0
+        {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                "retention max-age-ms must be greater than zero",
+            ));
+        }
+        if let Some(count) = max_envelope_count
+            && count == 0
+        {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                "retention max-count must be greater than zero",
+            ));
+        }
+        if max_age_ms.is_none() && max_envelope_count.is_none() {
+            return Err(EvidenceStoreError::new(
+                EvidenceStoreErrorCode::Validation,
+                "retention policy requires at least one of max-age-ms or max-count",
+            ));
+        }
+        Ok(Self {
+            max_age_ms,
+            max_envelope_count,
+        })
+    }
+
+    pub const fn max_age_ms(&self) -> Option<u64> {
+        self.max_age_ms
+    }
+
+    pub const fn max_envelope_count(&self) -> Option<usize> {
+        self.max_envelope_count
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionCheckpoint {
+    pub sequence_start: u64,
+    pub sequence_end: u64,
+    pub prior_audit_hash: String,
+    pub last_audit_hash: String,
+    pub purge_reason: &'static str,
+    pub purged_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionReport {
+    pub purgeable_envelope_ids: Vec<String>,
+    pub purgeable_dead_letter_ids: Vec<String>,
+    pub retained_envelope_count: usize,
+    pub retained_dead_letter_count: usize,
+    pub retention_checkpoint: Option<RetentionCheckpoint>,
+    pub now_unix_ms: u64,
+}
+
+impl FileEvidenceStore {
+    pub fn plan_retention(&self, policy: &RetentionPolicy, now_unix_ms: u64) -> RetentionReport {
+        let inner = self
+            .inner
+            .lock()
+            .expect("evidence store mutex not poisoned");
+
+        let age_threshold = policy
+            .max_age_ms
+            .map(|age| now_unix_ms.saturating_sub(age));
+
+        let mut envelopes_sorted: Vec<&EvidenceEnvelopeRecord> = inner.envelopes.iter().collect();
+        envelopes_sorted.sort_by_key(|record| record.daemon_sequence);
+
+        let mut purgeable_ids: Vec<String> = Vec::new();
+        for record in &envelopes_sorted {
+            if let Some(threshold) = age_threshold
+                && record.timestamp_unix_ms < threshold
+            {
+                purgeable_ids.push(record.message_id.clone());
+            }
+        }
+        if let Some(max_count) = policy.max_envelope_count
+            && envelopes_sorted.len() > max_count
+        {
+            let extra = envelopes_sorted.len() - max_count;
+            for record in envelopes_sorted.iter().take(extra) {
+                if !purgeable_ids.contains(&record.message_id) {
+                    purgeable_ids.push(record.message_id.clone());
+                }
+            }
+        }
+
+        let purgeable_set: std::collections::HashSet<String> =
+            purgeable_ids.iter().cloned().collect();
+
+        let mut purgeable_dead_letters: Vec<String> = Vec::new();
+        for record in &inner.dead_letters {
+            if let Some(threshold) = age_threshold
+                && record.terminal_unix_ms < threshold
+            {
+                purgeable_dead_letters.push(record.message_id.clone());
+            }
+        }
+
+        let mut affected_audit: Vec<&EvidenceAuditEntry> = inner
+            .audit_entries
+            .iter()
+            .filter(|audit| purgeable_set.contains(&audit.message_id))
+            .collect();
+        affected_audit.sort_by_key(|audit| audit.daemon_sequence);
+
+        let retention_checkpoint = if affected_audit.is_empty() {
+            None
+        } else {
+            let first = affected_audit.first().expect("non-empty");
+            let last = affected_audit.last().expect("non-empty");
+            Some(RetentionCheckpoint {
+                sequence_start: first.daemon_sequence,
+                sequence_end: last.daemon_sequence,
+                prior_audit_hash: first.previous_audit_hash.clone(),
+                last_audit_hash: last.current_audit_hash.clone(),
+                purge_reason: if policy.max_age_ms.is_some() {
+                    "max_age_exceeded"
+                } else {
+                    "max_count_exceeded"
+                },
+                purged_count: affected_audit.len(),
+            })
+        };
+
+        let retained_envelope_count = inner
+            .envelopes
+            .iter()
+            .filter(|record| !purgeable_set.contains(&record.message_id))
+            .count();
+        let purgeable_dead_letter_set: std::collections::HashSet<String> =
+            purgeable_dead_letters.iter().cloned().collect();
+        let retained_dead_letter_count = inner
+            .dead_letters
+            .iter()
+            .filter(|record| !purgeable_dead_letter_set.contains(&record.message_id))
+            .count();
+
+        RetentionReport {
+            purgeable_envelope_ids: purgeable_ids,
+            purgeable_dead_letter_ids: purgeable_dead_letters,
+            retained_envelope_count,
+            retained_dead_letter_count,
+            retention_checkpoint,
+            now_unix_ms,
+        }
+    }
+}
+
 impl EvidenceStore for FileEvidenceStore {
     fn persist_accepted_envelope(
         &self,

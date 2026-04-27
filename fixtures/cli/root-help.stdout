@@ -12,6 +12,7 @@ Commands:
   trace    Reconstruct conversation timelines by correlation ID
   tail     Live-tail envelope flow by subject pattern
   replay   Redeliver a previously sent envelope by message ID
+  retention Plan retention purges and surface retention gaps
   completion  Generate shell completions
   help     Print command help
 

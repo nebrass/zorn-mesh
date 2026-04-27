@@ -18,7 +18,8 @@ use std::{
 use zornmesh_broker::SubjectPattern;
 use zornmesh_store::{
     DeadLetterFailureCategory, DeadLetterQuery, EvidenceAuditEntry, EvidenceEnvelopeRecord,
-    EvidenceQuery, EvidenceStateTransitionInput, EvidenceStore, FileEvidenceStore,
+    EvidenceQuery, EvidenceStateTransitionInput, EvidenceStore, FileEvidenceStore, RetentionPolicy,
+    RetentionReport,
 };
 
 pub const ROOT_HELP: &str = include_str!("../../../fixtures/cli/root-help.stdout");
@@ -26,6 +27,7 @@ pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.st
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
+pub const RETENTION_HELP: &str = "zornmesh retention\nPlan retention purges and surface retention gaps.\n\nUsage: zornmesh retention plan [OPTIONS]\n\nOptions:\n      --evidence <PATH>     Read this evidence log\n      --max-age-ms <MS>     Mark records older than this age as purgeable\n      --max-count <N>       Mark all but the most recent N envelopes as purgeable\n      --now-unix-ms <MS>    Override the current time (defaults to wall clock)\n      --output <FORMAT>     Select human or json output\n  -h, --help                Print help\n\nThe plan subcommand never mutates the evidence log; it computes the records\nthat would be purged under the configured policy and reports retention\ncheckpoint metadata that downstream tooling can verify offline.\n";
 pub const VERSION: &str = "zornmesh 0.1.0\n";
 const READ_SCHEMA_VERSION: &str = "zornmesh.cli.read.v1";
 const EVENT_SCHEMA_VERSION: &str = "zornmesh.cli.event.v1";
@@ -45,7 +47,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -81,7 +83,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -101,7 +103,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -479,6 +481,10 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "tail" => run_tail(rest, &invocation),
         [command] if command == "replay" => print_help("replay help", REPLAY_HELP, invocation.output),
         [command, rest @ ..] if command == "replay" => run_replay(rest, &invocation),
+        [command] if command == "retention" => {
+            print_help("retention help", RETENTION_HELP, invocation.output)
+        }
+        [command, rest @ ..] if command == "retention" => run_retention(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2860,6 +2866,246 @@ fn evaluate_replay_eligibility(
         return ("ineligible", Some("redaction_blocks_replay"));
     }
     ("eligible", None)
+}
+
+#[derive(Debug, Clone, Default)]
+struct RetentionPlanOptions {
+    evidence_path: Option<PathBuf>,
+    max_age_ms: Option<u64>,
+    max_count: Option<usize>,
+    now_unix_ms: Option<u64>,
+}
+
+fn parse_retention_plan_options(args: &[String]) -> Result<RetentionPlanOptions, CliError> {
+    let mut options = RetentionPlanOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        let (key, value, advance) = if let Some((k, v)) = arg.split_once('=') {
+            (k.to_owned(), v.to_owned(), 1)
+        } else {
+            let value = inspect_option_value(args, index, arg)?.to_owned();
+            (arg.clone(), value, 2)
+        };
+        match key.as_str() {
+            "--evidence" | "--evidence-path" => {
+                options.evidence_path = Some(parse_non_empty_path(&key, &value)?);
+            }
+            "--max-age-ms" => {
+                let parsed: u64 = value.parse().map_err(|_| {
+                    CliError::new(
+                        "E_VALIDATION_FAILED",
+                        format!("--max-age-ms must be a non-negative integer, got '{value}'"),
+                        ExitKind::Validation,
+                    )
+                })?;
+                options.max_age_ms = Some(parsed);
+            }
+            "--max-count" => {
+                let parsed: usize = value.parse().map_err(|_| {
+                    CliError::new(
+                        "E_VALIDATION_FAILED",
+                        format!("--max-count must be a non-negative integer, got '{value}'"),
+                        ExitKind::Validation,
+                    )
+                })?;
+                options.max_count = Some(parsed);
+            }
+            "--now-unix-ms" => {
+                let parsed: u64 = value.parse().map_err(|_| {
+                    CliError::new(
+                        "E_VALIDATION_FAILED",
+                        format!("--now-unix-ms must be a non-negative integer, got '{value}'"),
+                        ExitKind::Validation,
+                    )
+                })?;
+                options.now_unix_ms = Some(parsed);
+            }
+            other => {
+                return Err(CliError::new(
+                    "E_UNSUPPORTED_COMMAND",
+                    format!("unsupported zornmesh retention argument '{other}'"),
+                    ExitKind::UserError,
+                ));
+            }
+        }
+        index += advance;
+    }
+    Ok(options)
+}
+
+fn run_retention(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("retention help", RETENTION_HELP, invocation.output),
+        [flag] if is_help(flag) => print_help("retention help", RETENTION_HELP, invocation.output),
+        [command, rest @ ..] if command == "plan" => {
+            let options = parse_retention_plan_options(rest)?;
+            retention_plan(options, invocation.output)
+        }
+        [command, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh retention subcommand '{command}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn retention_plan(options: RetentionPlanOptions, output: OutputFormat) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("retention plan"));
+    }
+    let policy = RetentionPolicy::new(options.max_age_ms, options.max_count).map_err(|error| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            error.message().to_owned(),
+            ExitKind::Validation,
+        )
+    })?;
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?.ok_or_else(|| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            ),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+    let store = FileEvidenceStore::open_evidence(&evidence_path).map_err(|error| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!("evidence store is unavailable: {error}"),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+    let now_unix_ms = options
+        .now_unix_ms
+        .unwrap_or_else(current_unix_ms_for_retention);
+    let report = store.plan_retention(&policy, now_unix_ms);
+
+    let plan_state = retention_plan_state(&report);
+    let next_actions = retention_next_actions(plan_state);
+    let warnings = if plan_state == "purge_required" {
+        vec![DiagnosticWarning::new(
+            "W_RETENTION_GAP_PROJECTED",
+            "applying this plan would create a retention gap; downstream trace and inspect output must surface that gap",
+        )]
+    } else {
+        Vec::new()
+    };
+
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "retention: state={} max_age_ms={} max_count={} now_unix_ms={}",
+                plan_state,
+                options
+                    .max_age_ms
+                    .map_or_else(|| "none".to_owned(), |v| v.to_string()),
+                options
+                    .max_count
+                    .map_or_else(|| "none".to_owned(), |v| v.to_string()),
+                report.now_unix_ms,
+            );
+            println!(
+                "  purgeable_envelopes={} retained_envelopes={} purgeable_dead_letters={} retained_dead_letters={}",
+                report.purgeable_envelope_ids.len(),
+                report.retained_envelope_count,
+                report.purgeable_dead_letter_ids.len(),
+                report.retained_dead_letter_count,
+            );
+            if let Some(checkpoint) = &report.retention_checkpoint {
+                println!(
+                    "  retention_checkpoint sequence_range={}..{} purge_reason={} purged_audit_count={} prior_hash={} last_hash={}",
+                    checkpoint.sequence_start,
+                    checkpoint.sequence_end,
+                    checkpoint.purge_reason,
+                    checkpoint.purged_count,
+                    checkpoint.prior_audit_hash,
+                    checkpoint.last_audit_hash,
+                );
+            }
+            for action in &next_actions {
+                println!("  next_action: {action}");
+            }
+            for warning in &warnings {
+                eprintln!("{}: {}", warning.code, warning.message);
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            let data = retention_report_json(&policy, &report, plan_state, &next_actions);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "retention",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before retention rendering"),
+    }
+}
+
+fn retention_plan_state(report: &RetentionReport) -> &'static str {
+    if report.purgeable_envelope_ids.is_empty() && report.purgeable_dead_letter_ids.is_empty() {
+        "no_purge_required"
+    } else {
+        "purge_required"
+    }
+}
+
+fn retention_next_actions(state: &str) -> Vec<&'static str> {
+    match state {
+        "purge_required" => vec![
+            "review_purgeable_records",
+            "audit_verification",
+            "schedule_commit",
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn retention_report_json(
+    policy: &RetentionPolicy,
+    report: &RetentionReport,
+    state: &str,
+    next_actions: &[&'static str],
+) -> serde_json::Value {
+    serde_json::json!({
+        "mode": "plan",
+        "state": state,
+        "policy": {
+            "max_age_ms": policy.max_age_ms(),
+            "max_envelope_count": policy.max_envelope_count(),
+        },
+        "now_unix_ms": report.now_unix_ms,
+        "purgeable_envelope_ids": report.purgeable_envelope_ids,
+        "purgeable_dead_letter_ids": report.purgeable_dead_letter_ids,
+        "retained_envelope_count": report.retained_envelope_count,
+        "retained_dead_letter_count": report.retained_dead_letter_count,
+        "retention_checkpoint": report.retention_checkpoint.as_ref().map(|checkpoint| {
+            serde_json::json!({
+                "sequence_start": checkpoint.sequence_start,
+                "sequence_end": checkpoint.sequence_end,
+                "prior_audit_hash": checkpoint.prior_audit_hash,
+                "last_audit_hash": checkpoint.last_audit_hash,
+                "purge_reason": checkpoint.purge_reason,
+                "purged_audit_count": checkpoint.purged_count,
+            })
+        }),
+        "next_actions": next_actions,
+    })
+}
+
+fn current_unix_ms_for_retention() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn replay_confirmation_token(record: &EvidenceEnvelopeRecord) -> String {

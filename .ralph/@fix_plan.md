@@ -45,7 +45,7 @@
 - [x] Story 4.6: Reconstruct Span Trees for Request/Reply and Streaming
 - [x] Story 4.7: Live-Tail Envelopes by Subject Pattern
 - [x] Story 4.8: Redeliver Previously Sent Envelopes Safely
-- [ ] Story 4.9: Configure Retention and Surface Retention Gaps
+- [x] Story 4.9: Configure Retention and Surface Retention Gaps
   > As an operator
   > I want configurable retention for messages, dead letters, and audit records
   > So that local storage remains bounded while trace gaps are explicit and explainable.
