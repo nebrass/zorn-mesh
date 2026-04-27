@@ -663,6 +663,167 @@ impl Broker {
         Ok(IdempotencyDecision::FirstAttempt)
     }
 
+    pub fn open_stream(
+        &self,
+        registration: StreamRegistration,
+    ) -> Result<(), StreamError> {
+        registration.validate()?;
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        if inner.streams.contains_key(&registration.stream_id) {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamValidation,
+                format!("stream '{}' is already open", registration.stream_id),
+            ));
+        }
+        inner.streams.insert(
+            registration.stream_id.clone(),
+            StreamRecord {
+                registration,
+                next_sequence: 0,
+                outstanding_bytes: 0,
+                state: StreamState::Open,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn submit_chunk(
+        &self,
+        chunk: ChunkSubmission,
+    ) -> Result<ChunkSubmissionOutcome, StreamError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let Some(record) = inner.streams.get_mut(&chunk.stream_id) else {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamUnknown,
+                format!("stream '{}' is unknown", chunk.stream_id),
+            ));
+        };
+        if record.state != StreamState::Open {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamClosed,
+                format!(
+                    "stream '{}' is in terminal state {:?}",
+                    chunk.stream_id, record.state
+                ),
+            ));
+        }
+        if chunk.payload.len() > record.registration.max_chunk_size {
+            return Err(StreamError::new(
+                StreamErrorCode::ChunkPayloadLimit,
+                format!(
+                    "chunk size {} exceeds max chunk size {}",
+                    chunk.payload.len(),
+                    record.registration.max_chunk_size
+                ),
+            ));
+        }
+        if chunk.sequence != record.next_sequence {
+            return Ok(ChunkSubmissionOutcome::SequenceGap {
+                expected: record.next_sequence,
+                received: chunk.sequence,
+            });
+        }
+        if record.outstanding_bytes + chunk.payload.len() > record.registration.byte_budget {
+            return Ok(ChunkSubmissionOutcome::BudgetExhausted {
+                outstanding_bytes: record.outstanding_bytes,
+                byte_budget: record.registration.byte_budget,
+                requested_bytes: chunk.payload.len(),
+            });
+        }
+
+        let chunk_size = chunk.payload.len();
+        record.outstanding_bytes += chunk_size;
+        record.next_sequence += 1;
+        let sequence = chunk.sequence;
+        let outstanding_bytes = record.outstanding_bytes;
+        match chunk.finality {
+            StreamFinality::Continue => Ok(ChunkSubmissionOutcome::Accepted {
+                sequence,
+                outstanding_bytes,
+                chunk_size,
+            }),
+            StreamFinality::Final => {
+                record.state = StreamState::Completed;
+                let total_chunks = record.next_sequence;
+                let send_outcome = CoordinationOutcome::acknowledged(
+                    format!(
+                        "stream '{}' completed after {} chunks",
+                        chunk.stream_id, total_chunks
+                    ),
+                    total_chunks,
+                );
+                Ok(ChunkSubmissionOutcome::Completed {
+                    sequence,
+                    total_chunks,
+                    send_outcome,
+                })
+            }
+        }
+    }
+
+    pub fn acknowledge_consumed(
+        &self,
+        stream_id: &str,
+        bytes: usize,
+    ) -> Result<usize, StreamError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let Some(record) = inner.streams.get_mut(stream_id) else {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamUnknown,
+                format!("stream '{stream_id}' is unknown"),
+            ));
+        };
+        if record.outstanding_bytes < bytes {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamValidation,
+                format!(
+                    "consumed bytes {} exceeds outstanding {} for stream '{stream_id}'",
+                    bytes, record.outstanding_bytes
+                ),
+            ));
+        }
+        record.outstanding_bytes -= bytes;
+        Ok(record.outstanding_bytes)
+    }
+
+    pub fn abort_stream(
+        &self,
+        stream_id: &str,
+        reason: StreamTerminationReason,
+    ) -> Result<CoordinationOutcome, StreamError> {
+        let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+        let Some(record) = inner.streams.get_mut(stream_id) else {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamUnknown,
+                format!("stream '{stream_id}' is unknown"),
+            ));
+        };
+        if record.state != StreamState::Open {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamClosed,
+                format!("stream '{stream_id}' is already in terminal state"),
+            ));
+        }
+        record.state = StreamState::Aborted;
+        Ok(CoordinationOutcome::failed(
+            "STREAM_ABORTED",
+            format!(
+                "stream '{stream_id}' aborted with reason {}",
+                reason.as_str()
+            ),
+            false,
+        ))
+    }
+
+    pub fn stream_state(&self, stream_id: &str) -> Option<StreamState> {
+        self.inner
+            .lock()
+            .expect("broker lock is not poisoned")
+            .streams
+            .get(stream_id)
+            .map(|record| record.state)
+    }
+
     pub fn commit_send(
         &self,
         sender_agent: &str,
@@ -716,7 +877,271 @@ struct BrokerInner {
     expired_lease_ids: HashSet<String>,
     lease_audit: Vec<LeaseAuditEvent>,
     idempotency: HashMap<(String, String), IdempotencyRecord>,
+    streams: HashMap<String, StreamRecord>,
 }
+
+#[derive(Debug, Clone)]
+struct StreamRecord {
+    registration: StreamRegistration,
+    next_sequence: u32,
+    outstanding_bytes: usize,
+    state: StreamState,
+}
+
+pub const MAX_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+pub const MAX_STREAM_BYTE_BUDGET: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamRegistration {
+    stream_id: String,
+    correlation_id: String,
+    sender_agent: String,
+    receiver_agent: String,
+    max_chunk_size: usize,
+    byte_budget: usize,
+}
+
+impl StreamRegistration {
+    pub fn new(
+        stream_id: impl Into<String>,
+        correlation_id: impl Into<String>,
+        sender_agent: impl Into<String>,
+        receiver_agent: impl Into<String>,
+        max_chunk_size: usize,
+        byte_budget: usize,
+    ) -> Self {
+        Self {
+            stream_id: stream_id.into(),
+            correlation_id: correlation_id.into(),
+            sender_agent: sender_agent.into(),
+            receiver_agent: receiver_agent.into(),
+            max_chunk_size,
+            byte_budget,
+        }
+    }
+
+    pub fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
+    }
+
+    pub fn sender_agent(&self) -> &str {
+        &self.sender_agent
+    }
+
+    pub fn receiver_agent(&self) -> &str {
+        &self.receiver_agent
+    }
+
+    pub const fn max_chunk_size(&self) -> usize {
+        self.max_chunk_size
+    }
+
+    pub const fn byte_budget(&self) -> usize {
+        self.byte_budget
+    }
+
+    fn validate(&self) -> Result<(), StreamError> {
+        if self.stream_id.trim().is_empty() {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamValidation,
+                "stream ID must not be empty",
+            ));
+        }
+        if self.correlation_id.trim().is_empty() {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamValidation,
+                "correlation ID must not be empty",
+            ));
+        }
+        if self.sender_agent.trim().is_empty() || self.receiver_agent.trim().is_empty() {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamValidation,
+                "stream sender and receiver agents must not be empty",
+            ));
+        }
+        if self.max_chunk_size == 0 || self.max_chunk_size > MAX_STREAM_CHUNK_BYTES {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamValidation,
+                format!(
+                    "max chunk size {} must be in (0, {MAX_STREAM_CHUNK_BYTES}]",
+                    self.max_chunk_size
+                ),
+            ));
+        }
+        if self.byte_budget == 0 || self.byte_budget > MAX_STREAM_BYTE_BUDGET {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamValidation,
+                format!(
+                    "byte budget {} must be in (0, {MAX_STREAM_BYTE_BUDGET}]",
+                    self.byte_budget
+                ),
+            ));
+        }
+        if self.byte_budget < self.max_chunk_size {
+            return Err(StreamError::new(
+                StreamErrorCode::StreamValidation,
+                "byte budget must be at least one chunk",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamFinality {
+    Continue,
+    Final,
+}
+
+impl StreamFinality {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::Final => "final",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkSubmission {
+    stream_id: String,
+    sequence: u32,
+    payload: Vec<u8>,
+    finality: StreamFinality,
+}
+
+impl ChunkSubmission {
+    pub fn new(
+        stream_id: impl Into<String>,
+        sequence: u32,
+        payload: Vec<u8>,
+        finality: StreamFinality,
+    ) -> Self {
+        Self {
+            stream_id: stream_id.into(),
+            sequence,
+            payload,
+            finality,
+        }
+    }
+
+    pub fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    pub const fn sequence(&self) -> u32 {
+        self.sequence
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    pub const fn finality(&self) -> StreamFinality {
+        self.finality
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkSubmissionOutcome {
+    Accepted {
+        sequence: u32,
+        chunk_size: usize,
+        outstanding_bytes: usize,
+    },
+    Completed {
+        sequence: u32,
+        total_chunks: u32,
+        send_outcome: CoordinationOutcome,
+    },
+    BudgetExhausted {
+        outstanding_bytes: usize,
+        byte_budget: usize,
+        requested_bytes: usize,
+    },
+    SequenceGap {
+        expected: u32,
+        received: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamState {
+    Open,
+    Completed,
+    Aborted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamTerminationReason {
+    SenderCancelled,
+    ReceiverFailure,
+    DaemonDisconnect,
+}
+
+impl StreamTerminationReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SenderCancelled => "sender_cancelled",
+            Self::ReceiverFailure => "receiver_failure",
+            Self::DaemonDisconnect => "daemon_disconnect",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamErrorCode {
+    StreamUnknown,
+    StreamClosed,
+    ChunkPayloadLimit,
+    StreamValidation,
+}
+
+impl StreamErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StreamUnknown => "E_STREAM_UNKNOWN",
+            Self::StreamClosed => "E_STREAM_CLOSED",
+            Self::ChunkPayloadLimit => "E_CHUNK_PAYLOAD_LIMIT",
+            Self::StreamValidation => "E_STREAM_VALIDATION",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamError {
+    code: StreamErrorCode,
+    message: String,
+}
+
+impl StreamError {
+    fn new(code: StreamErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub const fn code(&self) -> StreamErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for StreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for StreamError {}
 
 #[derive(Debug, Clone)]
 struct IdempotencyRecord {

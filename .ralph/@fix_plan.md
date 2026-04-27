@@ -19,18 +19,7 @@
 - [x] Story 2.2: Send Correlated Request/Reply with Timeout
 - [x] Story 2.3: Fetch, Lease, ACK, and NACK Pulled Envelopes
 - [x] Story 2.4: Add Idempotency Keys and Retry-Safe Sends
-  > As an agent author
-  > I want send operations to carry idempotency keys and preserve per-call context
-  > So that retries do not create duplicate work or lose traceability.
-  > AC: Given an agent sends an envelope with an idempotency key, When the same sender retries the same operation within the configured deduplication window, Then the broker returns the original accepted outcome instead of creating duplicate routed work, And the response makes clear that the result came from deduplication.
-  > AC: Given the same sender reuses an idempotency key with a different subject, payload fingerprint, operation kind, or semantic request shape, When deduplication validation runs, Then the daemon returns a stable idempotency-conflict error, And no new routed work is created for the conflicting operation.
-  > AC: Given two different senders use the same idempotency key, When both send operations are valid, Then deduplication scope prevents cross-agent collision, And each sender's operation is evaluated independently.
-  > AC: Given a retry occurs after a transport failure but before durable outcome is known, When the sender retries with the same idempotency key, Then the daemon resolves the retry to a stable accepted/rejected/unknown outcome according to stored coordination state, And the SDK does not fabricate success when durability is unknown.
-  > AC: Given the daemon restarts within the idempotency deduplication window, When a sender retries with the same idempotency key after restart, Then persisted idempotency records resolve the retry consistently with pre-restart behavior, And in-memory cache loss cannot duplicate routed work inside the active window.
-  > AC: Given a send operation carries timeout and trace context, When the operation is retried or deduplicated, Then correlation ID, trace context, timeout/deadline, and source agent reference remain stable across attempts, And downstream trace/audit work can distinguish first attempt from retry attempt.
-  > AC: Given idempotency conformance tests run, When duplicate, collision, different-payload conflict, daemon-restart, expired-window, and retry-after-transport-failure scenarios execute, Then no duplicate delivery occurs inside the deduplication window, And expired-window behavior is explicit and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-2-4
-- [ ] Story 2.5: Stream Response Chunks with Byte-Budget Flow Control
+- [x] Story 2.5: Stream Response Chunks with Byte-Budget Flow Control
   > As an agent author
   > I want agents to stream multi-part responses through bounded chunks
   > So that large or incremental outputs can move through the mesh without unbounded buffering.
