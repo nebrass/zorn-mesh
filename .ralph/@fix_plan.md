@@ -76,7 +76,7 @@
   > AC: Given the broadcast is accepted by the daemon, When audit evidence is persisted, Then the record links actor/session, requested recipient scope, previewed recipient snapshot, accepted recipient snapshot/revision, actual recipient list, excluded recipients, drift/reconfirmation outcome, trace/correlation ID, payload summary, and per-recipient delivery outcomes, And partial failure remains visible in both UI and audit evidence.
   > AC: Given broadcast tests run, When successful broadcast, partial failure, all failed, excluded recipients, incompatible recipients, stale recipients, unsafe scope, confirmation cancel, recipient drift after preview, reconfirmation required, stale snapshot rejected, duplicate submit, retry/inspect affordance, and audit-link scenarios execute, Then broadcast confirmation and per-recipient outcome behavior are deterministic and fixture-covered.
   > Spec: specs/planning-artifacts/epics.md#story-6-7
-- [ ] Story 6.8: Reconnect, Backfill, and Preserve UI Context
+- [x] Story 6.8: Reconnect, Backfill, and Preserve UI Context
   > As a developer
   > I want the UI to recover after refreshes, reconnects, and daemon restarts
   > So that I can continue investigating the same trace without losing chronology or mistaking gaps for complete evidence.

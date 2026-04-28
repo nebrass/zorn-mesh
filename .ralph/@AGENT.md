@@ -56,6 +56,7 @@ cd sdks/typescript && bun test
 - Story 4.4 adds `zornmesh inspect <messages|dead-letters|audit|metadata>` with `--evidence`/`ZORN_EVIDENCE_PATH`, structured filters, redacted human/JSON output, and cursor pagination.
 - Story 4.5 adds `zornmesh trace <correlation_id>` with evidence-log reconstruction, explicit exceptional states and gaps, and optional `--span-tree` causality output.
 - Story 4.6 expands `zornmesh trace --span-tree` with deterministic parent/child ordering, stream chunk sequencing/state, stable branch labels, duplicate-edge detection, and partial invalid-edge diagnostics.
+- Story 6.8 adds the UI context recovery contract: reconnect/backfill preserves selection/filter/view state, emits disabled-action copy, marks partial windows and evidence gaps, and keeps events ordered by daemon sequence.
 
 ## Feature Development Quality Standards
 

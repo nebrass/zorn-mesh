@@ -7322,6 +7322,681 @@ pub fn ui_referrer_policy() -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
+pub(crate) enum UiConnectionStatus {
+    Starting,
+    Ready,
+    Reconnecting,
+    Degraded,
+    Unavailable,
+    Stale,
+    SchemaMismatch,
+    SessionExpired,
+}
+
+impl UiConnectionStatus {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Reconnecting => "reconnecting",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Stale => "stale",
+            Self::SchemaMismatch => "schema_mismatch",
+            Self::SessionExpired => "session_expired",
+        }
+    }
+
+    pub(crate) const fn allows_unsafe_actions(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub(crate) const fn disabled_action_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Ready => None,
+            Self::Starting => {
+                Some("daemon is starting; wait for the protected UI session to become ready")
+            }
+            Self::Reconnecting => Some("daemon reconnect/backfill is in progress"),
+            Self::Degraded => Some(
+                "reconnect/backfill did not complete; retry or inspect evidence before sending",
+            ),
+            Self::Unavailable => {
+                Some("daemon is unavailable; reconnect before running state-changing actions")
+            }
+            Self::Stale => Some("view is stale; refresh backfill before trusting action scope"),
+            Self::SchemaMismatch => {
+                Some("daemon schema changed; update the client before running actions")
+            }
+            Self::SessionExpired => {
+                Some("UI session expired; start a new protected local UI session")
+            }
+        }
+    }
+
+    pub(crate) const fn status_copy(self) -> &'static str {
+        match self {
+            Self::Starting => "Starting local daemon UI session.",
+            Self::Ready => "Connected with complete loaded evidence for the current view.",
+            Self::Reconnecting => "Reconnecting and backfilling daemon-sequence evidence.",
+            Self::Degraded => "Recovery is degraded; partial state remains visible.",
+            Self::Unavailable => "Daemon is unavailable; evidence may be incomplete.",
+            Self::Stale => "Current view is stale until backfill refreshes it.",
+            Self::SchemaMismatch => "Daemon schema changed; this UI cannot safely act on it.",
+            Self::SessionExpired => "Session expired; launch a new protected UI session.",
+        }
+    }
+
+    pub(crate) const fn default_recovery_cue(self) -> Option<&'static str> {
+        match self {
+            Self::Ready => None,
+            Self::Starting => Some("wait_for_daemon_ready"),
+            Self::Reconnecting => Some("wait_for_backfill"),
+            Self::Degraded => Some("retry_reconnect_or_inspect_trace"),
+            Self::Unavailable => Some("retry_reconnect_or_check_doctor"),
+            Self::Stale => Some("refresh_backfill_window"),
+            Self::SchemaMismatch => Some("upgrade_client_or_export_audit"),
+            Self::SessionExpired => Some("rerun_zornmesh_ui"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum BackfillOutcome {
+    Restored,
+    RestoredPartial,
+    Failed,
+}
+
+impl BackfillOutcome {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Restored => "restored",
+            Self::RestoredPartial => "restored_partial",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct UiContextSelection {
+    pub selected_correlation_id: Option<String>,
+    pub selected_agent_id: Option<String>,
+    pub active_filters: Vec<(String, String)>,
+    pub view_mode: String,
+    pub selected_message_id: Option<String>,
+}
+
+#[allow(dead_code)]
+impl UiContextSelection {
+    pub(crate) fn empty() -> Self {
+        Self {
+            selected_correlation_id: None,
+            selected_agent_id: None,
+            active_filters: Vec::new(),
+            view_mode: "control_room".to_owned(),
+            selected_message_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct UiContext {
+    pub status: UiConnectionStatus,
+    pub selection: UiContextSelection,
+    pub timeline: TimelinePage,
+    pub last_outcome: Option<BackfillOutcome>,
+    pub recovery_cue: Option<&'static str>,
+    pub mapping_version: &'static str,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct BackfillBatch {
+    pub events: Vec<TimelineEvent>,
+    pub total_count: usize,
+    pub gaps: Vec<TimelineGapMarker>,
+    pub partial_window: bool,
+}
+
+#[allow(dead_code)]
+impl UiContext {
+    pub(crate) fn ready(selection: UiContextSelection, timeline: TimelinePage) -> Self {
+        let mut timeline = timeline;
+        timeline.selected_message_id = selection
+            .selected_message_id
+            .clone()
+            .filter(|id| timeline.events.iter().any(|event| &event.message_id == id));
+        Self {
+            status: UiConnectionStatus::Ready,
+            selection,
+            timeline,
+            last_outcome: None,
+            recovery_cue: None,
+            mapping_version: "zornmesh.ui.context.v1",
+        }
+    }
+
+    pub(crate) fn start_reconnect(mut self) -> Self {
+        self.status = UiConnectionStatus::Reconnecting;
+        self.last_outcome = None;
+        self
+    }
+
+    pub(crate) fn daemon_status_changed(mut self, status: UiConnectionStatus) -> Self {
+        self.status = status;
+        self.recovery_cue = status.default_recovery_cue();
+        self
+    }
+
+    pub(crate) fn complete_backfill(mut self, batch: BackfillBatch) -> Self {
+        let prior_selected = self.selection.selected_message_id.clone();
+        let mut seen: BTreeSet<(u64, String)> = self
+            .timeline
+            .events
+            .iter()
+            .map(TimelineEvent::stable_identity)
+            .collect();
+        let mut merged = self.timeline.events.clone();
+        for event in batch.events {
+            if seen.insert(event.stable_identity()) {
+                merged.push(event);
+            }
+        }
+        merged.sort_by_key(|event| event.daemon_sequence);
+        let total_count = batch.total_count.max(merged.len());
+        let window = merged
+            .first()
+            .zip(merged.last())
+            .map_or((0, 0), |(first, last)| {
+                (first.daemon_sequence, last.daemon_sequence)
+            });
+        let mut new_timeline = TimelinePage::paginate(merged, window, total_count, batch.gaps);
+        if batch.partial_window {
+            new_timeline.partial_window = true;
+            new_timeline.condition = TimelinePanelCondition::PartialWindow;
+        }
+        let partial = new_timeline.partial_window;
+        self.timeline = new_timeline;
+        self.selection.selected_message_id = prior_selected.filter(|id| {
+            self.timeline
+                .events
+                .iter()
+                .any(|event| &event.message_id == id)
+        });
+        self.timeline.selected_message_id = self.selection.selected_message_id.clone();
+        self.status = UiConnectionStatus::Ready;
+        self.last_outcome = Some(if partial {
+            BackfillOutcome::RestoredPartial
+        } else {
+            BackfillOutcome::Restored
+        });
+        self.recovery_cue = if partial {
+            Some("load_more_pages_for_full_window")
+        } else {
+            None
+        };
+        self
+    }
+
+    pub(crate) fn fail_backfill(mut self, reason: &'static str) -> Self {
+        self.status = UiConnectionStatus::Degraded;
+        self.last_outcome = Some(BackfillOutcome::Failed);
+        self.recovery_cue = Some(reason);
+        self
+    }
+
+    fn status_copy(&self) -> &'static str {
+        if self.status == UiConnectionStatus::Ready && self.timeline.partial_window {
+            "Loaded a daemon-sequence window; additional pages are required before the trace is complete."
+        } else {
+            self.status.status_copy()
+        }
+    }
+
+    fn recovery_next_actions(&self) -> Vec<&'static str> {
+        let mut actions = Vec::new();
+        if self.timeline.partial_window {
+            actions.push("load_more_pages");
+        }
+        if matches!(self.last_outcome, Some(BackfillOutcome::Failed))
+            || matches!(
+                self.status,
+                UiConnectionStatus::Degraded
+                    | UiConnectionStatus::Unavailable
+                    | UiConnectionStatus::Stale
+            )
+        {
+            actions.extend([
+                "retry_reconnect",
+                "inspect_trace_by_cli",
+                "inspect_daemon_health",
+                "export_audit_evidence",
+            ]);
+        } else {
+            match self.status {
+                UiConnectionStatus::Starting | UiConnectionStatus::Reconnecting => {
+                    actions.extend(["inspect_daemon_health"]);
+                }
+                UiConnectionStatus::SchemaMismatch => {
+                    actions.extend(["inspect_daemon_health", "export_audit_evidence"]);
+                }
+                UiConnectionStatus::SessionExpired => {
+                    actions.extend([
+                        "rerun_zornmesh_ui",
+                        "inspect_trace_by_cli",
+                        "export_audit_evidence",
+                    ]);
+                }
+                UiConnectionStatus::Ready
+                | UiConnectionStatus::Degraded
+                | UiConnectionStatus::Unavailable
+                | UiConnectionStatus::Stale => {}
+            }
+        }
+        actions.sort_unstable();
+        actions.dedup();
+        actions
+    }
+
+    fn recovery_panel_json(&self) -> Option<serde_json::Value> {
+        let actions = self.recovery_next_actions();
+        let reason = self
+            .recovery_cue
+            .or_else(|| self.status.default_recovery_cue())
+            .or_else(|| {
+                self.timeline
+                    .partial_window
+                    .then_some("partial_trace_window")
+            });
+        if reason.is_none() && actions.is_empty() {
+            return None;
+        }
+        Some(serde_json::json!({
+            "reason": reason,
+            "partial_state_visible": !self.timeline.events.is_empty(),
+            "next_actions": actions,
+        }))
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": self.mapping_version,
+            "status": self.status.as_str(),
+            "allows_unsafe_actions": self.status.allows_unsafe_actions(),
+            "disabled_action_reason": self.status.disabled_action_reason(),
+            "status_copy": self.status_copy(),
+            "last_outcome": self.last_outcome.map(|outcome| outcome.as_str()),
+            "recovery_cue": self.recovery_cue,
+            "recovery_panel": self.recovery_panel_json(),
+            "selection": {
+                "selected_correlation_id": self.selection.selected_correlation_id,
+                "selected_agent_id": self.selection.selected_agent_id,
+                "selected_message_id": self.selection.selected_message_id,
+                "active_filters": self.selection.active_filters.iter().map(|(k, v)| {
+                    serde_json::json!({"key": k, "value": v})
+                }).collect::<Vec<_>>(),
+                "view_mode": self.selection.view_mode,
+            },
+            "timeline": self.timeline.to_json(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod ui_context_tests {
+    use super::*;
+
+    fn event(seq: u64, message: &str) -> TimelineEvent {
+        TimelineEvent {
+            daemon_sequence: seq,
+            message_id: message.to_owned(),
+            correlation_id: "corr-context".to_owned(),
+            trace_id: "trace-context".to_owned(),
+            source_agent: "agent.local/sender".to_owned(),
+            target_or_subject: "agent.local/target".to_owned(),
+            subject: "mesh.context.created".to_owned(),
+            timestamp_unix_ms: 1_700_000_000_000 + seq,
+            browser_received_unix_ms: None,
+            state: TimelineEventState::Accepted,
+            causal_marker: TimelineCausalMarker::Root,
+            parent_message_id: None,
+            safe_payload_summary: serde_json::json!({}),
+            suggested_next_action: None,
+            cli_handoff_command: None,
+            recovery_cue: None,
+        }
+    }
+
+    fn ready_context() -> UiContext {
+        let timeline = TimelinePage::ready(vec![event(1, "msg-1"), event(2, "msg-2")]);
+        let mut selection = UiContextSelection::empty();
+        selection.selected_correlation_id = Some("corr-context".to_owned());
+        selection.selected_agent_id = Some("agent.local/sender".to_owned());
+        selection.selected_message_id = Some("msg-2".to_owned());
+        selection.view_mode = "focused_trace".to_owned();
+        selection
+            .active_filters
+            .push(("status".to_owned(), "active".to_owned()));
+        UiContext::ready(selection, timeline)
+    }
+
+    fn event_with_marker(seq: u64, message: &str, marker: TimelineCausalMarker) -> TimelineEvent {
+        let mut event = event(seq, message);
+        event.causal_marker = marker;
+        event
+    }
+
+    #[test]
+    fn ready_context_allows_unsafe_actions_and_pins_schema() {
+        let context = ready_context();
+        assert_eq!(context.status, UiConnectionStatus::Ready);
+        assert!(context.status.allows_unsafe_actions());
+        assert_eq!(context.mapping_version, "zornmesh.ui.context.v1");
+        assert_eq!(
+            context.to_json()["schema_version"],
+            "zornmesh.ui.context.v1"
+        );
+    }
+
+    #[test]
+    fn start_reconnect_transitions_to_reconnecting_and_blocks_unsafe_actions() {
+        let context = ready_context().start_reconnect();
+        assert_eq!(context.status, UiConnectionStatus::Reconnecting);
+        assert!(!context.status.allows_unsafe_actions());
+    }
+
+    #[test]
+    fn complete_backfill_restores_selection_dedupes_by_stable_identity_and_orders_by_sequence() {
+        let context = ready_context().start_reconnect();
+        let batch = BackfillBatch {
+            events: vec![
+                event(2, "msg-2"),
+                event(3, "msg-3"),
+                event(1, "msg-1"),
+                event(4, "msg-4"),
+            ],
+            total_count: 4,
+            gaps: Vec::new(),
+            partial_window: false,
+        };
+        let restored = context.complete_backfill(batch);
+        assert_eq!(restored.status, UiConnectionStatus::Ready);
+        assert_eq!(restored.last_outcome, Some(BackfillOutcome::Restored));
+        let sequences: Vec<u64> = restored
+            .timeline
+            .events
+            .iter()
+            .map(|e| e.daemon_sequence)
+            .collect();
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3, 4],
+            "ordered by daemon sequence with no duplicates"
+        );
+        assert_eq!(
+            restored.selection.selected_message_id.as_deref(),
+            Some("msg-2"),
+            "selected detail survives backfill"
+        );
+    }
+
+    #[test]
+    fn complete_backfill_updates_timeline_selected_detail() {
+        let restored = ready_context()
+            .start_reconnect()
+            .complete_backfill(BackfillBatch {
+                events: vec![event(3, "msg-3")],
+                total_count: 3,
+                gaps: Vec::new(),
+                partial_window: false,
+            });
+
+        assert_eq!(
+            restored.timeline.selected_message_id.as_deref(),
+            Some("msg-2"),
+            "timeline panel keeps the selected detail stable after restore"
+        );
+        assert_eq!(
+            restored.to_json()["timeline"]["selected_message_id"],
+            "msg-2"
+        );
+    }
+
+    #[test]
+    fn partial_backfill_reports_actual_loaded_window_not_total_trace() {
+        let mut selection = UiContextSelection::empty();
+        selection.selected_correlation_id = Some("corr-context".to_owned());
+        selection.selected_message_id = Some("msg-50".to_owned());
+        selection.view_mode = "focused_trace".to_owned();
+        let context = UiContext::ready(selection, TimelinePage::ready(vec![event(50, "msg-50")]))
+            .start_reconnect();
+
+        let restored = context.complete_backfill(BackfillBatch {
+            events: vec![
+                event(49, "msg-49"),
+                event(50, "msg-50"),
+                event(51, "msg-51"),
+            ],
+            total_count: 1_000,
+            gaps: Vec::new(),
+            partial_window: true,
+        });
+
+        assert_eq!(
+            restored.timeline.condition,
+            TimelinePanelCondition::PartialWindow
+        );
+        assert_eq!(restored.timeline.loaded_range, Some((49, 51)));
+        assert_eq!(restored.to_json()["timeline"]["loaded_range"]["low"], 49);
+        assert_eq!(restored.to_json()["timeline"]["loaded_range"]["high"], 51);
+        assert_eq!(
+            restored.recovery_cue,
+            Some("load_more_pages_for_full_window")
+        );
+    }
+
+    #[test]
+    fn complete_backfill_partial_window_marks_partial_and_load_more_cue() {
+        let context = ready_context().start_reconnect();
+        let batch = BackfillBatch {
+            events: vec![event(3, "msg-3")],
+            total_count: 100,
+            gaps: vec![TimelineGapMarker {
+                before_sequence: 2,
+                after_sequence: 3,
+                reason: "retention_purge",
+            }],
+            partial_window: true,
+        };
+        let restored = context.complete_backfill(batch);
+        assert_eq!(
+            restored.last_outcome,
+            Some(BackfillOutcome::RestoredPartial)
+        );
+        assert_eq!(
+            restored.recovery_cue,
+            Some("load_more_pages_for_full_window")
+        );
+        assert_eq!(
+            restored.timeline.condition,
+            TimelinePanelCondition::PartialWindow
+        );
+        assert!(
+            restored
+                .timeline
+                .gaps
+                .iter()
+                .any(|gap| gap.reason == "retention_purge")
+        );
+    }
+
+    #[test]
+    fn complete_backfill_clears_selection_when_event_no_longer_present() {
+        let mut selection = UiContextSelection::empty();
+        selection.selected_message_id = Some("msg-vanished".to_owned());
+        let context = UiContext::ready(selection, TimelinePage::ready(vec![event(1, "msg-1")]))
+            .start_reconnect();
+        let restored = context.complete_backfill(BackfillBatch {
+            events: vec![event(2, "msg-2")],
+            total_count: 2,
+            gaps: Vec::new(),
+            partial_window: false,
+        });
+        assert!(restored.selection.selected_message_id.is_none());
+    }
+
+    #[test]
+    fn daemon_status_changed_carries_recovery_cues_for_unavailable_states() {
+        let unavailable = ready_context().daemon_status_changed(UiConnectionStatus::Unavailable);
+        assert_eq!(unavailable.status, UiConnectionStatus::Unavailable);
+        assert_eq!(
+            unavailable.recovery_cue,
+            Some("retry_reconnect_or_check_doctor")
+        );
+        assert!(!unavailable.status.allows_unsafe_actions());
+
+        let schema = ready_context().daemon_status_changed(UiConnectionStatus::SchemaMismatch);
+        assert_eq!(schema.recovery_cue, Some("upgrade_client_or_export_audit"));
+
+        let session = ready_context().daemon_status_changed(UiConnectionStatus::SessionExpired);
+        assert_eq!(session.recovery_cue, Some("rerun_zornmesh_ui"));
+    }
+
+    #[test]
+    fn non_ready_status_json_explains_disabled_actions() {
+        for status in [
+            UiConnectionStatus::Starting,
+            UiConnectionStatus::Reconnecting,
+            UiConnectionStatus::Degraded,
+            UiConnectionStatus::Unavailable,
+            UiConnectionStatus::Stale,
+            UiConnectionStatus::SchemaMismatch,
+            UiConnectionStatus::SessionExpired,
+        ] {
+            let json = ready_context().daemon_status_changed(status).to_json();
+            assert_eq!(json["status"], status.as_str());
+            assert_eq!(json["allows_unsafe_actions"], false);
+            assert!(
+                json["disabled_action_reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty()),
+                "non-ready status {status:?} must explain why unsafe actions are disabled"
+            );
+            assert!(
+                json["status_copy"]
+                    .as_str()
+                    .is_some_and(|copy| !copy.is_empty()),
+                "non-ready status {status:?} must render persistent status copy"
+            );
+        }
+    }
+
+    #[test]
+    fn backfill_marks_retention_late_and_reconstructed_evidence() {
+        let restored = ready_context()
+            .start_reconnect()
+            .complete_backfill(BackfillBatch {
+                events: vec![
+                    event_with_marker(3, "msg-late", TimelineCausalMarker::LateArrival),
+                    event_with_marker(4, "msg-rebuilt", TimelineCausalMarker::Reconstructed),
+                ],
+                total_count: 4,
+                gaps: vec![TimelineGapMarker {
+                    before_sequence: 2,
+                    after_sequence: 3,
+                    reason: "retention_purge",
+                }],
+                partial_window: false,
+            });
+
+        let json = restored.to_json();
+        let events = json["timeline"]["events"].as_array().unwrap();
+        let late = events
+            .iter()
+            .find(|event| event["message_id"] == "msg-late")
+            .expect("late event exists");
+        assert_eq!(late["causal_marker"], "late_arrival");
+        assert!(
+            late["evidence_flags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|flag| flag == "late")
+        );
+
+        let rebuilt = events
+            .iter()
+            .find(|event| event["message_id"] == "msg-rebuilt")
+            .expect("reconstructed event exists");
+        assert_eq!(rebuilt["causal_marker"], "reconstructed");
+        assert!(
+            rebuilt["evidence_flags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|flag| flag == "reconstructed")
+        );
+        assert_eq!(json["timeline"]["gaps"][0]["reason"], "retention_purge");
+    }
+
+    #[test]
+    fn failed_backfill_emits_evidence_gap_recovery_panel() {
+        let context = ready_context().start_reconnect();
+        let failed = context.fail_backfill("daemon_unreachable");
+        assert_eq!(failed.status, UiConnectionStatus::Degraded);
+        assert_eq!(failed.last_outcome, Some(BackfillOutcome::Failed));
+        assert_eq!(failed.recovery_cue, Some("daemon_unreachable"));
+        assert!(!failed.status.allows_unsafe_actions());
+    }
+
+    #[test]
+    fn failed_backfill_keeps_partial_state_and_offers_recovery_actions() {
+        let failed = ready_context()
+            .start_reconnect()
+            .fail_backfill("backfill_timeout");
+        let json = failed.to_json();
+
+        assert_eq!(json["timeline"]["events"].as_array().unwrap().len(), 2);
+        assert_eq!(json["recovery_panel"]["reason"], "backfill_timeout");
+        assert_eq!(json["recovery_panel"]["partial_state_visible"], true);
+        let actions = json["recovery_panel"]["next_actions"].as_array().unwrap();
+        for expected in [
+            "retry_reconnect",
+            "inspect_trace_by_cli",
+            "inspect_daemon_health",
+            "export_audit_evidence",
+        ] {
+            assert!(
+                actions.iter().any(|action| action == expected),
+                "recovery panel must offer {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_carries_persistent_status_chrome_and_selection() {
+        let context = ready_context();
+        let json = context.to_json();
+        assert_eq!(json["status"], "ready");
+        assert_eq!(json["allows_unsafe_actions"], true);
+        let selection = &json["selection"];
+        assert_eq!(selection["selected_correlation_id"], "corr-context");
+        assert_eq!(selection["selected_agent_id"], "agent.local/sender");
+        assert_eq!(selection["selected_message_id"], "msg-2");
+        assert_eq!(selection["view_mode"], "focused_trace");
+        let filters = selection["active_filters"].as_array().unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0]["key"], "status");
+        assert_eq!(filters[0]["value"], "active");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum BroadcastExclusionReason {
     Incompatible,
     Stale,
@@ -9256,6 +9931,21 @@ pub(crate) struct TimelineEvent {
     pub recovery_cue: Option<&'static str>,
 }
 
+#[allow(dead_code)]
+impl TimelineEvent {
+    pub(crate) fn stable_identity(&self) -> (u64, String) {
+        (self.daemon_sequence, self.message_id.clone())
+    }
+
+    pub(crate) fn evidence_flags(&self) -> Vec<&'static str> {
+        match self.causal_marker {
+            TimelineCausalMarker::LateArrival => vec!["late"],
+            TimelineCausalMarker::Reconstructed => vec!["reconstructed"],
+            _ => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub(crate) struct TimelineGapMarker {
@@ -9373,7 +10063,7 @@ impl TimelinePage {
         gaps: Vec<TimelineGapMarker>,
     ) -> Self {
         let mut page = Self::ready(events);
-        page.loaded_range = Some(window);
+        page.loaded_range = (!page.events.is_empty()).then_some(window);
         page.total_count = total_count;
         page.gaps = gaps;
         page.partial_window = page.events.len() < total_count || !page.gaps.is_empty();
@@ -9398,7 +10088,13 @@ impl TimelinePage {
 
     pub(crate) fn append_live(mut self, mut new_events: Vec<TimelineEvent>) -> Self {
         let prior_selection = self.selected_message_id.clone();
-        self.events.append(&mut new_events);
+        let mut seen: BTreeSet<(u64, String)> =
+            self.events.iter().map(TimelineEvent::stable_identity).collect();
+        for event in new_events.drain(..) {
+            if seen.insert(event.stable_identity()) {
+                self.events.push(event);
+            }
+        }
         self.events.sort_by_key(|event| event.daemon_sequence);
         if let Some((_, ref mut high)) = self.loaded_range
             && let Some(last) = self.events.last()
@@ -9411,6 +10107,11 @@ impl TimelinePage {
             self.loaded_range = Some((first.daemon_sequence, last.daemon_sequence));
         }
         self.total_count = self.total_count.max(self.events.len());
+        self.unknown_count = self
+            .events
+            .iter()
+            .filter(|event| event.state == TimelineEventState::Unknown)
+            .count();
         self.selected_message_id = prior_selection.filter(|id| {
             self.events.iter().any(|event| &event.message_id == id)
         });
@@ -9447,6 +10148,8 @@ impl TimelinePage {
                 "browser_received_unix_ms": event.browser_received_unix_ms,
                 "state": event.state.as_str(),
                 "causal_marker": event.causal_marker.as_str(),
+                "event_identity": format!("{}:{}", event.daemon_sequence, event.message_id),
+                "evidence_flags": event.evidence_flags(),
                 "parent_message_id": event.parent_message_id,
                 "safe_payload_summary": event.safe_payload_summary,
                 "suggested_next_action": event.suggested_next_action,
