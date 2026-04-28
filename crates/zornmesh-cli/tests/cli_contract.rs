@@ -2455,6 +2455,214 @@ fn retention_plan_max_count_marks_oldest_envelopes_for_purge() {
     );
 }
 
+fn seed_evidence_export(path: &std::path::Path) {
+    let store =
+        FileEvidenceStore::open_evidence(path).expect("evidence export store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/sender",
+                    "mesh.export.created",
+                    "corr-export-1",
+                    1_700_000_000_100,
+                ),
+                "msg-export-1",
+                "trace-export",
+                "accepted",
+            )
+            .expect("export envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("export envelope persists");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/sender",
+                    "mesh.export.completed",
+                    "corr-export-2",
+                    1_700_000_000_500,
+                ),
+                "msg-export-2",
+                "trace-export-2",
+                "accepted",
+            )
+            .expect("export envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("export envelope persists");
+    // Out-of-window record (should be excluded by --since/--until)
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/sender",
+                    "mesh.export.outside",
+                    "corr-export-outside",
+                    1_700_000_001_000,
+                ),
+                "msg-export-outside",
+                "trace-export-outside",
+                "accepted",
+            )
+            .expect("outside-window envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("outside-window envelope persists");
+}
+
+#[test]
+fn evidence_export_produces_self_contained_bundle_with_manifest() {
+    let path = temp_evidence_path("evidence-export");
+    seed_evidence_export(&path);
+    let manifest = temp_release_manifest("evidence-bundle", VERIFIED_RELEASE_MANIFEST);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+    let manifest_str = manifest.to_str().expect("manifest path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "evidence",
+        "export",
+        "--evidence",
+        &path_str,
+        "--release-manifest",
+        &manifest_str,
+        "--since",
+        "1700000000000",
+        "--until",
+        "1700000000999",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let text = stdout(&output);
+    assert!(!text.contains("must-not-leak"), "raw secrets are not emitted");
+
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "evidence");
+    let bundle = &value["data"];
+    assert_eq!(bundle["manifest"]["schema_version"], "zornmesh.evidence.bundle.v1");
+    assert_eq!(bundle["manifest"]["time_window"]["since_unix_ms"], 1_700_000_000_000_u64);
+    assert_eq!(bundle["manifest"]["time_window"]["until_unix_ms"], 1_700_000_000_999_u64);
+
+    let envelopes = bundle["envelopes"].as_array().expect("envelopes array");
+    assert_eq!(envelopes.len(), 2, "only in-window envelopes appear");
+    let ids: Vec<&str> = envelopes
+        .iter()
+        .map(|env| env["message_id"].as_str().expect("id"))
+        .collect();
+    assert!(ids.contains(&"msg-export-1"));
+    assert!(ids.contains(&"msg-export-2"));
+    assert!(!ids.contains(&"msg-export-outside"), "out-of-window record excluded");
+
+    let release = &bundle["release_evidence"];
+    assert_eq!(release["status"], "available");
+    assert_eq!(release["manifest"]["signature"]["status"], "verified");
+
+    assert!(
+        bundle["audit_log_slice"]
+            .as_array()
+            .expect("audit_log_slice array")
+            .len()
+            >= 2,
+        "audit slice covers in-window envelopes"
+    );
+}
+
+#[test]
+fn evidence_export_marks_release_evidence_unavailable_without_manifest() {
+    let path = temp_evidence_path("evidence-no-release");
+    seed_evidence_export(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "evidence",
+        "export",
+        "--evidence",
+        &path_str,
+        "--since",
+        "1700000000000",
+        "--until",
+        "1700000000999",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    let bundle = &value["data"];
+    assert_eq!(bundle["release_evidence"]["status"], "unavailable");
+    let gaps = bundle["manifest"]["evidence_gaps"]
+        .as_array()
+        .expect("evidence gaps array");
+    assert!(
+        gaps.iter()
+            .any(|gap| gap["section"] == "release_evidence"),
+        "missing release manifest is recorded as an evidence gap"
+    );
+    assert!(
+        value["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .iter()
+            .any(|warning| warning["code"] == "W_EVIDENCE_BUNDLE_GAP"),
+        "evidence gaps surface a stable warning"
+    );
+}
+
+#[test]
+fn evidence_export_rejects_invalid_time_window_with_validation_error() {
+    let path = temp_evidence_path("evidence-invalid-window");
+    FileEvidenceStore::open_evidence(&path).expect("evidence store opens");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "evidence",
+        "export",
+        "--evidence",
+        &path_str,
+        "--since",
+        "1700000001000",
+        "--until",
+        "1700000000000",
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success(), "since>until is rejected");
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_VALIDATION_FAILED"));
+}
+
+#[test]
+fn evidence_export_empty_window_marks_audit_slice_gap() {
+    let path = temp_evidence_path("evidence-empty-window");
+    seed_evidence_export(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "evidence",
+        "export",
+        "--evidence",
+        &path_str,
+        "--since",
+        "1800000000000",
+        "--until",
+        "1800000000100",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    let bundle = &value["data"];
+    let gaps = bundle["manifest"]["evidence_gaps"]
+        .as_array()
+        .expect("evidence gaps array");
+    assert!(
+        gaps.iter()
+            .any(|gap| gap["section"] == "audit_log_slice"),
+        "empty window records an audit slice evidence gap"
+    );
+}
+
 fn seed_compliance_evidence(path: &std::path::Path) {
     let store =
         FileEvidenceStore::open_evidence(path).expect("compliance evidence store opens");

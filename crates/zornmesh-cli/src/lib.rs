@@ -27,6 +27,7 @@ pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.st
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
+pub const EVIDENCE_HELP: &str = "zornmesh evidence\nExport self-contained evidence bundles for a time window.\n\nUsage: zornmesh evidence export [OPTIONS]\n\nOptions:\n      --evidence <PATH>          Read this evidence log\n      --release-manifest <PATH>  Include this release manifest in the bundle\n      --since <UNIX_MS>          Lower bound (inclusive) of the time window\n      --until <UNIX_MS>          Upper bound (inclusive) of the time window\n      --output <FORMAT>          Select human or json output\n  -h, --help                     Print help\n\nExports a single self-contained JSON bundle containing the audit-log\nslice, envelope and dead-letter records, release evidence (where\navailable), and a manifest enumerating included sections plus any\nevidence gaps. Raw secrets are never emitted; redaction markers remain\nvisible. Stable structured errors prevent partial bundles from being\nreported as complete.\n";
 pub const COMPLIANCE_HELP: &str = "zornmesh compliance\nAudit compliance traceability fields on evidence records.\n\nUsage: zornmesh compliance traceability [OPTIONS]\n\nOptions:\n      --evidence <PATH>           Read this evidence log\n      --correlation-id <ID>       Restrict to one correlation ID\n      --output <FORMAT>           Select human or json output\n  -h, --help                      Print help\n\nClassifies each persisted record as complete, partial, or evidence_gap\nbased on the AC-required traceability fields (agent identity, capability\nor subject, timestamp, correlation ID, trace ID, prior-message lineage).\nRedaction markers preserve compliance status; missing required fields\nproduce explicit evidence-gap reasons rather than silent completeness.\n";
 pub const RELEASE_HELP: &str = "zornmesh release\nVerify release signatures and inspect SBOM evidence.\n\nUsage: zornmesh release verify [OPTIONS]\n       zornmesh release sbom   [OPTIONS]\n\nOptions:\n      --manifest <PATH>  Read this release evidence manifest\n      --output <FORMAT>  Select human or json output\n  -h, --help            Print help\n\nVerification reads only local manifest evidence; no network or remote\ntrust decision is performed unless an operator explicitly configures\none. The manifest path may also be set via ZORN_RELEASE_MANIFEST.\n";
 const ENV_RELEASE_MANIFEST: &str = "ZORN_RELEASE_MANIFEST";
@@ -51,7 +52,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -87,7 +88,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -107,7 +108,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -499,6 +500,10 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
             print_help("compliance help", COMPLIANCE_HELP, invocation.output)
         }
         [command, rest @ ..] if command == "compliance" => run_compliance(rest, &invocation),
+        [command] if command == "evidence" => {
+            print_help("evidence help", EVIDENCE_HELP, invocation.output)
+        }
+        [command, rest @ ..] if command == "evidence" => run_evidence(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2880,6 +2885,384 @@ fn evaluate_replay_eligibility(
         return ("ineligible", Some("redaction_blocks_replay"));
     }
     ("eligible", None)
+}
+
+#[derive(Debug, Clone, Default)]
+struct EvidenceExportOptions {
+    evidence_path: Option<PathBuf>,
+    release_manifest_path: Option<PathBuf>,
+    since_unix_ms: Option<u64>,
+    until_unix_ms: Option<u64>,
+}
+
+fn parse_evidence_export_options(args: &[String]) -> Result<EvidenceExportOptions, CliError> {
+    let mut options = EvidenceExportOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        let (key, value, advance) = if let Some((k, v)) = arg.split_once('=') {
+            (k.to_owned(), v.to_owned(), 1)
+        } else {
+            let value = inspect_option_value(args, index, arg)?.to_owned();
+            (arg.clone(), value, 2)
+        };
+        match key.as_str() {
+            "--evidence" | "--evidence-path" => {
+                options.evidence_path = Some(parse_non_empty_path(&key, &value)?);
+            }
+            "--release-manifest" => {
+                options.release_manifest_path = Some(parse_non_empty_path(&key, &value)?);
+            }
+            "--since" => {
+                let parsed: u64 = value.parse().map_err(|_| {
+                    CliError::new(
+                        "E_VALIDATION_FAILED",
+                        format!("--since must be a non-negative integer, got '{value}'"),
+                        ExitKind::Validation,
+                    )
+                })?;
+                options.since_unix_ms = Some(parsed);
+            }
+            "--until" => {
+                let parsed: u64 = value.parse().map_err(|_| {
+                    CliError::new(
+                        "E_VALIDATION_FAILED",
+                        format!("--until must be a non-negative integer, got '{value}'"),
+                        ExitKind::Validation,
+                    )
+                })?;
+                options.until_unix_ms = Some(parsed);
+            }
+            other => {
+                return Err(CliError::new(
+                    "E_UNSUPPORTED_COMMAND",
+                    format!("unsupported zornmesh evidence argument '{other}'"),
+                    ExitKind::UserError,
+                ));
+            }
+        }
+        index += advance;
+    }
+    Ok(options)
+}
+
+fn run_evidence(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("evidence help", EVIDENCE_HELP, invocation.output),
+        [flag] if is_help(flag) => print_help("evidence help", EVIDENCE_HELP, invocation.output),
+        [command, rest @ ..] if command == "export" => {
+            let options = parse_evidence_export_options(rest)?;
+            evidence_export(options, invocation.output)
+        }
+        [command, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh evidence subcommand '{command}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn evidence_export(options: EvidenceExportOptions, output: OutputFormat) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("evidence export"));
+    }
+    let since = options.since_unix_ms.ok_or_else(|| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            "evidence export requires --since <UNIX_MS>".to_owned(),
+            ExitKind::Validation,
+        )
+    })?;
+    let until = options.until_unix_ms.ok_or_else(|| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            "evidence export requires --until <UNIX_MS>".to_owned(),
+            ExitKind::Validation,
+        )
+    })?;
+    if since > until {
+        return Err(CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("invalid time window: --since ({since}) must be <= --until ({until})"),
+            ExitKind::Validation,
+        ));
+    }
+
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?.ok_or_else(|| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            ),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+    let store = FileEvidenceStore::open_evidence(&evidence_path).map_err(|error| {
+        CliError::new(
+            "E_EVIDENCE_EXPORT_STORE_UNAVAILABLE",
+            format!("evidence store is unavailable: {error}"),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+
+    let started_unix_ms = current_unix_ms_for_retention();
+
+    let mut envelopes: Vec<EvidenceEnvelopeRecord> = store
+        .query_envelopes(EvidenceQuery::new())
+        .into_iter()
+        .filter(|record| record.timestamp_unix_ms() >= since && record.timestamp_unix_ms() <= until)
+        .collect();
+    envelopes.sort_by_key(EvidenceEnvelopeRecord::daemon_sequence);
+
+    let mut dead_letters: Vec<zornmesh_store::EvidenceDeadLetterRecord> = store
+        .query_dead_letters(DeadLetterQuery::new())
+        .into_iter()
+        .filter(|record| {
+            let terminal = record.terminal_unix_ms();
+            terminal >= since && terminal <= until
+        })
+        .collect();
+    dead_letters.sort_by_key(|record| record.daemon_sequence());
+
+    let included_message_ids: BTreeSet<String> = envelopes
+        .iter()
+        .map(|record| record.message_id().to_owned())
+        .collect();
+    let audit_entries: Vec<EvidenceAuditEntry> = store
+        .audit_entries()
+        .into_iter()
+        .filter(|entry| included_message_ids.contains(entry.message_id()))
+        .collect();
+
+    let release_section = match options.release_manifest_path.as_ref() {
+        Some(path) => match fs::read_to_string(path) {
+            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(value) => serde_json::json!({
+                    "status": "available",
+                    "manifest_path": path.display().to_string(),
+                    "manifest": sanitize_release_manifest(&value),
+                }),
+                Err(error) => serde_json::json!({
+                    "status": "unavailable",
+                    "manifest_path": path.display().to_string(),
+                    "reason": format!("manifest is not valid JSON: {error}"),
+                }),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({
+                "status": "unavailable",
+                "manifest_path": path.display().to_string(),
+                "reason": "release manifest does not exist at the configured path",
+            }),
+            Err(error) => serde_json::json!({
+                "status": "unavailable",
+                "manifest_path": path.display().to_string(),
+                "reason": format!("release manifest read failed: {error}"),
+            }),
+        },
+        None => serde_json::json!({
+            "status": "unavailable",
+            "manifest_path": null,
+            "reason": "release manifest not provided; pass --release-manifest <PATH> to include release evidence",
+        }),
+    };
+
+    let mut evidence_gaps: Vec<serde_json::Value> = Vec::new();
+    if envelopes.is_empty() && dead_letters.is_empty() {
+        evidence_gaps.push(serde_json::json!({
+            "section": "audit_log_slice",
+            "reason": "no records fall within the requested window",
+        }));
+    }
+    if release_section["status"] == "unavailable" {
+        evidence_gaps.push(serde_json::json!({
+            "section": "release_evidence",
+            "reason": release_section["reason"],
+        }));
+    }
+
+    let bundle_envelopes: Vec<serde_json::Value> = envelopes
+        .iter()
+        .map(envelope_export_json)
+        .collect();
+    let bundle_dead_letters: Vec<serde_json::Value> = dead_letters
+        .iter()
+        .map(dead_letter_export_json)
+        .collect();
+    let bundle_audit: Vec<serde_json::Value> = audit_entries.iter().map(audit_export_json).collect();
+
+    let finished_unix_ms = current_unix_ms_for_retention();
+    let duration_ms = finished_unix_ms.saturating_sub(started_unix_ms);
+
+    let manifest = serde_json::json!({
+        "schema_version": "zornmesh.evidence.bundle.v1",
+        "evidence_path": evidence_path.display().to_string(),
+        "time_window": {"since_unix_ms": since, "until_unix_ms": until},
+        "generated_at_unix_ms": finished_unix_ms,
+        "duration_ms": duration_ms,
+        "sections": {
+            "audit_log_slice": {"included": bundle_audit.len()},
+            "envelopes": {"included": bundle_envelopes.len()},
+            "dead_letters": {"included": bundle_dead_letters.len()},
+            "release_evidence": {"status": release_section["status"]},
+        },
+        "evidence_gaps": evidence_gaps,
+    });
+
+    let warnings: Vec<DiagnosticWarning> = if evidence_gaps.is_empty() {
+        Vec::new()
+    } else {
+        vec![DiagnosticWarning::new(
+            "W_EVIDENCE_BUNDLE_GAP",
+            format!(
+                "evidence bundle contains {} gap(s); review manifest before claiming completeness",
+                evidence_gaps.len()
+            ),
+        )]
+    };
+
+    let bundle = serde_json::json!({
+        "manifest": manifest,
+        "audit_log_slice": bundle_audit,
+        "envelopes": bundle_envelopes,
+        "dead_letters": bundle_dead_letters,
+        "release_evidence": release_section,
+    });
+
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "evidence export: window={}..{} envelopes={} dead_letters={} audit_entries={} release_status={}",
+                since,
+                until,
+                bundle_envelopes.len(),
+                bundle_dead_letters.len(),
+                bundle_audit.len(),
+                bundle["release_evidence"]["status"].as_str().unwrap_or(""),
+            );
+            for gap in &evidence_gaps {
+                println!(
+                    "  evidence_gap: section={} reason={}",
+                    gap["section"].as_str().unwrap_or(""),
+                    gap["reason"].as_str().unwrap_or(""),
+                );
+            }
+            for warning in &warnings {
+                eprintln!("{}: {}", warning.code, warning.message);
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "evidence",
+                    "status": "ok",
+                    "data": bundle,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before evidence rendering"),
+    }
+}
+
+fn sanitize_release_manifest(value: &serde_json::Value) -> serde_json::Value {
+    let mut sanitized = serde_json::json!({
+        "schema_version": value.get("schema_version").cloned().unwrap_or(serde_json::Value::Null),
+        "version": value.get("version").cloned().unwrap_or(serde_json::Value::Null),
+    });
+    if let Some(artifact) = value.get("artifact") {
+        sanitized["artifact"] = serde_json::json!({
+            "path": artifact.get("path").cloned().unwrap_or(serde_json::Value::Null),
+            "digest": artifact.get("digest").cloned().unwrap_or(serde_json::Value::Null),
+        });
+    }
+    if let Some(signature) = value.get("signature") {
+        sanitized["signature"] = serde_json::json!({
+            "path": signature.get("path").cloned().unwrap_or(serde_json::Value::Null),
+            "status": signature.get("status").cloned().unwrap_or(serde_json::Value::Null),
+            "issuer": signature.get("issuer").cloned().unwrap_or(serde_json::Value::Null),
+            "transparency_log_index": signature
+                .get("transparency_log_index")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        });
+    }
+    if let Some(sbom) = value.get("sbom") {
+        sanitized["sbom"] = serde_json::json!({
+            "path": sbom.get("path").cloned().unwrap_or(serde_json::Value::Null),
+            "format": sbom.get("format").cloned().unwrap_or(serde_json::Value::Null),
+            "status": sbom.get("status").cloned().unwrap_or(serde_json::Value::Null),
+            "components_count": sbom
+                .get("components_count")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "generated_at": sbom
+                .get("generated_at")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        });
+    }
+    sanitized
+}
+
+fn envelope_export_json(record: &EvidenceEnvelopeRecord) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "envelope",
+        "daemon_sequence": record.daemon_sequence(),
+        "message_id": record.message_id(),
+        "subject": record.subject(),
+        "source_agent": record.source_agent(),
+        "target_or_subject": record.target_or_subject(),
+        "correlation_id": record.correlation_id(),
+        "trace_id": record.trace_id(),
+        "span_id": record.span_id(),
+        "parent_message_id": record.parent_message_id(),
+        "delivery_state": record.delivery_state(),
+        "timestamp_unix_ms": record.timestamp_unix_ms(),
+        "safe_payload_summary": payload_summary(record.payload_len(), record.payload_content_type()),
+    })
+}
+
+fn dead_letter_export_json(
+    record: &zornmesh_store::EvidenceDeadLetterRecord,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "dead_letter",
+        "daemon_sequence": record.daemon_sequence(),
+        "message_id": record.message_id(),
+        "subject": record.subject(),
+        "source_agent": record.source_agent(),
+        "intended_target": record.intended_target(),
+        "correlation_id": record.correlation_id(),
+        "trace_id": record.trace_id(),
+        "terminal_state": record.terminal_state(),
+        "failure_category": record.failure_category().as_str(),
+        "attempt_count": record.attempt_count(),
+        "terminal_unix_ms": record.terminal_unix_ms(),
+        "safe_details": record.safe_details(),
+        "safe_payload_summary": payload_summary(record.payload_len(), record.payload_content_type()),
+    })
+}
+
+fn audit_export_json(entry: &EvidenceAuditEntry) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "audit",
+        "daemon_sequence": entry.daemon_sequence(),
+        "message_id": entry.message_id(),
+        "previous_audit_hash": entry.previous_audit_hash(),
+        "current_audit_hash": entry.current_audit_hash(),
+        "actor": entry.actor(),
+        "action": entry.action(),
+        "capability_or_subject": entry.capability_or_subject(),
+        "correlation_id": entry.correlation_id(),
+        "trace_id": entry.trace_id(),
+        "state_from": entry.state_from(),
+        "state_to": entry.state_to(),
+        "outcome_details": entry.outcome_details(),
+    })
 }
 
 #[derive(Debug, Clone, Default)]

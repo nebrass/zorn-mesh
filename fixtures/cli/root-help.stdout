@@ -16,6 +16,7 @@ Commands:
   audit    Verify the audit log hash chain offline
   release  Verify release signatures and inspect SBOM evidence
   compliance  Audit compliance traceability fields on evidence records
+  evidence  Export self-contained evidence bundles for a time window
   completion  Generate shell completions
   help     Print command help
 

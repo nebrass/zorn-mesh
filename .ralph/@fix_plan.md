@@ -52,16 +52,7 @@
 
 - [x] Story 5.1: Produce and Verify Release Signatures, SBOMs, and Reproducibility Evidence
 - [x] Story 5.2: Enforce Compliance Traceability Fields on Envelopes
-  > As a compliance reviewer
-  > I want every evidence-bearing envelope to carry required traceability fields
-  > So that agent actions can be mapped to who acted, what capability was used, and what prior message caused it.
-  > AC: Given an agent sends, receives, replies, streams, ACKs, NACKs, replays, or triggers a dead-letter state, When the daemon records the envelope or related audit event, Then the record includes agent identity, capability or subject, timestamp, correlation ID, trace ID, and prior-message lineage where applicable, And missing required traceability fields produce stable validation or evidence-gap results.
-  > AC: Given an envelope uses a capability descriptor, When the evidence record is written, Then the capability identifier and version are preserved in safe evidence metadata, And high-privilege capability decisions link to their authorization outcome.
-  > AC: Given a traceability field contains sensitive data or references redacted payload material, When evidence is rendered or exported, Then raw sensitive values are redacted while stable identifiers and lineage remain verifiable.
-  > AC: Given legacy, partial, or bridge-originated records cannot provide all fields, When compliance traceability validation runs, Then the record is marked with an explicit evidence-gap reason, And the system does not silently claim compliance completeness.
-  > AC: Given compliance traceability tests run, When normal send, high-privilege invoke, replay, DLQ, MCP-bridge, missing-field, and redacted-field scenarios execute, Then traceability fields and evidence-gap behavior are deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-5-2
-- [ ] Story 5.3: Export Evidence Bundle for a Time Window
+- [x] Story 5.3: Export Evidence Bundle for a Time Window
   > As a compliance reviewer
   > I want to export a self-contained evidence bundle for a time window
   > So that I can review local agent activity, release integrity, and configuration posture without manual file gathering.
