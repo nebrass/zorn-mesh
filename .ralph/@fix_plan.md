@@ -51,17 +51,7 @@
 > Goal: Operators and compliance reviewers can verify release integrity, export evidence, prove audit-log integrity, handle redaction/deletion, and map events to required AI-risk/compliance frameworks.
 
 - [x] Story 5.1: Produce and Verify Release Signatures, SBOMs, and Reproducibility Evidence
-  > As an operator
-  > I want to verify the installed `zornmesh` artifact signature and retrieve its SBOM
-  > So that I can trust what binary or SDK package is running in my local environment.
-  > AC: Given the v0.1 release pipeline builds Linux and macOS artifacts and SDK packages, When release preflight runs, Then every artifact has a Sigstore signature, CycloneDX SBOM, dependency inventory, provenance metadata, and reproducibility report where the toolchain permits, And missing signature, missing SBOM, unaccounted dependency, or non-reproducible reference build status fails release readiness instead of being deferred to install-time verification.
-  > AC: Given a signed `zornmesh` release artifact is installed, When the operator runs the release verification command or doctor check, Then the command verifies the artifact against the published Sigstore signature, And reports verified, unverifiable, missing-signature, or mismatch states with stable exit codes.
-  > AC: Given the installed artifact has an associated CycloneDX SBOM, When the operator runs `zornmesh inspect sbom` or equivalent structured command, Then the SBOM is returned in the documented format, And JSON output can be consumed without human prose mixed into stdout.
-  > AC: Given a source-built installation is used, When SBOM generation or lookup runs, Then the command reports whether the SBOM was generated at install/build time or is unavailable, And unavailable SBOM status is explicit rather than treated as success.
-  > AC: Given signature or SBOM verification fails, When the operator inspects diagnostics, Then the output includes safe remediation guidance, And no network fetch or remote trust decision occurs unless explicitly configured by the operator.
-  > AC: Given release-integrity tests run, When valid signature, missing signature, mismatched artifact, valid SBOM, missing SBOM, and JSON output scenarios execute, Then verification behavior is deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-5-1
-- [ ] Story 5.2: Enforce Compliance Traceability Fields on Envelopes
+- [x] Story 5.2: Enforce Compliance Traceability Fields on Envelopes
   > As a compliance reviewer
   > I want every evidence-bearing envelope to carry required traceability fields
   > So that agent actions can be mapped to who acted, what capability was used, and what prior message caused it.

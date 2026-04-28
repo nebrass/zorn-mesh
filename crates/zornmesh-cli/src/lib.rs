@@ -27,6 +27,7 @@ pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.st
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
+pub const COMPLIANCE_HELP: &str = "zornmesh compliance\nAudit compliance traceability fields on evidence records.\n\nUsage: zornmesh compliance traceability [OPTIONS]\n\nOptions:\n      --evidence <PATH>           Read this evidence log\n      --correlation-id <ID>       Restrict to one correlation ID\n      --output <FORMAT>           Select human or json output\n  -h, --help                      Print help\n\nClassifies each persisted record as complete, partial, or evidence_gap\nbased on the AC-required traceability fields (agent identity, capability\nor subject, timestamp, correlation ID, trace ID, prior-message lineage).\nRedaction markers preserve compliance status; missing required fields\nproduce explicit evidence-gap reasons rather than silent completeness.\n";
 pub const RELEASE_HELP: &str = "zornmesh release\nVerify release signatures and inspect SBOM evidence.\n\nUsage: zornmesh release verify [OPTIONS]\n       zornmesh release sbom   [OPTIONS]\n\nOptions:\n      --manifest <PATH>  Read this release evidence manifest\n      --output <FORMAT>  Select human or json output\n  -h, --help            Print help\n\nVerification reads only local manifest evidence; no network or remote\ntrust decision is performed unless an operator explicitly configures\none. The manifest path may also be set via ZORN_RELEASE_MANIFEST.\n";
 const ENV_RELEASE_MANIFEST: &str = "ZORN_RELEASE_MANIFEST";
 pub const AUDIT_HELP: &str = "zornmesh audit\nVerify the audit log hash chain offline.\n\nUsage: zornmesh audit verify [OPTIONS]\n\nOptions:\n      --evidence <PATH>  Read this evidence log\n      --output <FORMAT>  Select human or json output\n  -h, --help            Print help\n\nVerification walks the on-disk hash chain without requiring a running\ndaemon, distinguishing valid, tampered, missing, unreadable, and\nunsupported-schema results with stable exit codes.\n";
@@ -50,7 +51,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention audit release completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -86,7 +87,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -106,7 +107,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -494,6 +495,10 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
             print_help("release help", RELEASE_HELP, invocation.output)
         }
         [command, rest @ ..] if command == "release" => run_release(rest, &invocation),
+        [command] if command == "compliance" => {
+            print_help("compliance help", COMPLIANCE_HELP, invocation.output)
+        }
+        [command, rest @ ..] if command == "compliance" => run_compliance(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2875,6 +2880,462 @@ fn evaluate_replay_eligibility(
         return ("ineligible", Some("redaction_blocks_replay"));
     }
     ("eligible", None)
+}
+
+#[derive(Debug, Clone, Default)]
+struct ComplianceOptions {
+    evidence_path: Option<PathBuf>,
+    correlation_id: Option<String>,
+}
+
+fn parse_compliance_options(args: &[String]) -> Result<ComplianceOptions, CliError> {
+    let mut options = ComplianceOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        let (key, value, advance) = if let Some((k, v)) = arg.split_once('=') {
+            (k.to_owned(), v.to_owned(), 1)
+        } else {
+            let value = inspect_option_value(args, index, arg)?.to_owned();
+            (arg.clone(), value, 2)
+        };
+        match key.as_str() {
+            "--evidence" | "--evidence-path" => {
+                options.evidence_path = Some(parse_non_empty_path(&key, &value)?);
+            }
+            "--correlation-id" => {
+                options.correlation_id = Some(parse_non_empty_string(&key, &value)?);
+            }
+            other => {
+                return Err(CliError::new(
+                    "E_UNSUPPORTED_COMMAND",
+                    format!("unsupported zornmesh compliance argument '{other}'"),
+                    ExitKind::UserError,
+                ));
+            }
+        }
+        index += advance;
+    }
+    Ok(options)
+}
+
+fn run_compliance(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("compliance help", COMPLIANCE_HELP, invocation.output),
+        [flag] if is_help(flag) => {
+            print_help("compliance help", COMPLIANCE_HELP, invocation.output)
+        }
+        [command, rest @ ..] if command == "traceability" => {
+            let options = parse_compliance_options(rest)?;
+            compliance_traceability(options, invocation.output)
+        }
+        [command, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh compliance subcommand '{command}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn compliance_traceability(
+    options: ComplianceOptions,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("compliance traceability"));
+    }
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?.ok_or_else(|| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            ),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+    let store = FileEvidenceStore::open_evidence(&evidence_path).map_err(|error| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!("evidence store is unavailable: {error}"),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+
+    let envelopes = match options.correlation_id.as_deref() {
+        Some(id) => store.query_envelopes(EvidenceQuery::new().correlation_id(id)),
+        None => store.query_envelopes(EvidenceQuery::new()),
+    };
+    let dead_letters = match options.correlation_id.as_deref() {
+        Some(id) => store.query_dead_letters(DeadLetterQuery::new().correlation_id(id)),
+        None => store.query_dead_letters(DeadLetterQuery::new()),
+    };
+    let audit_entries = store.audit_entries();
+    let audit_filtered: Vec<&EvidenceAuditEntry> = match options.correlation_id.as_deref() {
+        Some(id) => audit_entries
+            .iter()
+            .filter(|entry| entry.correlation_id() == id)
+            .collect(),
+        None => audit_entries.iter().collect(),
+    };
+
+    let mut records = Vec::new();
+    let mut counts = ComplianceCounts::default();
+    for envelope in &envelopes {
+        let assessment = classify_envelope(envelope, &audit_filtered);
+        counts.tally(&assessment);
+        records.push(envelope_compliance_json(envelope, &assessment));
+    }
+    for dead_letter in &dead_letters {
+        let assessment = classify_dead_letter(dead_letter);
+        counts.tally(&assessment);
+        records.push(dead_letter_compliance_json(dead_letter, &assessment));
+    }
+    for entry in &audit_filtered {
+        let assessment = classify_audit_entry(entry);
+        counts.tally(&assessment);
+        records.push(audit_compliance_json(entry, &assessment));
+    }
+
+    let aggregate_status = if counts.evidence_gap > 0 {
+        "evidence_gap"
+    } else if counts.partial > 0 {
+        "partial"
+    } else if counts.complete > 0 {
+        "complete"
+    } else {
+        "empty"
+    };
+
+    let warnings: Vec<DiagnosticWarning> = if counts.evidence_gap > 0 {
+        vec![DiagnosticWarning::new(
+            "W_COMPLIANCE_EVIDENCE_GAP",
+            format!(
+                "{} record(s) carry evidence gaps; review missing fields before claiming completeness",
+                counts.evidence_gap
+            ),
+        )]
+    } else {
+        Vec::new()
+    };
+
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "compliance traceability: status={} complete={} partial={} evidence_gap={} total={}",
+                aggregate_status,
+                counts.complete,
+                counts.partial,
+                counts.evidence_gap,
+                counts.total(),
+            );
+            for record in &records {
+                println!(
+                    "  {} {} status={} missing={} reason={}",
+                    record["kind"].as_str().unwrap_or(""),
+                    record["message_id"].as_str().unwrap_or(""),
+                    record["compliance_status"].as_str().unwrap_or(""),
+                    record["missing_fields"]
+                        .as_array()
+                        .map(|fields| fields
+                            .iter()
+                            .filter_map(|value| value.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","))
+                        .unwrap_or_default(),
+                    record["evidence_gap_reason"].as_str().unwrap_or("none"),
+                );
+            }
+            for warning in &warnings {
+                eprintln!("{}: {}", warning.code, warning.message);
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            let data = serde_json::json!({
+                "status": aggregate_status,
+                "evidence_path": evidence_path.display().to_string(),
+                "filter": {
+                    "correlation_id": options.correlation_id,
+                },
+                "totals": {
+                    "complete": counts.complete,
+                    "partial": counts.partial,
+                    "evidence_gap": counts.evidence_gap,
+                    "total": counts.total(),
+                },
+                "records": records,
+            });
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "compliance",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before compliance rendering"),
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ComplianceCounts {
+    complete: usize,
+    partial: usize,
+    evidence_gap: usize,
+}
+
+impl ComplianceCounts {
+    fn tally(&mut self, assessment: &ComplianceAssessment) {
+        match assessment.status {
+            "complete" => self.complete += 1,
+            "partial" => self.partial += 1,
+            "evidence_gap" => self.evidence_gap += 1,
+            _ => {}
+        }
+    }
+    fn total(&self) -> usize {
+        self.complete + self.partial + self.evidence_gap
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ComplianceAssessment {
+    status: &'static str,
+    missing_fields: Vec<&'static str>,
+    evidence_gap_reason: Option<&'static str>,
+    redacted_fields: Vec<&'static str>,
+    has_lineage: bool,
+}
+
+fn check_field(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
+fn redacted_marker(value: &str) -> bool {
+    value == "[REDACTED]"
+}
+
+fn classify_envelope(
+    envelope: &EvidenceEnvelopeRecord,
+    audit_entries: &[&EvidenceAuditEntry],
+) -> ComplianceAssessment {
+    let mut missing: Vec<&'static str> = Vec::new();
+    if !check_field(envelope.source_agent()) {
+        missing.push("source_agent");
+    }
+    if !check_field(envelope.subject()) {
+        missing.push("subject");
+    }
+    if envelope.timestamp_unix_ms() == 0 {
+        missing.push("timestamp_unix_ms");
+    }
+    if !check_field(envelope.correlation_id()) {
+        missing.push("correlation_id");
+    }
+    if !check_field(envelope.trace_id()) {
+        missing.push("trace_id");
+    }
+
+    let mut redacted: Vec<&'static str> = Vec::new();
+    if redacted_marker(envelope.payload_content_type()) {
+        redacted.push("payload_content_type");
+    }
+
+    let lineage_required = matches!(
+        envelope.delivery_state(),
+        "replayed" | "retrying" | "dead_lettered"
+    ) || audit_entries.iter().any(|entry| {
+        entry.message_id() == envelope.message_id()
+            && matches!(
+                entry.action(),
+                "replay_requested" | "retry_attempt" | "dead_lettered"
+            )
+    });
+    let has_lineage = envelope.parent_message_id().is_some();
+    let mut evidence_gap_reason: Option<&'static str> = None;
+
+    if envelope.source_agent().starts_with("bridge.") {
+        evidence_gap_reason = Some("bridge_originated_legacy_fields");
+    }
+
+    if !missing.is_empty() && evidence_gap_reason.is_none() {
+        evidence_gap_reason = Some("required_field_missing");
+    }
+
+    let status: &'static str = if !missing.is_empty() || evidence_gap_reason.is_some() {
+        "evidence_gap"
+    } else if lineage_required && !has_lineage {
+        "partial"
+    } else {
+        "complete"
+    };
+    if status == "partial" {
+        evidence_gap_reason = Some("lineage_missing_for_action");
+    }
+
+    ComplianceAssessment {
+        status,
+        missing_fields: missing,
+        evidence_gap_reason,
+        redacted_fields: redacted,
+        has_lineage,
+    }
+}
+
+fn classify_dead_letter(record: &zornmesh_store::EvidenceDeadLetterRecord) -> ComplianceAssessment {
+    let mut missing: Vec<&'static str> = Vec::new();
+    if !check_field(record.source_agent()) {
+        missing.push("source_agent");
+    }
+    if !check_field(record.subject()) {
+        missing.push("subject");
+    }
+    if !check_field(record.correlation_id()) {
+        missing.push("correlation_id");
+    }
+    if !check_field(record.trace_id()) {
+        missing.push("trace_id");
+    }
+    if !check_field(record.terminal_state()) {
+        missing.push("terminal_state");
+    }
+
+    let mut redacted: Vec<&'static str> = Vec::new();
+    if redacted_marker(record.payload_content_type()) {
+        redacted.push("payload_content_type");
+    }
+    if redacted_marker(record.safe_details()) {
+        redacted.push("safe_details");
+    }
+
+    let evidence_gap_reason = if missing.is_empty() {
+        None
+    } else {
+        Some("required_field_missing")
+    };
+    let status: &'static str = if missing.is_empty() {
+        "complete"
+    } else {
+        "evidence_gap"
+    };
+    ComplianceAssessment {
+        status,
+        missing_fields: missing,
+        evidence_gap_reason,
+        redacted_fields: redacted,
+        has_lineage: false,
+    }
+}
+
+fn classify_audit_entry(entry: &EvidenceAuditEntry) -> ComplianceAssessment {
+    let mut missing: Vec<&'static str> = Vec::new();
+    if !check_field(entry.actor()) {
+        missing.push("actor");
+    }
+    if !check_field(entry.action()) {
+        missing.push("action");
+    }
+    if !check_field(entry.capability_or_subject()) {
+        missing.push("capability_or_subject");
+    }
+    if !check_field(entry.correlation_id()) {
+        missing.push("correlation_id");
+    }
+    if !check_field(entry.trace_id()) {
+        missing.push("trace_id");
+    }
+    if !check_field(entry.state_to()) {
+        missing.push("state_to");
+    }
+
+    let mut redacted: Vec<&'static str> = Vec::new();
+    if redacted_marker(entry.outcome_details()) {
+        redacted.push("outcome_details");
+    }
+
+    let status: &'static str = if missing.is_empty() {
+        "complete"
+    } else {
+        "evidence_gap"
+    };
+    let evidence_gap_reason = if missing.is_empty() {
+        None
+    } else {
+        Some("required_field_missing")
+    };
+    ComplianceAssessment {
+        status,
+        missing_fields: missing,
+        evidence_gap_reason,
+        redacted_fields: redacted,
+        has_lineage: false,
+    }
+}
+
+fn envelope_compliance_json(
+    envelope: &EvidenceEnvelopeRecord,
+    assessment: &ComplianceAssessment,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "envelope",
+        "message_id": envelope.message_id(),
+        "subject": envelope.subject(),
+        "source_agent": envelope.source_agent(),
+        "correlation_id": envelope.correlation_id(),
+        "trace_id": envelope.trace_id(),
+        "delivery_state": envelope.delivery_state(),
+        "compliance_status": assessment.status,
+        "missing_fields": assessment.missing_fields,
+        "redacted_fields": assessment.redacted_fields,
+        "evidence_gap_reason": assessment.evidence_gap_reason,
+        "has_lineage": assessment.has_lineage,
+    })
+}
+
+fn dead_letter_compliance_json(
+    record: &zornmesh_store::EvidenceDeadLetterRecord,
+    assessment: &ComplianceAssessment,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "dead_letter",
+        "message_id": record.message_id(),
+        "subject": record.subject(),
+        "source_agent": record.source_agent(),
+        "correlation_id": record.correlation_id(),
+        "trace_id": record.trace_id(),
+        "terminal_state": record.terminal_state(),
+        "compliance_status": assessment.status,
+        "missing_fields": assessment.missing_fields,
+        "redacted_fields": assessment.redacted_fields,
+        "evidence_gap_reason": assessment.evidence_gap_reason,
+        "has_lineage": false,
+    })
+}
+
+fn audit_compliance_json(
+    entry: &EvidenceAuditEntry,
+    assessment: &ComplianceAssessment,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "audit",
+        "message_id": entry.message_id(),
+        "actor": entry.actor(),
+        "action": entry.action(),
+        "capability_or_subject": entry.capability_or_subject(),
+        "correlation_id": entry.correlation_id(),
+        "trace_id": entry.trace_id(),
+        "state_from": entry.state_from(),
+        "state_to": entry.state_to(),
+        "compliance_status": assessment.status,
+        "missing_fields": assessment.missing_fields,
+        "redacted_fields": assessment.redacted_fields,
+        "evidence_gap_reason": assessment.evidence_gap_reason,
+        "has_lineage": false,
+    })
 }
 
 #[derive(Debug, Clone, Default)]

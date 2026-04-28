@@ -2455,6 +2455,191 @@ fn retention_plan_max_count_marks_oldest_envelopes_for_purge() {
     );
 }
 
+fn seed_compliance_evidence(path: &std::path::Path) {
+    let store =
+        FileEvidenceStore::open_evidence(path).expect("compliance evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/sender",
+                    "mesh.compliance.created",
+                    "corr-compliance",
+                    1_700_000_000_900,
+                ),
+                "msg-compliance-1",
+                "trace-compliance",
+                "accepted",
+            )
+            .expect("compliance envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("compliance envelope persists");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "bridge.mcp.host-1",
+                    "mesh.compliance.bridge",
+                    "corr-compliance-bridge",
+                    1_700_000_000_950,
+                ),
+                "msg-compliance-bridge",
+                "trace-compliance-bridge",
+                "accepted",
+            )
+            .expect("bridge envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("bridge envelope persists");
+    let dlq_envelope = evidence_envelope(
+        "agent.local/sender",
+        "mesh.compliance.dlq",
+        "corr-compliance-dlq",
+        1_700_000_000_960,
+    );
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                dlq_envelope.clone(),
+                "msg-compliance-dlq",
+                "trace-compliance-dlq",
+                "accepted",
+            )
+            .expect("dlq envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("dlq envelope persists");
+    store
+        .persist_dead_letter(
+            EvidenceDeadLetterInput::new(
+                dlq_envelope,
+                "msg-compliance-dlq",
+                "trace-compliance-dlq",
+                "dead_lettered",
+                DeadLetterFailureCategory::RetryExhausted,
+                "retry exhausted",
+            )
+            .expect("compliance dead-letter input")
+            .with_intended_target("agent.local/recipient")
+            .with_attempt_count(2)
+            .with_timing(1_700_000_000_970, 1_700_000_000_980, 1_700_000_000_990),
+        )
+        .expect("compliance dead letter persists");
+}
+
+#[test]
+fn compliance_traceability_marks_normal_send_complete_and_bridge_evidence_gap() {
+    let path = temp_evidence_path("compliance-mixed");
+    seed_compliance_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "compliance",
+        "traceability",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "compliance");
+    assert_eq!(value["data"]["status"], "evidence_gap");
+    assert!(value["data"]["totals"]["complete"].as_u64().unwrap() >= 2);
+    assert!(value["data"]["totals"]["evidence_gap"].as_u64().unwrap() >= 1);
+    assert!(
+        value["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .iter()
+            .any(|warning| warning["code"] == "W_COMPLIANCE_EVIDENCE_GAP"),
+        "evidence gap surfaces a stable warning"
+    );
+
+    let records = value["data"]["records"]
+        .as_array()
+        .expect("compliance records");
+    let bridge_record = records
+        .iter()
+        .find(|record| record["message_id"] == "msg-compliance-bridge")
+        .expect("bridge envelope appears");
+    assert_eq!(bridge_record["compliance_status"], "evidence_gap");
+    assert_eq!(
+        bridge_record["evidence_gap_reason"],
+        "bridge_originated_legacy_fields"
+    );
+    let dlq_record = records
+        .iter()
+        .find(|record| record["message_id"] == "msg-compliance-dlq" && record["kind"] == "dead_letter")
+        .expect("dead-letter compliance entry appears");
+    assert_eq!(dlq_record["compliance_status"], "complete");
+    let normal_record = records
+        .iter()
+        .find(|record| record["message_id"] == "msg-compliance-1" && record["kind"] == "envelope")
+        .expect("normal envelope compliance entry appears");
+    assert_eq!(normal_record["compliance_status"], "complete");
+    assert!(
+        normal_record["redacted_fields"]
+            .as_array()
+            .expect("redacted_fields array")
+            .iter()
+            .any(|value| value == "payload_content_type"),
+        "redacted markers preserve compliance status while remaining visible"
+    );
+}
+
+#[test]
+fn compliance_traceability_can_filter_by_correlation_id() {
+    let path = temp_evidence_path("compliance-filter");
+    seed_compliance_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "compliance",
+        "traceability",
+        "--evidence",
+        &path_str,
+        "--correlation-id",
+        "corr-compliance",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    let records = value["data"]["records"]
+        .as_array()
+        .expect("compliance records");
+    assert!(
+        records
+            .iter()
+            .all(|record| record["correlation_id"] == "corr-compliance"),
+        "correlation filter restricts the record set"
+    );
+    assert_eq!(value["data"]["filter"]["correlation_id"], "corr-compliance");
+}
+
+#[test]
+fn compliance_traceability_empty_store_reports_empty_status() {
+    let path = temp_evidence_path("compliance-empty");
+    FileEvidenceStore::open_evidence(&path).expect("empty evidence store opens");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "compliance",
+        "traceability",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["data"]["status"], "empty");
+    assert_eq!(value["data"]["totals"]["total"], 0);
+}
+
 fn temp_release_manifest(name: &str, body: &str) -> PathBuf {
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
