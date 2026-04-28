@@ -27,6 +27,9 @@ pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.st
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
+pub const AIRMF_HELP: &str = "zornmesh airmf\nMap evidence records to NIST AI RMF functions and categories.\n\nUsage: zornmesh airmf map [OPTIONS]\n\nOptions:\n      --evidence <PATH>          Read this evidence log\n      --correlation-id <ID>      Restrict the report to one correlation ID\n      --output <FORMAT>          Select human or json output\n  -h, --help                     Print help\n\nThe report classifies each evidence record under one of the AI RMF\nGovern, Map, Measure, or Manage functions, with a subcategory and\ncontrol reference where the mapping definition supports one. Records\nthat the mapping table does not cover are included with an explicit\nautomatic_mapping=unmapped flag rather than silently omitted; records\nlacking required metadata carry an evidence-gap reason. Every report\npins the mapping-definition version so prior fixtures stay\nreproducible across mapping updates.\n";
+const AIRMF_MAPPING_DEFINITION_VERSION: &str = "nist.ai-rmf.v1.0";
+const AIRMF_REPORT_SCHEMA_VERSION: &str = "zornmesh.airmf.report.v1";
 pub const REDACT_HELP: &str = "zornmesh redact\nApply append-only redaction proofs while preserving audit integrity.\n\nUsage: zornmesh redact apply --message-id <ID> --actor <ID> --policy-version <VERSION> --reason <TEXT> [OPTIONS]\n\nOptions:\n      --evidence <PATH>             Read this evidence log\n      --message-id <ID>             Scope redaction to this message\n      --actor <ID>                  Operator/actor identity authorising the redaction\n      --policy-version <VERSION>    Privacy/redaction policy version reference\n      --reason <TEXT>               Documented reason for the redaction\n      --preview                     Emit a preview without persisting evidence\n      --yes                         Confirm redaction without preview\n      --confirmation-token <TOKEN>  Confirm a previously previewed redaction\n      --output <FORMAT>             Select human or json output\n  -h, --help                        Print help\n\nA committed redaction appends a `redaction_applied` audit transition\ncarrying actor, policy version, reason, redaction scope, original\naudit hash anchors, and the daemon-sequence checkpoint. Existing\naudit-chain entries and prior hashes are never rewritten, deleted,\nor re-linked.\n";
 pub const EVIDENCE_HELP: &str = "zornmesh evidence\nExport self-contained evidence bundles for a time window.\n\nUsage: zornmesh evidence export [OPTIONS]\n\nOptions:\n      --evidence <PATH>          Read this evidence log\n      --release-manifest <PATH>  Include this release manifest in the bundle\n      --since <UNIX_MS>          Lower bound (inclusive) of the time window\n      --until <UNIX_MS>          Upper bound (inclusive) of the time window\n      --output <FORMAT>          Select human or json output\n  -h, --help                     Print help\n\nExports a single self-contained JSON bundle containing the audit-log\nslice, envelope and dead-letter records, release evidence (where\navailable), and a manifest enumerating included sections plus any\nevidence gaps. Raw secrets are never emitted; redaction markers remain\nvisible. Stable structured errors prevent partial bundles from being\nreported as complete.\n";
 pub const COMPLIANCE_HELP: &str = "zornmesh compliance\nAudit compliance traceability fields on evidence records.\n\nUsage: zornmesh compliance traceability [OPTIONS]\n\nOptions:\n      --evidence <PATH>           Read this evidence log\n      --correlation-id <ID>       Restrict to one correlation ID\n      --output <FORMAT>           Select human or json output\n  -h, --help                      Print help\n\nClassifies each persisted record as complete, partial, or evidence_gap\nbased on the AC-required traceability fields (agent identity, capability\nor subject, timestamp, correlation ID, trace ID, prior-message lineage).\nRedaction markers preserve compliance status; missing required fields\nproduce explicit evidence-gap reasons rather than silent completeness.\n";
@@ -53,7 +56,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -89,7 +92,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -109,7 +112,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -509,6 +512,8 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
             print_help("redact help", REDACT_HELP, invocation.output)
         }
         [command, rest @ ..] if command == "redact" => run_redact(rest, &invocation),
+        [command] if command == "airmf" => print_help("airmf help", AIRMF_HELP, invocation.output),
+        [command, rest @ ..] if command == "airmf" => run_airmf(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2890,6 +2895,344 @@ fn evaluate_replay_eligibility(
         return ("ineligible", Some("redaction_blocks_replay"));
     }
     ("eligible", None)
+}
+
+#[derive(Debug, Clone, Default)]
+struct AirmfOptions {
+    evidence_path: Option<PathBuf>,
+    correlation_id: Option<String>,
+}
+
+fn parse_airmf_options(args: &[String]) -> Result<AirmfOptions, CliError> {
+    let mut options = AirmfOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        let (key, value, advance) = if let Some((k, v)) = arg.split_once('=') {
+            (k.to_owned(), v.to_owned(), 1)
+        } else {
+            let value = inspect_option_value(args, index, arg)?.to_owned();
+            (arg.clone(), value, 2)
+        };
+        match key.as_str() {
+            "--evidence" | "--evidence-path" => {
+                options.evidence_path = Some(parse_non_empty_path(&key, &value)?);
+            }
+            "--correlation-id" => {
+                options.correlation_id = Some(parse_non_empty_string(&key, &value)?);
+            }
+            other => {
+                return Err(CliError::new(
+                    "E_UNSUPPORTED_COMMAND",
+                    format!("unsupported zornmesh airmf argument '{other}'"),
+                    ExitKind::UserError,
+                ));
+            }
+        }
+        index += advance;
+    }
+    Ok(options)
+}
+
+fn run_airmf(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("airmf help", AIRMF_HELP, invocation.output),
+        [flag] if is_help(flag) => print_help("airmf help", AIRMF_HELP, invocation.output),
+        [command, rest @ ..] if command == "map" => {
+            let options = parse_airmf_options(rest)?;
+            airmf_map(options, invocation.output)
+        }
+        [command, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh airmf subcommand '{command}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AirmfMapping {
+    function: &'static str,
+    category: &'static str,
+    control_ref: &'static str,
+}
+
+fn map_audit_action_to_airmf(action: &str) -> Option<AirmfMapping> {
+    match action {
+        "accepted_envelope" => Some(AirmfMapping {
+            function: "Map",
+            category: "MAP-1.1",
+            control_ref: "context-and-roles",
+        }),
+        "replay_requested" => Some(AirmfMapping {
+            function: "Manage",
+            category: "MANAGE-2.1",
+            control_ref: "risk-treatment-and-recovery",
+        }),
+        "redaction_applied" => Some(AirmfMapping {
+            function: "Govern",
+            category: "GOVERN-5.1",
+            control_ref: "data-privacy-and-protection",
+        }),
+        "dead_lettered" => Some(AirmfMapping {
+            function: "Measure",
+            category: "MEASURE-3.2",
+            control_ref: "incident-tracking",
+        }),
+        _ => None,
+    }
+}
+
+fn map_envelope_to_airmf(record: &EvidenceEnvelopeRecord) -> Option<AirmfMapping> {
+    match record.delivery_state() {
+        "accepted" | "delivered" | "acknowledged" => Some(AirmfMapping {
+            function: "Map",
+            category: "MAP-1.1",
+            control_ref: "context-and-roles",
+        }),
+        "dead_lettered" => Some(AirmfMapping {
+            function: "Measure",
+            category: "MEASURE-3.2",
+            control_ref: "incident-tracking",
+        }),
+        "replayed" => Some(AirmfMapping {
+            function: "Manage",
+            category: "MANAGE-2.1",
+            control_ref: "risk-treatment-and-recovery",
+        }),
+        "redaction_applied" => Some(AirmfMapping {
+            function: "Govern",
+            category: "GOVERN-5.1",
+            control_ref: "data-privacy-and-protection",
+        }),
+        _ => None,
+    }
+}
+
+fn map_dead_letter_to_airmf() -> AirmfMapping {
+    AirmfMapping {
+        function: "Measure",
+        category: "MEASURE-3.2",
+        control_ref: "incident-tracking",
+    }
+}
+
+fn airmf_record_evidence_gap(record_kind: &str, missing: &[&str]) -> Option<String> {
+    if missing.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{record_kind} missing required metadata: {}",
+            missing.join(",")
+        ))
+    }
+}
+
+fn airmf_map(options: AirmfOptions, output: OutputFormat) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("airmf map"));
+    }
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?.ok_or_else(|| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            ),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+    let store = FileEvidenceStore::open_evidence(&evidence_path).map_err(|error| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!("evidence store is unavailable: {error}"),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+
+    let envelopes = match options.correlation_id.as_deref() {
+        Some(id) => store.query_envelopes(EvidenceQuery::new().correlation_id(id)),
+        None => store.query_envelopes(EvidenceQuery::new()),
+    };
+    let dead_letters = match options.correlation_id.as_deref() {
+        Some(id) => store.query_dead_letters(DeadLetterQuery::new().correlation_id(id)),
+        None => store.query_dead_letters(DeadLetterQuery::new()),
+    };
+    let audit_entries = store.audit_entries();
+    let audit_filtered: Vec<&EvidenceAuditEntry> = match options.correlation_id.as_deref() {
+        Some(id) => audit_entries
+            .iter()
+            .filter(|entry| entry.correlation_id() == id)
+            .collect(),
+        None => audit_entries.iter().collect(),
+    };
+
+    let mut records = Vec::new();
+    let mut counts = AirmfCounts::default();
+
+    for envelope in &envelopes {
+        let mapping = map_envelope_to_airmf(envelope);
+        let mut missing: Vec<&str> = Vec::new();
+        if envelope.correlation_id().is_empty() {
+            missing.push("correlation_id");
+        }
+        if envelope.trace_id().is_empty() {
+            missing.push("trace_id");
+        }
+        if envelope.subject().is_empty() {
+            missing.push("subject");
+        }
+        let gap = airmf_record_evidence_gap("envelope", &missing);
+        let entry =
+            airmf_record_json("envelope", envelope.message_id(), envelope.subject(), mapping, gap.as_deref());
+        counts.tally(&entry);
+        records.push(entry);
+    }
+
+    for dead_letter in &dead_letters {
+        let mapping = Some(map_dead_letter_to_airmf());
+        let entry = airmf_record_json(
+            "dead_letter",
+            dead_letter.message_id(),
+            dead_letter.subject(),
+            mapping,
+            None,
+        );
+        counts.tally(&entry);
+        records.push(entry);
+    }
+
+    for entry in &audit_filtered {
+        let mapping = map_audit_action_to_airmf(entry.action());
+        let mut missing: Vec<&str> = Vec::new();
+        if entry.correlation_id().is_empty() {
+            missing.push("correlation_id");
+        }
+        if entry.trace_id().is_empty() {
+            missing.push("trace_id");
+        }
+        let gap = airmf_record_evidence_gap("audit", &missing);
+        let entry_json =
+            airmf_record_json("audit", entry.message_id(), entry.action(), mapping, gap.as_deref());
+        counts.tally(&entry_json);
+        records.push(entry_json);
+    }
+
+    let coverage = if counts.total() == 0 {
+        "empty"
+    } else if counts.unmapped == 0 && counts.evidence_gap == 0 {
+        "complete"
+    } else {
+        "partial"
+    };
+    let warnings: Vec<DiagnosticWarning> = if counts.unmapped > 0 || counts.evidence_gap > 0 {
+        vec![DiagnosticWarning::new(
+            "W_AIRMF_COVERAGE_INCOMPLETE",
+            format!(
+                "{} unmapped record(s), {} evidence_gap record(s); review before claiming control coverage",
+                counts.unmapped, counts.evidence_gap
+            ),
+        )]
+    } else {
+        Vec::new()
+    };
+
+    let generated_at_unix_ms = current_unix_ms_for_retention();
+    let data = serde_json::json!({
+        "schema_version": AIRMF_REPORT_SCHEMA_VERSION,
+        "mapping_definition_version": AIRMF_MAPPING_DEFINITION_VERSION,
+        "generated_at_unix_ms": generated_at_unix_ms,
+        "evidence_path": evidence_path.display().to_string(),
+        "filter": {"correlation_id": options.correlation_id},
+        "coverage": coverage,
+        "totals": {
+            "mapped": counts.mapped,
+            "unmapped": counts.unmapped,
+            "evidence_gap": counts.evidence_gap,
+            "total": counts.total(),
+        },
+        "records": records,
+    });
+
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "airmf map: coverage={} mapping_version={} mapped={} unmapped={} evidence_gap={} total={}",
+                coverage,
+                AIRMF_MAPPING_DEFINITION_VERSION,
+                counts.mapped,
+                counts.unmapped,
+                counts.evidence_gap,
+                counts.total(),
+            );
+            for warning in &warnings {
+                eprintln!("{}: {}", warning.code, warning.message);
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "airmf",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before airmf rendering"),
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct AirmfCounts {
+    mapped: usize,
+    unmapped: usize,
+    evidence_gap: usize,
+}
+
+impl AirmfCounts {
+    fn tally(&mut self, entry: &serde_json::Value) {
+        match entry["automatic_mapping"].as_str() {
+            Some("mapped") => self.mapped += 1,
+            Some("unmapped") => self.unmapped += 1,
+            Some("evidence_gap") => self.evidence_gap += 1,
+            _ => {}
+        }
+    }
+    fn total(&self) -> usize {
+        self.mapped + self.unmapped + self.evidence_gap
+    }
+}
+
+fn airmf_record_json(
+    kind: &str,
+    message_id: &str,
+    subject_or_action: &str,
+    mapping: Option<AirmfMapping>,
+    evidence_gap_reason: Option<&str>,
+) -> serde_json::Value {
+    let automatic_mapping = if evidence_gap_reason.is_some() {
+        "evidence_gap"
+    } else if mapping.is_some() {
+        "mapped"
+    } else {
+        "unmapped"
+    };
+    serde_json::json!({
+        "kind": kind,
+        "message_id": message_id,
+        "subject_or_action": subject_or_action,
+        "automatic_mapping": automatic_mapping,
+        "mapping": mapping.map(|m| serde_json::json!({
+            "function": m.function,
+            "category": m.category,
+            "control_ref": m.control_ref,
+        })),
+        "evidence_gap_reason": evidence_gap_reason,
+    })
 }
 
 #[derive(Debug, Clone, Default)]

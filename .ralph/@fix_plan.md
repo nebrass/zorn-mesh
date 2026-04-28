@@ -54,17 +54,7 @@
 - [x] Story 5.2: Enforce Compliance Traceability Fields on Envelopes
 - [x] Story 5.3: Export Evidence Bundle for a Time Window
 - [x] Story 5.4: Redact Personal Data While Preserving Audit Integrity
-  > As a subject data owner or compliance reviewer
-  > I want personal data referenced in envelopes to be redacted through a documented procedure
-  > So that privacy obligations can be met without destroying audit-chain integrity.
-  > AC: Given a documented redaction request identifies a subject, time window, correlation ID, or record scope, When the operator runs the redaction command, Then matching personal-data fields are replaced with redaction markers, And non-personal traceability fields such as correlation IDs, trace IDs, timestamps, and lineage remain available where policy permits.
-  > AC: Given redaction affects audit-relevant records, When the redaction is applied, Then existing audit-chain entries and prior hashes are never rewritten, deleted, or re-linked, And redaction is represented by append-only tombstone/redaction-marker records, a durable scope checkpoint, and a `REDACTION_APPLIED` proof record referencing original record IDs/hashes, actor, timestamp, policy/version, and redaction scope., And offline audit verification validates chain continuity through the checkpoint/proof records and distinguishes authorized redaction from missing, deleted, reordered, or tampered rows.
-  > AC: Given matching records are being written while a redaction request runs, When redaction begins, Then the operation establishes a durable cutoff/checkpoint for the redaction scope, And records at or before the checkpoint are redacted or explicitly refused atomically, while post-checkpoint matching records are blocked, queued for follow-up, or reported as requiring a subsequent redaction run., And no in-flight matching record can silently bypass redaction.
-  > AC: Given the requested redaction scope is invalid, too broad, outside retention, or conflicts with immutable evidence policy, When redaction is requested, Then the command returns a stable refusal or evidence-gap result, And no partial redaction is reported as complete.
-  > AC: Given redacted records are later inspected, traced, exported, or dead-lettered, When those surfaces render the records, Then redaction markers appear consistently, And raw personal data does not reappear from cached, indexed, or derived fields.
-  > AC: Given redaction tests run, When valid redaction, invalid scope, retention gap, authorized redaction proof, unauthorized tamper attempt, concurrent matching write, checkpoint cutoff, post-checkpoint follow-up required, trace after redaction, export after redaction, and cache/index scenarios execute, Then redaction behavior is deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-5-4
-- [ ] Story 5.5: Map Envelopes to NIST AI RMF Functions and Categories
+- [x] Story 5.5: Map Envelopes to NIST AI RMF Functions and Categories
   > As a risk reviewer
   > I want local mesh events mapped to NIST AI RMF functions and categories
   > So that audits can connect concrete runtime evidence to recognized AI risk-management controls.

@@ -18,6 +18,7 @@ Commands:
   compliance  Audit compliance traceability fields on evidence records
   evidence  Export self-contained evidence bundles for a time window
   redact    Apply append-only redaction proofs while preserving audit integrity
+  airmf     Map evidence records to NIST AI RMF functions and categories
   completion  Generate shell completions
   help     Print command help
 

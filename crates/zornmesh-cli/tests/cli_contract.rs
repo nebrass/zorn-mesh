@@ -2455,6 +2455,181 @@ fn retention_plan_max_count_marks_oldest_envelopes_for_purge() {
     );
 }
 
+fn seed_airmf_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("airmf evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/sender",
+                    "mesh.airmf.created",
+                    "corr-airmf",
+                    1_700_000_001_100,
+                ),
+                "msg-airmf-1",
+                "trace-airmf",
+                "accepted",
+            )
+            .expect("airmf envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("airmf envelope persists");
+}
+
+#[test]
+fn airmf_map_returns_complete_coverage_with_pinned_mapping_version() {
+    let path = temp_evidence_path("airmf-complete");
+    seed_airmf_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "airmf",
+        "map",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "airmf");
+    assert_eq!(value["data"]["mapping_definition_version"], "nist.ai-rmf.v1.0");
+    assert_eq!(value["data"]["schema_version"], "zornmesh.airmf.report.v1");
+    assert_eq!(value["data"]["coverage"], "complete");
+    assert!(value["data"]["totals"]["mapped"].as_u64().unwrap() >= 2);
+    assert_eq!(value["data"]["totals"]["unmapped"], 0);
+    assert_eq!(value["data"]["totals"]["evidence_gap"], 0);
+
+    let records = value["data"]["records"]
+        .as_array()
+        .expect("airmf records");
+    let envelope = records
+        .iter()
+        .find(|record| record["message_id"] == "msg-airmf-1" && record["kind"] == "envelope")
+        .expect("envelope record present");
+    assert_eq!(envelope["automatic_mapping"], "mapped");
+    assert_eq!(envelope["mapping"]["function"], "Map");
+    assert_eq!(envelope["mapping"]["category"], "MAP-1.1");
+    assert_eq!(envelope["mapping"]["control_ref"], "context-and-roles");
+}
+
+#[test]
+fn airmf_map_marks_unmapped_records_explicitly() {
+    let path = temp_evidence_path("airmf-unmapped");
+    let store = FileEvidenceStore::open_evidence(&path).expect("airmf evidence store opens");
+    let envelope = evidence_envelope(
+        "agent.local/sender",
+        "mesh.airmf.unknown",
+        "corr-airmf-unknown",
+        1_700_000_001_200,
+    );
+    let request = store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                envelope,
+                "msg-airmf-unknown",
+                "trace-airmf-unknown",
+                "accepted",
+            )
+            .expect("airmf envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("airmf envelope persists");
+    transition(
+        &store,
+        TransitionSeed {
+            daemon_sequence: request.envelope().daemon_sequence(),
+            message_id: "msg-airmf-unknown",
+            actor: "agent.local/sender",
+            action: "experimental_signal",
+            subject: "mesh.airmf.unknown",
+            correlation_id: "corr-airmf-unknown",
+            trace_id: "trace-airmf-unknown",
+            state_from: "accepted",
+            state_to: "experimental",
+            details: "no AI RMF mapping yet",
+        },
+    );
+
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+    let output = zornmesh(&[
+        "airmf",
+        "map",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["data"]["coverage"], "partial");
+    let records = value["data"]["records"]
+        .as_array()
+        .expect("airmf records");
+    let unmapped = records
+        .iter()
+        .find(|record| {
+            record["kind"] == "audit" && record["subject_or_action"] == "experimental_signal"
+        })
+        .expect("audit row appears");
+    assert_eq!(unmapped["automatic_mapping"], "unmapped");
+    assert!(unmapped["mapping"].is_null());
+    assert!(
+        value["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .iter()
+            .any(|warning| warning["code"] == "W_AIRMF_COVERAGE_INCOMPLETE"),
+        "incomplete coverage emits a stable warning"
+    );
+}
+
+#[test]
+fn airmf_map_empty_store_reports_empty_coverage() {
+    let path = temp_evidence_path("airmf-empty");
+    FileEvidenceStore::open_evidence(&path).expect("evidence store opens");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "airmf",
+        "map",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["data"]["coverage"], "empty");
+    assert_eq!(value["data"]["totals"]["total"], 0);
+    assert_eq!(value["data"]["mapping_definition_version"], "nist.ai-rmf.v1.0");
+}
+
+#[test]
+fn airmf_map_correlation_filter_restricts_records() {
+    let path = temp_evidence_path("airmf-filter");
+    seed_airmf_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "airmf",
+        "map",
+        "--evidence",
+        &path_str,
+        "--correlation-id",
+        "corr-airmf",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["data"]["filter"]["correlation_id"], "corr-airmf");
+    let records = value["data"]["records"]
+        .as_array()
+        .expect("airmf records");
+    assert!(!records.is_empty());
+}
+
 fn seed_redact_evidence(path: &std::path::Path) {
     let store = FileEvidenceStore::open_evidence(path).expect("redact evidence store opens");
     store
