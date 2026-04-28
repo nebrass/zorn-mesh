@@ -7320,6 +7320,418 @@ pub fn ui_referrer_policy() -> &'static str {
     UI_REFERRER_POLICY
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum RosterStatus {
+    Active,
+    Stale,
+    Errored,
+    Disconnected,
+    Reconnecting,
+    Unknown,
+}
+
+impl RosterStatus {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Stale => "stale",
+            Self::Errored => "errored",
+            Self::Disconnected => "disconnected",
+            Self::Reconnecting => "reconnecting",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum RosterTransport {
+    NativeSdk,
+    McpStdio,
+    Unknown,
+}
+
+impl RosterTransport {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeSdk => "native_sdk",
+            Self::McpStdio => "mcp_stdio",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum RosterPanelCondition {
+    Ready,
+    Empty,
+    Loading,
+    Stale,
+    Degraded,
+    Unavailable,
+    SessionExpired,
+}
+
+impl RosterPanelCondition {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Empty => "empty",
+            Self::Loading => "loading",
+            Self::Stale => "stale",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::SessionExpired => "session_expired",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct RosterEntry {
+    pub display_name: String,
+    pub agent_id: String,
+    pub status: RosterStatus,
+    pub transport: RosterTransport,
+    pub capability_summary: Vec<String>,
+    pub last_seen_unix_ms: u64,
+    pub recent_activity_count: u32,
+    pub warnings: Vec<&'static str>,
+    pub high_privilege_required: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub(crate) struct RosterFilter {
+    pub query: Option<String>,
+    pub status: Option<RosterStatus>,
+    pub transport: Option<RosterTransport>,
+    pub capability: Option<String>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct RosterSnapshot {
+    pub condition: RosterPanelCondition,
+    pub next_action: Option<&'static str>,
+    pub entries: Vec<RosterEntry>,
+    pub mapping_version: &'static str,
+}
+
+#[allow(dead_code)]
+impl RosterSnapshot {
+    pub(crate) fn ready(entries: Vec<RosterEntry>) -> Self {
+        let condition = if entries.is_empty() {
+            RosterPanelCondition::Empty
+        } else {
+            RosterPanelCondition::Ready
+        };
+        let next_action = match condition {
+            RosterPanelCondition::Empty => Some("connect_an_agent_or_inspect_doctor"),
+            _ => None,
+        };
+        Self {
+            condition,
+            next_action,
+            entries,
+            mapping_version: "zornmesh.ui.roster.v1",
+        }
+    }
+
+    pub(crate) fn unavailable(reason: &'static str) -> Self {
+        Self {
+            condition: RosterPanelCondition::Unavailable,
+            next_action: Some(reason),
+            entries: Vec::new(),
+            mapping_version: "zornmesh.ui.roster.v1",
+        }
+    }
+
+    pub(crate) fn session_expired() -> Self {
+        Self {
+            condition: RosterPanelCondition::SessionExpired,
+            next_action: Some("rerun_zornmesh_ui_to_renew_session"),
+            entries: Vec::new(),
+            mapping_version: "zornmesh.ui.roster.v1",
+        }
+    }
+
+    pub(crate) fn filter(self, filter: &RosterFilter) -> Self {
+        let entries = self
+            .entries
+            .into_iter()
+            .filter(|entry| filter_matches(entry, filter))
+            .collect::<Vec<_>>();
+        let condition = if entries.is_empty()
+            && self.condition == RosterPanelCondition::Ready
+        {
+            RosterPanelCondition::Empty
+        } else {
+            self.condition
+        };
+        Self {
+            condition,
+            next_action: self.next_action,
+            entries,
+            mapping_version: self.mapping_version,
+        }
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": self.mapping_version,
+            "condition": self.condition.as_str(),
+            "next_action": self.next_action,
+            "entries": self.entries.iter().map(|entry| serde_json::json!({
+                "display_name": entry.display_name,
+                "agent_id": entry.agent_id,
+                "status": entry.status.as_str(),
+                "transport": entry.transport.as_str(),
+                "capability_summary": entry.capability_summary,
+                "last_seen_unix_ms": entry.last_seen_unix_ms,
+                "recent_activity_count": entry.recent_activity_count,
+                "warnings": entry.warnings,
+                "high_privilege_required": entry.high_privilege_required,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[allow(dead_code)]
+fn filter_matches(entry: &RosterEntry, filter: &RosterFilter) -> bool {
+    if let Some(query) = filter.query.as_deref() {
+        let needle = query.to_ascii_lowercase();
+        let haystack = format!(
+            "{} {} {}",
+            entry.display_name.to_ascii_lowercase(),
+            entry.agent_id.to_ascii_lowercase(),
+            entry
+                .capability_summary
+                .iter()
+                .map(|cap| cap.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        if !haystack.contains(&needle) {
+            return false;
+        }
+    }
+    if let Some(status) = filter.status
+        && entry.status != status
+    {
+        return false;
+    }
+    if let Some(transport) = filter.transport
+        && entry.transport != transport
+    {
+        return false;
+    }
+    if let Some(capability) = filter.capability.as_deref()
+        && !entry
+            .capability_summary
+            .iter()
+            .any(|cap| cap.eq_ignore_ascii_case(capability))
+    {
+        return false;
+    }
+    if let Some(warning) = filter.warning.as_deref()
+        && !entry
+            .warnings
+            .iter()
+            .any(|cap| cap.eq_ignore_ascii_case(warning))
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod roster_tests {
+    use super::*;
+
+    fn entry(
+        display: &str,
+        id: &str,
+        status: RosterStatus,
+        transport: RosterTransport,
+    ) -> RosterEntry {
+        RosterEntry {
+            display_name: display.to_owned(),
+            agent_id: id.to_owned(),
+            status,
+            transport,
+            capability_summary: vec!["mesh.basic.send".to_owned()],
+            last_seen_unix_ms: 1_700_000_000_000,
+            recent_activity_count: 3,
+            warnings: Vec::new(),
+            high_privilege_required: false,
+        }
+    }
+
+    #[test]
+    fn empty_snapshot_marks_empty_condition_with_next_action() {
+        let snapshot = RosterSnapshot::ready(Vec::new());
+        assert_eq!(snapshot.condition, RosterPanelCondition::Empty);
+        assert!(snapshot.next_action.is_some());
+        let json = snapshot.to_json();
+        assert_eq!(json["condition"], "empty");
+        assert_eq!(json["entries"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn ready_snapshot_distinguishes_status_and_transport_for_each_entry() {
+        let snapshot = RosterSnapshot::ready(vec![
+            entry(
+                "alice",
+                "agent.local/alice",
+                RosterStatus::Active,
+                RosterTransport::NativeSdk,
+            ),
+            entry(
+                "bob",
+                "agent.local/bob",
+                RosterStatus::Stale,
+                RosterTransport::McpStdio,
+            ),
+            entry(
+                "carol",
+                "agent.local/carol",
+                RosterStatus::Disconnected,
+                RosterTransport::NativeSdk,
+            ),
+        ]);
+        assert_eq!(snapshot.condition, RosterPanelCondition::Ready);
+        let statuses: Vec<&str> = snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.status.as_str())
+            .collect();
+        assert_eq!(statuses, vec!["active", "stale", "disconnected"]);
+        let transports: Vec<&str> = snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.transport.as_str())
+            .collect();
+        assert_eq!(transports, vec!["native_sdk", "mcp_stdio", "native_sdk"]);
+    }
+
+    #[test]
+    fn high_privilege_warning_surfaces_without_enabling_unsafe_actions() {
+        let mut high_priv = entry(
+            "ops",
+            "agent.local/ops",
+            RosterStatus::Active,
+            RosterTransport::NativeSdk,
+        );
+        high_priv.high_privilege_required = true;
+        high_priv.warnings.push("high_privilege_capability_present");
+        let snapshot = RosterSnapshot::ready(vec![high_priv]);
+        let json = snapshot.to_json();
+        assert_eq!(json["entries"][0]["high_privilege_required"], true);
+        let warnings = json["entries"][0]["warnings"].as_array().unwrap();
+        assert!(warnings.iter().any(|w| w == "high_privilege_capability_present"));
+    }
+
+    #[test]
+    fn filter_by_query_matches_id_name_and_capability() {
+        let snapshot = RosterSnapshot::ready(vec![
+            entry(
+                "Alice",
+                "agent.local/alice",
+                RosterStatus::Active,
+                RosterTransport::NativeSdk,
+            ),
+            entry(
+                "Bob",
+                "agent.local/bob",
+                RosterStatus::Active,
+                RosterTransport::NativeSdk,
+            ),
+        ]);
+        let by_name = snapshot.clone().filter(&RosterFilter {
+            query: Some("alice".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(by_name.entries.len(), 1);
+        assert_eq!(by_name.entries[0].agent_id, "agent.local/alice");
+
+        let by_capability = snapshot.filter(&RosterFilter {
+            capability: Some("mesh.basic.send".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(by_capability.entries.len(), 2);
+    }
+
+    #[test]
+    fn filter_keeping_no_entries_marks_empty_panel() {
+        let snapshot = RosterSnapshot::ready(vec![entry(
+            "alice",
+            "agent.local/alice",
+            RosterStatus::Active,
+            RosterTransport::NativeSdk,
+        )]);
+        let filtered = snapshot.filter(&RosterFilter {
+            query: Some("nonexistent".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(filtered.condition, RosterPanelCondition::Empty);
+    }
+
+    #[test]
+    fn unavailable_and_session_expired_states_render_persistent_panels() {
+        let unavailable = RosterSnapshot::unavailable("daemon_unreachable");
+        assert_eq!(unavailable.condition, RosterPanelCondition::Unavailable);
+        assert_eq!(unavailable.next_action, Some("daemon_unreachable"));
+        assert_eq!(unavailable.to_json()["condition"], "unavailable");
+
+        let expired = RosterSnapshot::session_expired();
+        assert_eq!(expired.condition, RosterPanelCondition::SessionExpired);
+        assert_eq!(expired.to_json()["condition"], "session_expired");
+        assert!(expired.next_action.is_some());
+    }
+
+    #[test]
+    fn filter_by_status_and_transport_isolates_categories() {
+        let snapshot = RosterSnapshot::ready(vec![
+            entry(
+                "alice",
+                "agent.local/alice",
+                RosterStatus::Active,
+                RosterTransport::NativeSdk,
+            ),
+            entry(
+                "bob",
+                "agent.local/bob",
+                RosterStatus::Stale,
+                RosterTransport::McpStdio,
+            ),
+        ]);
+        let stale_only = snapshot.clone().filter(&RosterFilter {
+            status: Some(RosterStatus::Stale),
+            ..Default::default()
+        });
+        assert_eq!(stale_only.entries.len(), 1);
+        assert_eq!(stale_only.entries[0].agent_id, "agent.local/bob");
+
+        let mcp_only = snapshot.filter(&RosterFilter {
+            transport: Some(RosterTransport::McpStdio),
+            ..Default::default()
+        });
+        assert_eq!(mcp_only.entries.len(), 1);
+        assert_eq!(mcp_only.entries[0].agent_id, "agent.local/bob");
+    }
+
+    #[test]
+    fn schema_version_pins_roster_contract() {
+        let snapshot = RosterSnapshot::ready(Vec::new());
+        assert_eq!(snapshot.mapping_version, "zornmesh.ui.roster.v1");
+        assert_eq!(snapshot.to_json()["schema_version"], "zornmesh.ui.roster.v1");
+    }
+}
+
 #[cfg(test)]
 mod ui_tests {
     use super::*;

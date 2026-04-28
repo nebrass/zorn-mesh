@@ -60,18 +60,7 @@
 
 - [x] Story 6.1: Verify Local UI Architecture, Pin Framework Wording, and Scaffold Local Web App Shell
 - [x] Story 6.2: Launch Protected Loopback UI with Offline Assets
-  > As a developer
-  > I want `zornmesh ui` to launch a protected local web UI
-  > So that I can inspect and operate the mesh from a browser without exposing the control surface beyond my machine.
-  > AC: Given the local daemon is available and the UI feature is enabled, When the developer runs `zornmesh ui`, Then the command starts or connects to the local UI server on loopback only, And it either opens a browser window or prints a protected loopback URL suitable for copy/paste.
-  > AC: Given the preferred UI port is already bound by another process, When `zornmesh ui` starts, Then the command either selects a documented alternate loopback port or fails with a stable `UI_PORT_IN_USE` error and remediation, And it never sends session tokens to, proxies through, or treats the existing process as trusted.
-  > AC: Given the browser opens the local UI URL, When the session is established, Then access requires a per-launch high-entropy session token or one-time code with bounded lifetime, server-side revocation on shutdown/expiry, and no persistence in localStorage, And token-bearing material is removed from browser history after exchange, omitted from logs/audit payloads/CLI handoff text, protected with `Referrer-Policy: no-referrer`, and not leaked through referrer headers.
-  > AC: Given browser requests reach the UI API or live event transport, When HTTP, WebSocket, or SSE requests are made, Then CORS denies by default except the exact loopback origin, Origin/Host checks fail closed, and WebSocket/SSE upgrades require the same session protection as HTTP, And state-changing requests require CSRF protection bound to the server-side session and derive actor/session identity on the server rather than trusting browser-supplied actor fields.
-  > AC: Given UI assets are served, When the browser loads the app, Then JavaScript, CSS, fonts, icons, and fixture assets are bundled for offline use, And the app makes no external browser network requests for runtime assets, telemetry, fonts, or analytics.
-  > AC: Given the daemon, session, or local trust state changes, When the UI shell renders status chrome, Then it displays daemon health, loopback-only status, session protection, socket path, schema version, bundled/offline asset indicator, and stale/disconnected/session-expired warnings, And critical status is communicated with text/icon/shape, not color alone.
-  > AC: Given launch and security tests run, When open-browser, printed-URL, port in use, invalid token, missing token, token expiry, token history cleanup, referrer leak prevention, unsafe origin, CORS rejection, CSRF failure, WebSocket/SSE unauthenticated upgrade, actor/session binding, non-loopback bind attempt, offline asset, and daemon-unavailable scenarios execute, Then launch behavior and failures are deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-6-2
-- [ ] Story 6.3: Render Live Agent Roster and Local Trust Status
+- [x] Story 6.3: Render Live Agent Roster and Local Trust Status
   > As a developer
   > I want the Live Mesh Control Room to show connected agents and daemon trust state
   > So that I can quickly understand who is participating in the local mesh and whether the control room is safe to use.
