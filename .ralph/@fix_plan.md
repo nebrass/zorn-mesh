@@ -55,21 +55,10 @@
 - [x] Story 5.3: Export Evidence Bundle for a Time Window
 - [x] Story 5.4: Redact Personal Data While Preserving Audit Integrity
 - [x] Story 5.5: Map Envelopes to NIST AI RMF Functions and Categories
-  > As a risk reviewer
-  > I want local mesh events mapped to NIST AI RMF functions and categories
-  > So that audits can connect concrete runtime evidence to recognized AI risk-management controls.
-  > AC: Given envelopes, audit events, capability decisions, redaction events, and release evidence are persisted, When the reviewer runs the AI RMF mapping report, Then each included evidence type is mapped to the applicable Govern, Map, Measure, and Manage function/category references, And unmapped evidence is explicitly marked rather than silently omitted.
-  > AC: Given an evidence record lacks required metadata for a confident AI RMF mapping, When the report is generated, Then the record is included with an evidence-gap reason, And the report does not claim full control coverage for that record.
-  > AC: Given AI RMF mapping definitions are versioned, When the report is generated, Then the output records the mapping-definition version, schema version, generation time, and input evidence window, And prior fixtures remain reproducible across mapping-definition updates.
-  > AC: Given an authorized reviewer needs to override an unmapped or incorrect AI RMF mapping, When the reviewer submits a manual override, Then the workflow requires actor identity, evidence reference, previous mapping, requested mapping, mapping-definition version, reason, timestamp, and review/expiry status, And the override validates that the target function/category exists without modifying the original evidence record.
-  > AC: Given a manual AI RMF override is accepted, rejected, expired, or superseded, When audit evidence is persisted, Then an append-only audit record captures actor/session, source evidence ID, before/after mapping, reason, mapping-definition version, decision outcome, and timestamp, And reports distinguish automatic mappings, manual overrides, unmapped evidence, and evidence-gap records.
-  > AC: Given the report is exported as part of a compliance bundle, When the evidence bundle is opened offline, Then AI RMF mappings, evidence gaps, and source trace references are reviewable without network access, And redacted records preserve mapping context without exposing raw protected data.
-  > AC: Given AI RMF mapping tests run, When complete coverage, unmapped evidence, missing metadata, mapping-version drift, redacted records, manual override accepted, manual override rejected, override audit log, override version drift, and offline bundle scenarios execute, Then mapping output is deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-5-5
 ### Local Web Control Room and Safe Intervention
 > Goal: Developers can open the local UI, observe connected agents, inspect trace chronology, send direct/broadcast messages safely, confirm outcomes, reconnect/backfill, and copy CLI handoffs. **Dependency gate:** Epic 6 is not implementation-ready, and Stories 6.2-6.9 must not begin, until Story 6.1 (a) verifies and references — by section — the existing v0.1 local UI architecture amendment that already supersedes earlier no-GUI/frontend/static-asset text, (b) pins the local UI framework wording so no Node-served runtime, hosted serving model, or remote-asset dependency can enter v0.1, and (c) scaffolds the local web app shell, shared UI/API taxonomies, component fixture baseline, and scope-boundary checks against that referenced architecture.
 
-- [ ] Story 6.1: Verify Local UI Architecture, Pin Framework Wording, and Scaffold Local Web App Shell
+- [x] Story 6.1: Verify Local UI Architecture, Pin Framework Wording, and Scaffold Local Web App Shell
   > As a developer
   > I want Story 6.1 to verify the existing local UI architecture amendment, pin the framework wording, and scaffold the local web app shell before feature work begins
   > So that implementation follows the validated PRD/UX/architecture scope and v0.1 cannot silently introduce a Node-served runtime, hosted serving model, or remote-asset dependency.
