@@ -14,6 +14,7 @@ Commands:
   replay   Redeliver a previously sent envelope by message ID
   retention Plan retention purges and surface retention gaps
   audit    Verify the audit log hash chain offline
+  release  Verify release signatures and inspect SBOM evidence
   completion  Generate shell completions
   help     Print command help
 

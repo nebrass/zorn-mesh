@@ -2455,6 +2455,211 @@ fn retention_plan_max_count_marks_oldest_envelopes_for_purge() {
     );
 }
 
+fn temp_release_manifest(name: &str, body: &str) -> PathBuf {
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "zornmesh-cli-release-{name}-{}-{id}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("temp release dir created");
+    let path = dir.join("manifest.json");
+    fs::write(&path, body).expect("temp release manifest written");
+    path
+}
+
+const VERIFIED_RELEASE_MANIFEST: &str = r#"{
+  "schema_version": "zornmesh.release.v1",
+  "version": "0.1.0",
+  "artifact": {"path": "/opt/zornmesh/bin/zornmesh", "digest": "sha256:abc"},
+  "signature": {
+    "path": "/opt/zornmesh/bin/zornmesh.sig",
+    "status": "verified",
+    "issuer": "https://fulcio.sigstore.dev",
+    "transparency_log_index": "12345"
+  },
+  "sbom": {
+    "path": "/opt/zornmesh/share/sbom.cdx.json",
+    "format": "cyclonedx-json",
+    "status": "available",
+    "components_count": 42,
+    "generated_at": "build"
+  }
+}
+"#;
+
+#[test]
+fn release_verify_reports_verified_for_signed_artifact() {
+    let manifest = temp_release_manifest("verified", VERIFIED_RELEASE_MANIFEST);
+    let manifest_str = manifest.to_str().expect("manifest path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "release",
+        "verify",
+        "--manifest",
+        &manifest_str,
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "release");
+    assert_eq!(value["data"]["status"], "verified");
+    assert_eq!(value["data"]["signature_status"], "verified");
+    assert_eq!(value["data"]["issuer"], "https://fulcio.sigstore.dev");
+    assert_eq!(value["data"]["transparency_log_index"], "12345");
+    assert!(
+        value["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .is_empty(),
+        "verified releases emit no warnings"
+    );
+}
+
+#[test]
+fn release_verify_reports_missing_signature_with_not_found_exit() {
+    let manifest = temp_release_manifest(
+        "missing-sig",
+        r#"{
+          "schema_version": "zornmesh.release.v1",
+          "artifact": {"path": "/opt/zornmesh/bin/zornmesh"},
+          "signature": {"status": "missing"}
+        }"#,
+    );
+    let manifest_str = manifest.to_str().expect("manifest path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "release",
+        "verify",
+        "--manifest",
+        &manifest_str,
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(66));
+    assert!(stderr(&output).contains("E_RELEASE_SIGNATURE_MISSING"));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("structured outcome on stdout");
+    assert_eq!(value["data"]["status"], "missing_signature");
+}
+
+#[test]
+fn release_verify_reports_mismatch_with_validation_exit() {
+    let manifest = temp_release_manifest(
+        "mismatch",
+        r#"{
+          "schema_version": "zornmesh.release.v1",
+          "artifact": {"path": "/opt/zornmesh/bin/zornmesh"},
+          "signature": {"status": "mismatch", "path": "/opt/zornmesh/bin/zornmesh.sig"}
+        }"#,
+    );
+    let manifest_str = manifest.to_str().expect("manifest path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "release",
+        "verify",
+        "--manifest",
+        &manifest_str,
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_RELEASE_SIGNATURE_MISMATCH"));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("structured outcome on stdout");
+    assert_eq!(value["data"]["status"], "mismatch");
+}
+
+#[test]
+fn release_verify_reports_unverifiable_when_manifest_missing() {
+    let dir = std::env::temp_dir().join(format!(
+        "zornmesh-release-missing-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos(),
+    ));
+    let manifest = dir.join("manifest.json");
+    let manifest_str = manifest.to_str().expect("manifest path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "release",
+        "verify",
+        "--manifest",
+        &manifest_str,
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_RELEASE_MANIFEST_MISSING"));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("structured outcome on stdout");
+    assert_eq!(value["data"]["status"], "unverifiable");
+}
+
+#[test]
+fn release_sbom_returns_cyclonedx_metadata_when_available() {
+    let manifest = temp_release_manifest("sbom-available", VERIFIED_RELEASE_MANIFEST);
+    let manifest_str = manifest.to_str().expect("manifest path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "release",
+        "sbom",
+        "--manifest",
+        &manifest_str,
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "release");
+    assert_eq!(value["data"]["status"], "available");
+    assert_eq!(value["data"]["format"], "cyclonedx-json");
+    assert_eq!(value["data"]["components_count"], 42);
+    assert_eq!(value["data"]["generated_at"], "build");
+}
+
+#[test]
+fn release_sbom_reports_unavailable_for_source_built_install() {
+    let manifest = temp_release_manifest(
+        "sbom-source",
+        r#"{
+          "schema_version": "zornmesh.release.v1",
+          "artifact": {"path": "/usr/local/bin/zornmesh"},
+          "signature": {"status": "missing"},
+          "sbom": {"status": "unavailable", "reason": "source_built_install"}
+        }"#,
+    );
+    let manifest_str = manifest.to_str().expect("manifest path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "release",
+        "sbom",
+        "--manifest",
+        &manifest_str,
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["data"]["status"], "unavailable");
+    assert!(
+        value["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .iter()
+            .any(|warning| warning["code"] == "W_RELEASE_SBOM_UNAVAILABLE"),
+        "source-built install signals SBOM unavailability"
+    );
+}
+
 fn seed_audit_evidence(path: &std::path::Path) {
     let store = FileEvidenceStore::open_evidence(path).expect("audit evidence store opens");
     store

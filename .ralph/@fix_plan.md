@@ -47,20 +47,10 @@
 - [x] Story 4.8: Redeliver Previously Sent Envelopes Safely
 - [x] Story 4.9: Configure Retention and Surface Retention Gaps
 - [x] Story 4.10: Verify Audit Log Tamper Evidence Offline
-  > As a compliance-minded developer or operator
-  > I want to verify the audit log hash chain without a running daemon
-  > So that I can prove local evidence has not been silently modified.
-  > AC: Given audit entries have been written by the daemon, When the operator runs offline audit verification against the local audit store, Then the verifier walks the audit hash chain and reports valid, tampered, incomplete, or unreadable status, And the command does not require daemon access.
-  > AC: Given a single audit row is modified, removed, reordered, or replaced, When offline verification runs, Then verification detects the tamper condition and reports the first detected break with safe diagnostics, And the command exits with a stable verification-failed exit code.
-  > AC: Given audit entries include redacted or personal-data-handling markers, When verification runs, Then redaction markers preserve chain verifiability, And raw secret values are not required or emitted by the verifier.
-  > AC: Given audit retention checkpoints or tombstones exist, When offline verification walks the audit store, Then the verifier preserves hash-chain continuity across retained segments, And reports valid retention gaps separately from tamper, corruption, or missing data.
-  > AC: Given the audit store is missing, locked, unreadable, or from an unsupported future schema, When verification runs, Then the command returns a stable structured error, And remediation text distinguishes missing data from tamper evidence.
-  > AC: Given audit verification tests run, When valid chain, modified row, deleted row, reordered row, redacted chain, retention checkpoint, valid retention gap, missing store, and unsupported schema scenarios execute, Then offline verification behavior is deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-4-10
 ### Compliance, Audit, and Release Trust Evidence
 > Goal: Operators and compliance reviewers can verify release integrity, export evidence, prove audit-log integrity, handle redaction/deletion, and map events to required AI-risk/compliance frameworks.
 
-- [ ] Story 5.1: Produce and Verify Release Signatures, SBOMs, and Reproducibility Evidence
+- [x] Story 5.1: Produce and Verify Release Signatures, SBOMs, and Reproducibility Evidence
   > As an operator
   > I want to verify the installed `zornmesh` artifact signature and retrieve its SBOM
   > So that I can trust what binary or SDK package is running in my local environment.

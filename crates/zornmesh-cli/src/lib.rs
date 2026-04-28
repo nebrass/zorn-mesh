@@ -27,6 +27,8 @@ pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.st
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
+pub const RELEASE_HELP: &str = "zornmesh release\nVerify release signatures and inspect SBOM evidence.\n\nUsage: zornmesh release verify [OPTIONS]\n       zornmesh release sbom   [OPTIONS]\n\nOptions:\n      --manifest <PATH>  Read this release evidence manifest\n      --output <FORMAT>  Select human or json output\n  -h, --help            Print help\n\nVerification reads only local manifest evidence; no network or remote\ntrust decision is performed unless an operator explicitly configures\none. The manifest path may also be set via ZORN_RELEASE_MANIFEST.\n";
+const ENV_RELEASE_MANIFEST: &str = "ZORN_RELEASE_MANIFEST";
 pub const AUDIT_HELP: &str = "zornmesh audit\nVerify the audit log hash chain offline.\n\nUsage: zornmesh audit verify [OPTIONS]\n\nOptions:\n      --evidence <PATH>  Read this evidence log\n      --output <FORMAT>  Select human or json output\n  -h, --help            Print help\n\nVerification walks the on-disk hash chain without requiring a running\ndaemon, distinguishing valid, tampered, missing, unreadable, and\nunsupported-schema results with stable exit codes.\n";
 pub const RETENTION_HELP: &str = "zornmesh retention\nPlan retention purges and surface retention gaps.\n\nUsage: zornmesh retention plan [OPTIONS]\n\nOptions:\n      --evidence <PATH>     Read this evidence log\n      --max-age-ms <MS>     Mark records older than this age as purgeable\n      --max-count <N>       Mark all but the most recent N envelopes as purgeable\n      --now-unix-ms <MS>    Override the current time (defaults to wall clock)\n      --output <FORMAT>     Select human or json output\n  -h, --help                Print help\n\nThe plan subcommand never mutates the evidence log; it computes the records\nthat would be purged under the configured policy and reports retention\ncheckpoint metadata that downstream tooling can verify offline.\n";
 pub const VERSION: &str = "zornmesh 0.1.0\n";
@@ -48,7 +50,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention audit completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit release completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -84,7 +86,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay retention audit completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -104,7 +106,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -488,6 +490,10 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "retention" => run_retention(rest, &invocation),
         [command] if command == "audit" => print_help("audit help", AUDIT_HELP, invocation.output),
         [command, rest @ ..] if command == "audit" => run_audit(rest, &invocation),
+        [command] if command == "release" => {
+            print_help("release help", RELEASE_HELP, invocation.output)
+        }
+        [command, rest @ ..] if command == "release" => run_release(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2869,6 +2875,415 @@ fn evaluate_replay_eligibility(
         return ("ineligible", Some("redaction_blocks_replay"));
     }
     ("eligible", None)
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReleaseOptions {
+    manifest_path: Option<PathBuf>,
+}
+
+fn parse_release_options(args: &[String]) -> Result<ReleaseOptions, CliError> {
+    let mut options = ReleaseOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = arg.strip_prefix("--manifest=") {
+            options.manifest_path = Some(parse_non_empty_path("--manifest", value)?);
+            index += 1;
+        } else if arg == "--manifest" {
+            let value = inspect_option_value(args, index, arg)?;
+            options.manifest_path = Some(parse_non_empty_path(arg, value)?);
+            index += 2;
+        } else {
+            return Err(CliError::new(
+                "E_UNSUPPORTED_COMMAND",
+                format!("unsupported zornmesh release argument '{arg}'"),
+                ExitKind::UserError,
+            ));
+        }
+    }
+    Ok(options)
+}
+
+fn run_release(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("release help", RELEASE_HELP, invocation.output),
+        [flag] if is_help(flag) => print_help("release help", RELEASE_HELP, invocation.output),
+        [command, rest @ ..] if command == "verify" => {
+            let options = parse_release_options(rest)?;
+            release_verify(options, invocation.output)
+        }
+        [command, rest @ ..] if command == "sbom" => {
+            let options = parse_release_options(rest)?;
+            release_sbom(options, invocation.output)
+        }
+        [command, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh release subcommand '{command}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn resolve_release_manifest_path(
+    cli_path: Option<&PathBuf>,
+) -> Result<Option<PathBuf>, CliError> {
+    if let Some(path) = cli_path {
+        return Ok(Some(path.clone()));
+    }
+    match std::env::var(ENV_RELEASE_MANIFEST) {
+        Ok(raw) if raw.trim().is_empty() => Err(CliError::new(
+            "E_INVALID_CONFIG",
+            format!("{ENV_RELEASE_MANIFEST} must not be empty"),
+            ExitKind::UserError,
+        )),
+        Ok(raw) => Ok(Some(PathBuf::from(raw))),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(CliError::new(
+            "E_INVALID_CONFIG",
+            format!("{ENV_RELEASE_MANIFEST} must be valid UTF-8"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn load_release_manifest(
+    cli_path: Option<&PathBuf>,
+) -> Result<(PathBuf, Option<serde_json::Value>), CliError> {
+    let path = resolve_release_manifest_path(cli_path)?.ok_or_else(|| {
+        CliError::new(
+            "E_RELEASE_MANIFEST_REQUIRED",
+            format!(
+                "release manifest path is not configured; pass --manifest <PATH> or set {ENV_RELEASE_MANIFEST}"
+            ),
+            ExitKind::UserError,
+        )
+    })?;
+    match fs::read_to_string(&path) {
+        Ok(text) => {
+            let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+                CliError::new(
+                    "E_RELEASE_MANIFEST_CORRUPT",
+                    format!("release manifest at {} is not valid JSON: {error}", path.display()),
+                    ExitKind::Validation,
+                )
+            })?;
+            Ok((path, Some(value)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((path, None)),
+        Err(error) => Err(CliError::new(
+            "E_RELEASE_MANIFEST_UNREADABLE",
+            format!("release manifest read failed: {error}"),
+            ExitKind::Io,
+        )),
+    }
+}
+
+fn release_verify(options: ReleaseOptions, output: OutputFormat) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("release verify"));
+    }
+    let (manifest_path, manifest) = load_release_manifest(options.manifest_path.as_ref())?;
+    let manifest = match manifest {
+        Some(value) => value,
+        None => {
+            return emit_release_verify(
+                output,
+                ReleaseVerifyOutcome {
+                    status: "unverifiable",
+                    exit_kind: ExitKind::Validation,
+                    error_code: "E_RELEASE_MANIFEST_MISSING",
+                    manifest_path: &manifest_path,
+                    artifact_path: None,
+                    signature_path: None,
+                    signature_status: None,
+                    issuer: None,
+                    transparency_log_index: None,
+                    remediation: "release manifest does not exist; ensure release evidence is shipped alongside the artifact",
+                },
+            );
+        }
+    };
+
+    let signature = manifest.get("signature").cloned().unwrap_or(serde_json::Value::Null);
+    let signature_status_raw = signature
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unverifiable");
+    let signature_path = signature
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let issuer = signature
+        .get("issuer")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let log_index = signature
+        .get("transparency_log_index")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let artifact_path = manifest
+        .get("artifact")
+        .and_then(|artifact| artifact.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+
+    let (status, exit_kind, error_code, remediation) = match signature_status_raw {
+        "verified" => ("verified", ExitKind::UserError, "", ""),
+        "missing" => (
+            "missing_signature",
+            ExitKind::NotFound,
+            "E_RELEASE_SIGNATURE_MISSING",
+            "no Sigstore signature is shipped with this artifact; obtain the signed release",
+        ),
+        "mismatch" => (
+            "mismatch",
+            ExitKind::Validation,
+            "E_RELEASE_SIGNATURE_MISMATCH",
+            "release signature does not match the installed artifact; do not trust this binary and reinstall from a verified source",
+        ),
+        _ => (
+            "unverifiable",
+            ExitKind::Validation,
+            "E_RELEASE_VERIFICATION_UNAVAILABLE",
+            "release manifest does not declare a verifiable signature status; rebuild release evidence with valid signature metadata",
+        ),
+    };
+
+    emit_release_verify(
+        output,
+        ReleaseVerifyOutcome {
+            status,
+            exit_kind,
+            error_code,
+            manifest_path: &manifest_path,
+            artifact_path: artifact_path.as_deref(),
+            signature_path: signature_path.as_deref(),
+            signature_status: Some(signature_status_raw),
+            issuer: issuer.as_deref(),
+            transparency_log_index: log_index.as_deref(),
+            remediation,
+        },
+    )
+}
+
+struct ReleaseVerifyOutcome<'a> {
+    status: &'static str,
+    exit_kind: ExitKind,
+    error_code: &'static str,
+    manifest_path: &'a Path,
+    artifact_path: Option<&'a str>,
+    signature_path: Option<&'a str>,
+    signature_status: Option<&'a str>,
+    issuer: Option<&'a str>,
+    transparency_log_index: Option<&'a str>,
+    remediation: &'static str,
+}
+
+fn emit_release_verify(
+    output: OutputFormat,
+    outcome: ReleaseVerifyOutcome<'_>,
+) -> Result<(), CliError> {
+    let manifest_string = outcome.manifest_path.display().to_string();
+    let warning = if outcome.status == "verified" {
+        None
+    } else {
+        Some(DiagnosticWarning::new(
+            outcome.error_code,
+            outcome.remediation.to_owned(),
+        ))
+    };
+    let warnings: Vec<DiagnosticWarning> = warning.into_iter().collect();
+
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "release verify: status={} manifest={}",
+                outcome.status, manifest_string
+            );
+            if let Some(path) = outcome.artifact_path {
+                println!("  artifact={path}");
+            }
+            if let Some(path) = outcome.signature_path {
+                println!("  signature={path}");
+            }
+            if let Some(status) = outcome.signature_status {
+                println!("  signature_status={status}");
+            }
+            if let Some(issuer) = outcome.issuer {
+                println!("  issuer={issuer}");
+            }
+            if let Some(index) = outcome.transparency_log_index {
+                println!("  transparency_log_index={index}");
+            }
+            if !outcome.remediation.is_empty() {
+                println!("  remediation: {}", outcome.remediation);
+            }
+            for warning in &warnings {
+                eprintln!("{}: {}", warning.code, warning.message);
+            }
+        }
+        OutputFormat::Json => {
+            let data = serde_json::json!({
+                "status": outcome.status,
+                "manifest_path": manifest_string,
+                "artifact_path": outcome.artifact_path,
+                "signature_path": outcome.signature_path,
+                "signature_status": outcome.signature_status,
+                "issuer": outcome.issuer,
+                "transparency_log_index": outcome.transparency_log_index,
+                "error_code": if outcome.error_code.is_empty() { None } else { Some(outcome.error_code) },
+                "remediation": if outcome.remediation.is_empty() { None } else { Some(outcome.remediation) },
+            });
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "release",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before release rendering"),
+    }
+    if outcome.status == "verified" {
+        Ok(())
+    } else {
+        Err(CliError::new(
+            outcome.error_code,
+            outcome.remediation.to_owned(),
+            outcome.exit_kind,
+        ))
+    }
+}
+
+fn release_sbom(options: ReleaseOptions, output: OutputFormat) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("release sbom"));
+    }
+    let (manifest_path, manifest) = load_release_manifest(options.manifest_path.as_ref())?;
+    let manifest_string = manifest_path.display().to_string();
+    let manifest = match manifest {
+        Some(value) => value,
+        None => {
+            return emit_release_sbom_unavailable(
+                output,
+                &manifest_string,
+                "manifest_missing",
+                "release manifest does not exist at the configured path",
+            );
+        }
+    };
+
+    let sbom = manifest.get("sbom").cloned().unwrap_or(serde_json::Value::Null);
+    let status_raw = sbom
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unavailable");
+    if status_raw != "available" {
+        return emit_release_sbom_unavailable(
+            output,
+            &manifest_string,
+            status_raw,
+            "the installed artifact does not have a CycloneDX SBOM published with it",
+        );
+    }
+    let format = sbom
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("cyclonedx-json");
+    let path = sbom
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let components = sbom
+        .get("components_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let generated_at = sbom
+        .get("generated_at")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+
+    let data = serde_json::json!({
+        "status": "available",
+        "manifest_path": manifest_string,
+        "format": format,
+        "path": path,
+        "components_count": components,
+        "generated_at": generated_at,
+    });
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "release sbom: status=available format={format} components={components}"
+            );
+            if let Some(path) = data["path"].as_str() {
+                println!("  path={path}");
+            }
+            if let Some(generated) = data["generated_at"].as_str() {
+                println!("  generated_at={generated}");
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "release",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": [],
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before release rendering"),
+    }
+}
+
+fn emit_release_sbom_unavailable(
+    output: OutputFormat,
+    manifest_path: &str,
+    reason: &str,
+    remediation: &str,
+) -> Result<(), CliError> {
+    let warning = DiagnosticWarning::new(
+        "W_RELEASE_SBOM_UNAVAILABLE",
+        format!("SBOM unavailable: {reason}"),
+    );
+    let data = serde_json::json!({
+        "status": "unavailable",
+        "manifest_path": manifest_path,
+        "reason": reason,
+        "remediation": remediation,
+    });
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "release sbom: status=unavailable manifest={manifest_path} reason={reason}"
+            );
+            println!("  remediation: {remediation}");
+            eprintln!("{}: {}", warning.code, warning.message);
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "release",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": [warning_json(&warning)],
+                })
+            );
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before release rendering"),
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
