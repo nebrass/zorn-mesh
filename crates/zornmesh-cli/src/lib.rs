@@ -7322,6 +7322,512 @@ pub fn ui_referrer_policy() -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
+pub(crate) enum DirectComposerMode {
+    Direct,
+    Broadcast,
+}
+
+impl DirectComposerMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Broadcast => "broadcast",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum DirectComposerValidation {
+    Ok,
+    EmptyBody,
+    EmptySubject,
+    ReservedSubject,
+    BodyTooLarge,
+    RecipientStale,
+    RecipientDisconnected,
+    RecipientMissingCapability,
+    DeniedByAllowlist,
+    DaemonOffline,
+}
+
+impl DirectComposerValidation {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::EmptyBody => "empty_body",
+            Self::EmptySubject => "empty_subject",
+            Self::ReservedSubject => "reserved_subject",
+            Self::BodyTooLarge => "body_too_large",
+            Self::RecipientStale => "recipient_stale",
+            Self::RecipientDisconnected => "recipient_disconnected",
+            Self::RecipientMissingCapability => "recipient_missing_capability",
+            Self::DeniedByAllowlist => "denied_by_allowlist",
+            Self::DaemonOffline => "daemon_offline",
+        }
+    }
+
+    pub(crate) const fn is_ok(self) -> bool {
+        matches!(self, Self::Ok)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum DirectSendOutcome {
+    Queued,
+    Delivered,
+    Acknowledged,
+    Rejected,
+    TimedOut,
+    DeadLettered,
+    Stale,
+}
+
+impl DirectSendOutcome {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Delivered => "delivered",
+            Self::Acknowledged => "acknowledged",
+            Self::Rejected => "rejected",
+            Self::TimedOut => "timed_out",
+            Self::DeadLettered => "dead_lettered",
+            Self::Stale => "stale",
+        }
+    }
+
+    pub(crate) const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Acknowledged | Self::Delivered | Self::Rejected | Self::TimedOut | Self::DeadLettered
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum DirectComposerSubmitError {
+    DuplicateInFlight,
+    ValidationFailed(DirectComposerValidation),
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct DirectMessageDraft {
+    pub subject: String,
+    pub body: String,
+}
+
+pub(crate) const DIRECT_BODY_BUDGET: usize = 64 * 1024;
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct DirectComposerState {
+    pub mode: DirectComposerMode,
+    pub target: RosterEntry,
+    pub draft: DirectMessageDraft,
+    pub validation: DirectComposerValidation,
+    pub pending: bool,
+    pub outcome: Option<DirectSendOutcome>,
+    pub correlation_id: Option<String>,
+    pub audit_link: Option<DirectAuditLink>,
+    pub mapping_version: &'static str,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct DirectAuditLink {
+    pub actor_session: String,
+    pub correlation_id: String,
+    pub trace_id: String,
+    pub recipient_agent_id: String,
+    pub safe_payload_summary: serde_json::Value,
+    pub validation_outcome: &'static str,
+    pub delivery_outcome: &'static str,
+}
+
+#[allow(dead_code)]
+impl DirectComposerState {
+    pub(crate) fn open(target: RosterEntry, draft: DirectMessageDraft, daemon_offline: bool) -> Self {
+        let mut state = Self {
+            mode: DirectComposerMode::Direct,
+            target,
+            draft,
+            validation: DirectComposerValidation::Ok,
+            pending: false,
+            outcome: None,
+            correlation_id: None,
+            audit_link: None,
+            mapping_version: "zornmesh.ui.direct_composer.v1",
+        };
+        state.validation = state.compute_validation(daemon_offline);
+        state
+    }
+
+    fn compute_validation(&self, daemon_offline: bool) -> DirectComposerValidation {
+        if daemon_offline {
+            return DirectComposerValidation::DaemonOffline;
+        }
+        if self.draft.body.trim().is_empty() {
+            return DirectComposerValidation::EmptyBody;
+        }
+        if self.draft.body.len() > DIRECT_BODY_BUDGET {
+            return DirectComposerValidation::BodyTooLarge;
+        }
+        if self.draft.subject.trim().is_empty() {
+            return DirectComposerValidation::EmptySubject;
+        }
+        if self.draft.subject == "zorn" || self.draft.subject.starts_with("zorn.") {
+            return DirectComposerValidation::ReservedSubject;
+        }
+        match self.target.status {
+            RosterStatus::Stale => return DirectComposerValidation::RecipientStale,
+            RosterStatus::Disconnected | RosterStatus::Errored => {
+                return DirectComposerValidation::RecipientDisconnected;
+            }
+            _ => {}
+        }
+        if self
+            .target
+            .warnings
+            .iter()
+            .any(|warning| *warning == "denied_by_allowlist")
+        {
+            return DirectComposerValidation::DeniedByAllowlist;
+        }
+        if !self
+            .target
+            .capability_summary
+            .iter()
+            .any(|cap| cap == &self.draft.subject)
+        {
+            return DirectComposerValidation::RecipientMissingCapability;
+        }
+        DirectComposerValidation::Ok
+    }
+
+    pub(crate) fn submit(
+        mut self,
+        correlation_id: impl Into<String>,
+    ) -> Result<Self, (Self, DirectComposerSubmitError)> {
+        if self.pending {
+            return Err((self, DirectComposerSubmitError::DuplicateInFlight));
+        }
+        if !self.validation.is_ok() {
+            let validation = self.validation;
+            return Err((self, DirectComposerSubmitError::ValidationFailed(validation)));
+        }
+        self.pending = true;
+        self.correlation_id = Some(correlation_id.into());
+        self.outcome = None;
+        Ok(self)
+    }
+
+    pub(crate) fn record_outcome(
+        mut self,
+        outcome: DirectSendOutcome,
+        actor_session: impl Into<String>,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        if outcome.is_terminal() {
+            self.pending = false;
+        }
+        let correlation_id = self
+            .correlation_id
+            .clone()
+            .unwrap_or_else(|| "corr-pending".to_owned());
+        self.audit_link = Some(DirectAuditLink {
+            actor_session: actor_session.into(),
+            correlation_id: correlation_id.clone(),
+            trace_id: trace_id.into(),
+            recipient_agent_id: self.target.agent_id.clone(),
+            safe_payload_summary: serde_json::json!({
+                "subject": self.draft.subject,
+                "body_len": self.draft.body.len(),
+            }),
+            validation_outcome: self.validation.as_str(),
+            delivery_outcome: outcome.as_str(),
+        });
+        self.outcome = Some(outcome);
+        self
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": self.mapping_version,
+            "mode": self.mode.as_str(),
+            "target": {
+                "agent_id": self.target.agent_id,
+                "display_name": self.target.display_name,
+                "status": self.target.status.as_str(),
+                "transport": self.target.transport.as_str(),
+                "capability_summary": self.target.capability_summary,
+                "high_privilege_required": self.target.high_privilege_required,
+            },
+            "draft": {
+                "subject": self.draft.subject,
+                "body_length": self.draft.body.len(),
+            },
+            "validation": self.validation.as_str(),
+            "pending": self.pending,
+            "outcome": self.outcome.map(|o| o.as_str()),
+            "correlation_id": self.correlation_id,
+            "audit_link": self.audit_link.as_ref().map(|link| serde_json::json!({
+                "actor_session": link.actor_session,
+                "correlation_id": link.correlation_id,
+                "trace_id": link.trace_id,
+                "recipient_agent_id": link.recipient_agent_id,
+                "safe_payload_summary": link.safe_payload_summary,
+                "validation_outcome": link.validation_outcome,
+                "delivery_outcome": link.delivery_outcome,
+            })),
+        })
+    }
+}
+
+#[cfg(test)]
+mod direct_composer_tests {
+    use super::*;
+
+    fn target(status: RosterStatus, capability: &str) -> RosterEntry {
+        RosterEntry {
+            display_name: "Recipient".to_owned(),
+            agent_id: "agent.local/recipient".to_owned(),
+            status,
+            transport: RosterTransport::NativeSdk,
+            capability_summary: vec![capability.to_owned()],
+            last_seen_unix_ms: 1_700_000_000_000,
+            recent_activity_count: 1,
+            warnings: Vec::new(),
+            high_privilege_required: false,
+        }
+    }
+
+    fn draft(subject: &str, body: &str) -> DirectMessageDraft {
+        DirectMessageDraft {
+            subject: subject.to_owned(),
+            body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn valid_state_passes_validation_and_distinguishes_direct_mode() {
+        let state = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello world"),
+            false,
+        );
+        assert_eq!(state.mode, DirectComposerMode::Direct);
+        assert_eq!(state.validation, DirectComposerValidation::Ok);
+        let json = state.to_json();
+        assert_eq!(json["mode"], "direct");
+        assert_eq!(json["validation"], "ok");
+    }
+
+    #[test]
+    fn empty_body_blocks_send_with_explanatory_validation() {
+        let state = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "   "),
+            false,
+        );
+        assert_eq!(state.validation, DirectComposerValidation::EmptyBody);
+        let result = state.submit("corr-1");
+        match result {
+            Err((_state, DirectComposerSubmitError::ValidationFailed(v))) => {
+                assert_eq!(v, DirectComposerValidation::EmptyBody);
+            }
+            _ => panic!("expected validation failure"),
+        }
+    }
+
+    #[test]
+    fn invalid_subject_or_reserved_prefix_is_rejected() {
+        let empty = DirectComposerState::open(
+            target(RosterStatus::Active, ""),
+            draft("", "hello"),
+            false,
+        );
+        assert_eq!(empty.validation, DirectComposerValidation::EmptySubject);
+
+        let reserved = DirectComposerState::open(
+            target(RosterStatus::Active, "zorn.system"),
+            draft("zorn.system", "hello"),
+            false,
+        );
+        assert_eq!(reserved.validation, DirectComposerValidation::ReservedSubject);
+    }
+
+    #[test]
+    fn body_above_budget_is_rejected_as_too_large() {
+        let big = "x".repeat(DIRECT_BODY_BUDGET + 1);
+        let state = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", &big),
+            false,
+        );
+        assert_eq!(state.validation, DirectComposerValidation::BodyTooLarge);
+    }
+
+    #[test]
+    fn stale_or_disconnected_recipient_blocks_send() {
+        let stale = DirectComposerState::open(
+            target(RosterStatus::Stale, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello"),
+            false,
+        );
+        assert_eq!(stale.validation, DirectComposerValidation::RecipientStale);
+
+        let disconnected = DirectComposerState::open(
+            target(RosterStatus::Disconnected, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello"),
+            false,
+        );
+        assert_eq!(
+            disconnected.validation,
+            DirectComposerValidation::RecipientDisconnected
+        );
+    }
+
+    #[test]
+    fn missing_capability_or_allowlist_denial_is_explicit() {
+        let missing_cap = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.other"),
+            draft("mesh.direct.send", "hello"),
+            false,
+        );
+        assert_eq!(
+            missing_cap.validation,
+            DirectComposerValidation::RecipientMissingCapability
+        );
+
+        let mut denied_target = target(RosterStatus::Active, "mesh.direct.send");
+        denied_target.warnings.push("denied_by_allowlist");
+        let denied = DirectComposerState::open(
+            denied_target,
+            draft("mesh.direct.send", "hello"),
+            false,
+        );
+        assert_eq!(denied.validation, DirectComposerValidation::DeniedByAllowlist);
+    }
+
+    #[test]
+    fn daemon_offline_blocks_send_regardless_of_other_validation() {
+        let state = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello"),
+            true,
+        );
+        assert_eq!(state.validation, DirectComposerValidation::DaemonOffline);
+    }
+
+    #[test]
+    fn submit_marks_pending_and_blocks_duplicate_in_flight_clicks() {
+        let state = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello"),
+            false,
+        );
+        let pending = state.submit("corr-direct").expect("first submit");
+        assert!(pending.pending);
+        assert_eq!(pending.correlation_id.as_deref(), Some("corr-direct"));
+        match pending.submit("corr-other") {
+            Err((_state, DirectComposerSubmitError::DuplicateInFlight)) => {}
+            _ => panic!("duplicate submit must be rejected"),
+        }
+    }
+
+    #[test]
+    fn terminal_outcomes_clear_pending_and_persist_audit_link() {
+        let state = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello"),
+            false,
+        )
+        .submit("corr-direct")
+        .expect("submit accepted");
+
+        let queued = state
+            .clone()
+            .record_outcome(DirectSendOutcome::Queued, "session-1", "trace-1");
+        assert!(queued.pending, "queued is non-terminal so pending stays");
+        assert_eq!(queued.outcome, Some(DirectSendOutcome::Queued));
+
+        let acknowledged = queued.record_outcome(
+            DirectSendOutcome::Acknowledged,
+            "session-1",
+            "trace-1",
+        );
+        assert!(!acknowledged.pending, "terminal state clears pending");
+        let json = acknowledged.to_json();
+        assert_eq!(json["outcome"], "acknowledged");
+        assert_eq!(json["audit_link"]["delivery_outcome"], "acknowledged");
+        assert_eq!(json["audit_link"]["validation_outcome"], "ok");
+        assert_eq!(json["audit_link"]["recipient_agent_id"], "agent.local/recipient");
+        assert_eq!(json["audit_link"]["safe_payload_summary"]["subject"], "mesh.direct.send");
+        assert_eq!(json["audit_link"]["safe_payload_summary"]["body_len"], 5);
+    }
+
+    #[test]
+    fn dead_lettered_and_timed_out_outcomes_clear_pending() {
+        let dead = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello"),
+            false,
+        )
+        .submit("corr-1")
+        .expect("submit accepted")
+        .record_outcome(DirectSendOutcome::DeadLettered, "session-1", "trace-1");
+        assert!(!dead.pending);
+        assert_eq!(dead.outcome, Some(DirectSendOutcome::DeadLettered));
+
+        let timed = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello"),
+            false,
+        )
+        .submit("corr-2")
+        .expect("submit accepted")
+        .record_outcome(DirectSendOutcome::TimedOut, "session-1", "trace-1");
+        assert!(!timed.pending);
+        assert_eq!(timed.outcome, Some(DirectSendOutcome::TimedOut));
+    }
+
+    #[test]
+    fn audit_summary_does_not_include_raw_body() {
+        let state = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "secret-body-must-not-leak"),
+            false,
+        )
+        .submit("corr-leak")
+        .expect("submit accepted")
+        .record_outcome(DirectSendOutcome::Acknowledged, "session-1", "trace-1");
+        let serialized = serde_json::to_string(&state.to_json()).expect("serialize");
+        assert!(
+            !serialized.contains("secret-body-must-not-leak"),
+            "raw body must not appear in audit JSON"
+        );
+    }
+
+    #[test]
+    fn schema_version_pins_direct_composer_contract() {
+        let state = DirectComposerState::open(
+            target(RosterStatus::Active, "mesh.direct.send"),
+            draft("mesh.direct.send", "hello"),
+            false,
+        );
+        assert_eq!(state.mapping_version, "zornmesh.ui.direct_composer.v1");
+        assert_eq!(
+            state.to_json()["schema_version"],
+            "zornmesh.ui.direct_composer.v1"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum CliHandoffOperation {
     Trace,
     Inspect,

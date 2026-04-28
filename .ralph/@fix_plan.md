@@ -63,17 +63,7 @@
 - [x] Story 6.3: Render Live Agent Roster and Local Trust Status
 - [x] Story 6.4: Render Daemon-Sequence Timeline and Event Detail Panel
 - [x] Story 6.5: Open Focused Trace Reader with CLI Handoff Commands
-  > As a developer debugging a multi-agent conversation
-  > I want to open a focused trace reader for one correlation ID and copy matching CLI handoff commands
-  > So that I can move between visual inspection and terminal investigation without losing context.
-  > AC: Given a trace event has a correlation ID, When the developer opens the focused trace reader, Then the UI shows the full known conversation when it is within the browser window budget, or a clearly labeled daemon-sequence window with load-more controls when it is too large, And parent/child links, caused-by/responds-to/replayed-from/broadcast fan-out labels, delivery states, payload summaries, timing, and focus/pause behavior preserve daemon-sequence ordering.
-  > AC: Given trace evidence is incomplete, reconstructed, stale, dead-lettered, or has missing parents, When the focused trace reader renders, Then it labels the gap or recovery state in accessible text, And it provides a guided recovery cue such as inspect trace, inspect dead letter, replay, reconnect, or audit verification where applicable.
-  > AC: Given the current context supports terminal follow-up, When the developer opens a CLI command copy block, Then commands for trace, inspect, replay, agents, doctor, and audit operations include context-preserving arguments such as correlation ID, agent ID, daemon sequence, time window, or evidence path, And each command includes a description, expected outcome, copy action, and copied feedback.
-  > AC: Given context values contain spaces, quotes, semicolons, backticks, dollar signs, newlines, glob characters, option-like prefixes, or shell metacharacters, When CLI handoff commands are generated, Then commands are constructed from argv tokens with documented shell quoting/escaping and never by unsafe string concatenation, And copied commands cannot introduce command substitution, redirection, chaining, environment assignment, or extra arguments from untrusted trace, agent, subject, or evidence values.
-  > AC: Given a command is unavailable because the daemon is offline, audit evidence is missing, context is insufficient, or the operation would be unsafe, When the command block renders, Then it shows an unavailable/requires-daemon/offline-audit explanation, And no misleading command is offered.
-  > AC: Given focused trace tests run, When complete trace, missing trace, reconstructed trace, broadcast fan-out, dead-letter event, command copy, unavailable command, large focused trace, shell metacharacter escaping, option-like IDs, newline-bearing context values, pause/focus, and return-to-control-room scenarios execute, Then the focused reader and CLI handoff behavior are deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-6-5
-- [ ] Story 6.6: Send Safe Direct Messages from the UI
+- [x] Story 6.6: Send Safe Direct Messages from the UI
   > As a developer
   > I want to send a direct message to one selected agent only after reviewing target identity and payload preview
   > So that human-originated UI sends are intentional, validated, and auditable.
