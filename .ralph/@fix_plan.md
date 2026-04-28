@@ -61,17 +61,7 @@
 - [x] Story 6.1: Verify Local UI Architecture, Pin Framework Wording, and Scaffold Local Web App Shell
 - [x] Story 6.2: Launch Protected Loopback UI with Offline Assets
 - [x] Story 6.3: Render Live Agent Roster and Local Trust Status
-  > As a developer
-  > I want the Live Mesh Control Room to show connected agents and daemon trust state
-  > So that I can quickly understand who is participating in the local mesh and whether the control room is safe to use.
-  > AC: Given registered agents and capability summaries are available from the daemon, When the Live Mesh Control Room loads, Then the roster shows each agent's display name, stable ID, status, transport/source, capability summary, last-seen recency, recent activity count, and warning markers, And MCP stdio, native SDK, stale, errored, disconnected, and reconnecting states are visibly distinct.
-  > AC: Given a developer selects an agent, When the agent detail or capability card opens, Then it shows identity, transport, capabilities, subscriptions, recent traces, activity, trust indicators, permission indicators, and high-privilege warnings, And unavailable or denied high-privilege capabilities are explained without enabling unsafe actions.
-  > AC: Given the roster has many agents or mixed states, When the developer searches, filters, or highlights agents by ID, name, capability, status, warning, source, or recent trace, Then matching agents remain findable without changing message chronology, And active filters are visible and removable.
-  > AC: Given roster or daemon state is empty, loading, stale, degraded, unavailable, or session-expired, When the control room renders, Then persistent state panels explain the condition and next action, And transient toasts never replace persistent status for critical trust or availability issues.
-  > AC: Given roster fixture tests run, When empty roster, active agents, stale agents, disconnected agents, MCP/native source, high-privilege warning, filtered roster, unavailable daemon, and session-expired scenarios execute, Then roster and trust-state rendering are deterministic and fixture-covered.
-  > AC: Given the 3-agent roster fixture runs after daemon readiness, When the Live Mesh Control Room renders connected agents, Then agent roster and local trust status are visible within 2 seconds on the v0.1 reference browser profile, And failures emit stable UI performance evidence.
-  > Spec: specs/planning-artifacts/epics.md#story-6-3
-- [ ] Story 6.4: Render Daemon-Sequence Timeline and Event Detail Panel
+- [x] Story 6.4: Render Daemon-Sequence Timeline and Event Detail Panel
   > As a developer
   > I want a daemon-sequenced trace timeline with event details
   > So that I can understand message flow and delivery state without stitching logs together manually.

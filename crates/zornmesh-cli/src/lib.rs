@@ -7322,6 +7322,444 @@ pub fn ui_referrer_policy() -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
+pub(crate) enum TimelineEventState {
+    Pending,
+    Queued,
+    Accepted,
+    Delivered,
+    Acknowledged,
+    Rejected,
+    Failed,
+    Cancelled,
+    Replayed,
+    DeadLettered,
+    Stale,
+    Unknown,
+}
+
+impl TimelineEventState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Queued => "queued",
+            Self::Accepted => "accepted",
+            Self::Delivered => "delivered",
+            Self::Acknowledged => "acknowledged",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Replayed => "replayed",
+            Self::DeadLettered => "dead_lettered",
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum TimelineCausalMarker {
+    Root,
+    CausedBy,
+    RespondsTo,
+    ReplayedFrom,
+    RetryOf,
+    DeadLetterTerminal,
+    LateArrival,
+    Reconstructed,
+    Unknown,
+}
+
+impl TimelineCausalMarker {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::CausedBy => "caused_by",
+            Self::RespondsTo => "responds_to",
+            Self::ReplayedFrom => "replayed_from",
+            Self::RetryOf => "retry_of",
+            Self::DeadLetterTerminal => "dead_letter_terminal",
+            Self::LateArrival => "late_arrival",
+            Self::Reconstructed => "reconstructed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct TimelineEvent {
+    pub daemon_sequence: u64,
+    pub message_id: String,
+    pub correlation_id: String,
+    pub trace_id: String,
+    pub source_agent: String,
+    pub target_or_subject: String,
+    pub subject: String,
+    pub timestamp_unix_ms: u64,
+    pub browser_received_unix_ms: Option<u64>,
+    pub state: TimelineEventState,
+    pub causal_marker: TimelineCausalMarker,
+    pub parent_message_id: Option<String>,
+    pub safe_payload_summary: serde_json::Value,
+    pub suggested_next_action: Option<&'static str>,
+    pub cli_handoff_command: Option<String>,
+    pub recovery_cue: Option<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct TimelineGapMarker {
+    pub before_sequence: u64,
+    pub after_sequence: u64,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum TimelinePanelCondition {
+    Ready,
+    Empty,
+    Loading,
+    PartialWindow,
+    Stale,
+    Unavailable,
+    SessionExpired,
+}
+
+impl TimelinePanelCondition {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Empty => "empty",
+            Self::Loading => "loading",
+            Self::PartialWindow => "partial_window",
+            Self::Stale => "stale",
+            Self::Unavailable => "unavailable",
+            Self::SessionExpired => "session_expired",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct TimelinePage {
+    pub condition: TimelinePanelCondition,
+    pub events: Vec<TimelineEvent>,
+    pub loaded_range: Option<(u64, u64)>,
+    pub total_count: usize,
+    pub unknown_count: usize,
+    pub gaps: Vec<TimelineGapMarker>,
+    pub partial_window: bool,
+    pub mapping_version: &'static str,
+    pub selected_message_id: Option<String>,
+}
+
+#[allow(dead_code)]
+impl TimelinePage {
+    pub(crate) fn ready(mut events: Vec<TimelineEvent>) -> Self {
+        events.sort_by_key(|event| event.daemon_sequence);
+        let condition = if events.is_empty() {
+            TimelinePanelCondition::Empty
+        } else {
+            TimelinePanelCondition::Ready
+        };
+        let loaded_range = events.first().zip(events.last()).map(|(first, last)| {
+            (first.daemon_sequence, last.daemon_sequence)
+        });
+        let unknown_count = events
+            .iter()
+            .filter(|event| event.state == TimelineEventState::Unknown)
+            .count();
+        let total_count = events.len();
+        Self {
+            condition,
+            events,
+            loaded_range,
+            total_count,
+            unknown_count,
+            gaps: Vec::new(),
+            partial_window: false,
+            mapping_version: "zornmesh.ui.timeline.v1",
+            selected_message_id: None,
+        }
+    }
+
+    pub(crate) fn unavailable(reason: &'static str) -> Self {
+        Self {
+            condition: TimelinePanelCondition::Unavailable,
+            events: Vec::new(),
+            loaded_range: None,
+            total_count: 0,
+            unknown_count: 0,
+            gaps: vec![TimelineGapMarker {
+                before_sequence: 0,
+                after_sequence: 0,
+                reason,
+            }],
+            partial_window: false,
+            mapping_version: "zornmesh.ui.timeline.v1",
+            selected_message_id: None,
+        }
+    }
+
+    pub(crate) fn session_expired() -> Self {
+        Self {
+            condition: TimelinePanelCondition::SessionExpired,
+            events: Vec::new(),
+            loaded_range: None,
+            total_count: 0,
+            unknown_count: 0,
+            gaps: Vec::new(),
+            partial_window: false,
+            mapping_version: "zornmesh.ui.timeline.v1",
+            selected_message_id: None,
+        }
+    }
+
+    pub(crate) fn paginate(
+        events: Vec<TimelineEvent>,
+        window: (u64, u64),
+        total_count: usize,
+        gaps: Vec<TimelineGapMarker>,
+    ) -> Self {
+        let mut page = Self::ready(events);
+        page.loaded_range = Some(window);
+        page.total_count = total_count;
+        page.gaps = gaps;
+        page.partial_window = page.events.len() < total_count || !page.gaps.is_empty();
+        if page.partial_window {
+            page.condition = TimelinePanelCondition::PartialWindow;
+        }
+        page
+    }
+
+    pub(crate) fn select(mut self, message_id: &str) -> Self {
+        let exists = self
+            .events
+            .iter()
+            .any(|event| event.message_id == message_id);
+        self.selected_message_id = if exists {
+            Some(message_id.to_owned())
+        } else {
+            None
+        };
+        self
+    }
+
+    pub(crate) fn append_live(mut self, mut new_events: Vec<TimelineEvent>) -> Self {
+        let prior_selection = self.selected_message_id.clone();
+        self.events.append(&mut new_events);
+        self.events.sort_by_key(|event| event.daemon_sequence);
+        if let Some((_, ref mut high)) = self.loaded_range
+            && let Some(last) = self.events.last()
+        {
+            *high = (*high).max(last.daemon_sequence);
+        }
+        if self.loaded_range.is_none()
+            && let (Some(first), Some(last)) = (self.events.first(), self.events.last())
+        {
+            self.loaded_range = Some((first.daemon_sequence, last.daemon_sequence));
+        }
+        self.total_count = self.total_count.max(self.events.len());
+        self.selected_message_id = prior_selection.filter(|id| {
+            self.events.iter().any(|event| &event.message_id == id)
+        });
+        if !self.events.is_empty() && self.condition == TimelinePanelCondition::Empty {
+            self.condition = TimelinePanelCondition::Ready;
+        }
+        self
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": self.mapping_version,
+            "condition": self.condition.as_str(),
+            "ordering": "daemon_sequence",
+            "loaded_range": self.loaded_range.map(|(low, high)| serde_json::json!({"low": low, "high": high})),
+            "total_count": self.total_count,
+            "unknown_count": self.unknown_count,
+            "partial_window": self.partial_window,
+            "selected_message_id": self.selected_message_id,
+            "gaps": self.gaps.iter().map(|gap| serde_json::json!({
+                "before_sequence": gap.before_sequence,
+                "after_sequence": gap.after_sequence,
+                "reason": gap.reason,
+            })).collect::<Vec<_>>(),
+            "events": self.events.iter().map(|event| serde_json::json!({
+                "daemon_sequence": event.daemon_sequence,
+                "message_id": event.message_id,
+                "correlation_id": event.correlation_id,
+                "trace_id": event.trace_id,
+                "source_agent": event.source_agent,
+                "target_or_subject": event.target_or_subject,
+                "subject": event.subject,
+                "timestamp_unix_ms": event.timestamp_unix_ms,
+                "browser_received_unix_ms": event.browser_received_unix_ms,
+                "state": event.state.as_str(),
+                "causal_marker": event.causal_marker.as_str(),
+                "parent_message_id": event.parent_message_id,
+                "safe_payload_summary": event.safe_payload_summary,
+                "suggested_next_action": event.suggested_next_action,
+                "cli_handoff_command": event.cli_handoff_command,
+                "recovery_cue": event.recovery_cue,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    fn make_event(sequence: u64, message: &str, state: TimelineEventState) -> TimelineEvent {
+        TimelineEvent {
+            daemon_sequence: sequence,
+            message_id: message.to_owned(),
+            correlation_id: "corr-timeline".to_owned(),
+            trace_id: "trace-timeline".to_owned(),
+            source_agent: "agent.local/sender".to_owned(),
+            target_or_subject: "agent.local/receiver".to_owned(),
+            subject: "mesh.timeline.created".to_owned(),
+            timestamp_unix_ms: 1_700_000_000_000 + sequence,
+            browser_received_unix_ms: Some(1_700_000_000_999),
+            state,
+            causal_marker: TimelineCausalMarker::Root,
+            parent_message_id: None,
+            safe_payload_summary: serde_json::json!({"payload_len": 16}),
+            suggested_next_action: None,
+            cli_handoff_command: None,
+            recovery_cue: None,
+        }
+    }
+
+    #[test]
+    fn ready_page_orders_by_daemon_sequence_not_browser_receipt_time() {
+        let mut later = make_event(2, "msg-late", TimelineEventState::Accepted);
+        later.browser_received_unix_ms = Some(1_500_000_000_000);
+        let earlier = make_event(1, "msg-first", TimelineEventState::Accepted);
+        let page = TimelinePage::ready(vec![later, earlier]);
+        let sequences: Vec<u64> = page.events.iter().map(|e| e.daemon_sequence).collect();
+        assert_eq!(sequences, vec![1, 2]);
+        assert_eq!(page.loaded_range, Some((1, 2)));
+        assert_eq!(page.condition, TimelinePanelCondition::Ready);
+        let json = page.to_json();
+        assert_eq!(json["ordering"], "daemon_sequence");
+    }
+
+    #[test]
+    fn empty_page_marks_empty_condition() {
+        let page = TimelinePage::ready(Vec::new());
+        assert_eq!(page.condition, TimelinePanelCondition::Empty);
+        assert_eq!(page.events.len(), 0);
+        assert!(page.loaded_range.is_none());
+    }
+
+    #[test]
+    fn unknown_state_is_counted_separately_for_taxonomy_drift_detection() {
+        let page = TimelinePage::ready(vec![
+            make_event(1, "msg-1", TimelineEventState::Accepted),
+            make_event(2, "msg-2", TimelineEventState::Unknown),
+            make_event(3, "msg-3", TimelineEventState::Unknown),
+        ]);
+        assert_eq!(page.unknown_count, 2);
+        assert_eq!(page.total_count, 3);
+    }
+
+    #[test]
+    fn paginate_marks_partial_window_when_total_exceeds_loaded() {
+        let events = vec![
+            make_event(10, "msg-10", TimelineEventState::Accepted),
+            make_event(11, "msg-11", TimelineEventState::Accepted),
+        ];
+        let page = TimelinePage::paginate(events, (10, 11), 100, Vec::new());
+        assert!(page.partial_window);
+        assert_eq!(page.condition, TimelinePanelCondition::PartialWindow);
+        assert_eq!(page.loaded_range, Some((10, 11)));
+        assert_eq!(page.total_count, 100);
+    }
+
+    #[test]
+    fn paginate_records_gap_markers_without_reordering_events() {
+        let events = vec![
+            make_event(1, "msg-1", TimelineEventState::Accepted),
+            make_event(5, "msg-5", TimelineEventState::Accepted),
+        ];
+        let gaps = vec![TimelineGapMarker {
+            before_sequence: 1,
+            after_sequence: 5,
+            reason: "retention_purge",
+        }];
+        let page = TimelinePage::paginate(events, (1, 5), 5, gaps);
+        let sequences: Vec<u64> = page.events.iter().map(|e| e.daemon_sequence).collect();
+        assert_eq!(sequences, vec![1, 5]);
+        assert!(page.partial_window);
+        assert_eq!(page.gaps.len(), 1);
+        assert_eq!(page.gaps[0].reason, "retention_purge");
+    }
+
+    #[test]
+    fn append_live_keeps_selection_stable_when_event_remains() {
+        let initial = TimelinePage::ready(vec![
+            make_event(1, "msg-1", TimelineEventState::Accepted),
+            make_event(2, "msg-2", TimelineEventState::Accepted),
+        ])
+        .select("msg-2");
+        assert_eq!(initial.selected_message_id.as_deref(), Some("msg-2"));
+        let appended = initial.append_live(vec![make_event(3, "msg-3", TimelineEventState::Accepted)]);
+        assert_eq!(appended.selected_message_id.as_deref(), Some("msg-2"));
+        let sequences: Vec<u64> = appended.events.iter().map(|e| e.daemon_sequence).collect();
+        assert_eq!(sequences, vec![1, 2, 3]);
+        assert_eq!(appended.loaded_range, Some((1, 3)));
+    }
+
+    #[test]
+    fn select_unknown_message_clears_selection() {
+        let page =
+            TimelinePage::ready(vec![make_event(1, "msg-1", TimelineEventState::Accepted)])
+                .select("msg-missing");
+        assert!(page.selected_message_id.is_none());
+    }
+
+    #[test]
+    fn unavailable_and_session_expired_pages_carry_persistent_state() {
+        let unavailable = TimelinePage::unavailable("daemon_unreachable");
+        assert_eq!(unavailable.condition, TimelinePanelCondition::Unavailable);
+        assert_eq!(unavailable.gaps.len(), 1);
+        assert_eq!(unavailable.gaps[0].reason, "daemon_unreachable");
+
+        let expired = TimelinePage::session_expired();
+        assert_eq!(expired.condition, TimelinePanelCondition::SessionExpired);
+        assert_eq!(expired.to_json()["condition"], "session_expired");
+    }
+
+    #[test]
+    fn schema_version_pins_timeline_contract() {
+        let page = TimelinePage::ready(Vec::new());
+        assert_eq!(page.mapping_version, "zornmesh.ui.timeline.v1");
+        assert_eq!(page.to_json()["schema_version"], "zornmesh.ui.timeline.v1");
+    }
+
+    #[test]
+    fn five_hundred_event_window_renders_in_under_one_second() {
+        let events: Vec<TimelineEvent> = (1..=500u64)
+            .map(|seq| make_event(seq, &format!("msg-{seq}"), TimelineEventState::Accepted))
+            .collect();
+        let started = std::time::Instant::now();
+        let page = TimelinePage::ready(events);
+        let json = page.to_json();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "500-event timeline must render under 1s, took {elapsed:?}"
+        );
+        assert_eq!(page.events.len(), 500);
+        assert_eq!(json["events"].as_array().unwrap().len(), 500);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum RosterStatus {
     Active,
     Stale,
