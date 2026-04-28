@@ -93,7 +93,13 @@ fn local_ui_package_manifest_declares_bun_only_toolchain() {
     );
 
     let lower = body.to_ascii_lowercase();
-    for forbidden in ["next.js", "\"next\":", "ssr", "server-runtime", "node-server"] {
+    for forbidden in [
+        "next.js",
+        "\"next\":",
+        "ssr",
+        "server-runtime",
+        "node-server",
+    ] {
         assert!(
             !lower.contains(forbidden),
             "package.json must not introduce {forbidden}"
@@ -213,4 +219,64 @@ fn local_ui_components_module_seeds_primitive_and_fixture_state_matrix() {
             "fixture state '{state}' must appear in matrix"
         );
     }
+}
+
+#[test]
+fn local_ui_quality_gate_is_wired_into_fixtures_and_workspace_tests() {
+    let package_body = read("apps/local-ui/package.json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&package_body).expect("package.json parses as JSON");
+
+    assert_eq!(
+        manifest["scripts"]["test:quality"].as_str(),
+        Some("bun test src/quality-gates.test.ts"),
+        "local UI package must expose the quality gate test command"
+    );
+    assert_eq!(
+        manifest["scripts"]["quality-evidence"].as_str(),
+        Some("bun run src/quality-gates.ts"),
+        "local UI package must emit stable readiness evidence"
+    );
+
+    let quality_gate = read("apps/local-ui/src/quality-gates.ts");
+    for required in [
+        "accessibility_fixture_audit",
+        "browser_fixture_matrix",
+        "mobile",
+        "tablet",
+        "desktop",
+        "wide_desktop",
+        "chromium",
+        "firefox",
+        "webkit_safari",
+        "offline_asset",
+        "critical_journey",
+    ] {
+        assert!(
+            quality_gate.contains(required),
+            "quality gate source must declare '{required}'"
+        );
+    }
+
+    let fixture = read("fixtures/ui/quality-readiness.json");
+    for required in [
+        "\"accessibility\"",
+        "\"responsive\"",
+        "\"browser\"",
+        "\"offline_asset\"",
+        "\"critical_journey\"",
+        "\"unsupported_state\"",
+        "\"defect\"",
+    ] {
+        assert!(
+            fixture.contains(required),
+            "quality readiness fixture must record '{required}'"
+        );
+    }
+
+    let xtask = read("crates/zornmesh-xtask/src/main.rs");
+    assert!(
+        xtask.contains("root.join(\"apps/local-ui\")"),
+        "cargo xtask test must run local UI Bun tests"
+    );
 }

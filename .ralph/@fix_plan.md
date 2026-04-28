@@ -87,7 +87,7 @@
   > AC: Given reconnect or backfill cannot complete, When the developer views the affected trace or roster state, Then the UI shows an evidence-gap or recovery panel with safe next actions such as retry reconnect, inspect trace by CLI, inspect daemon health, or export audit evidence, And partial state remains visible rather than being replaced by a generic failure page.
   > AC: Given reconnect/backfill tests run, When browser refresh, transient disconnect, daemon restart, unavailable daemon, schema mismatch, expired session, retained plus purged data, late event, duplicate event, selected-detail stability, and failed backfill scenarios execute, Then reconnect behavior and context preservation are deterministic and fixture-covered.
   > Spec: specs/planning-artifacts/epics.md#story-6-8
-- [ ] Story 6.9: Prove Accessibility, Responsive Behavior, and Browser Fixture Coverage
+- [x] Story 6.9: Prove Accessibility, Responsive Behavior, and Browser Fixture Coverage
   > As a developer or QA reviewer
   > I want the local web UI's critical journeys verified across accessibility, responsive layouts, and supported browsers
   > So that the control room remains usable and trustworthy for real debugging sessions.

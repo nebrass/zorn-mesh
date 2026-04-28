@@ -10,6 +10,8 @@ cd apps/local-ui
 bun install
 bun run build
 bun test
+bun run test:quality
+bun run quality-evidence
 ```
 
 The full Bun toolchain is not required to verify Story 6.1: the structural
@@ -17,6 +19,14 @@ invariants (framework wording, scope manifest, taxonomies, tokens, fixture
 matrix) are checked from Rust via
 [`crates/zornmesh-cli/tests/local_ui_scope.rs`](../../crates/zornmesh-cli/tests/local_ui_scope.rs)
 so CI does not need a Bun runtime to gate the architecture contract.
+
+Story 6.9 adds the local UI quality gate:
+`src/quality-gates.ts` emits stable accessibility, responsive, browser,
+offline-asset, and critical-journey readiness evidence. `bun test` validates
+that the emitted evidence matches
+[`fixtures/ui/quality-readiness.json`](../../fixtures/ui/quality-readiness.json)
+and fails explicitly if required accessibility or browser fixture tooling is
+marked unavailable.
 
 ## Anchors
 

@@ -11,6 +11,8 @@
   "scripts": {
     "build": "bun build src/main.tsx --outdir dist --target browser",
     "test": "bun test",
+    "test:quality": "bun test src/quality-gates.test.ts",
+    "quality-evidence": "bun run src/quality-gates.ts",
     "scope-check": "bun run src/scope.ts"
   },
   "dependencies": {
