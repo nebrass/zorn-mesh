@@ -64,17 +64,7 @@
 - [x] Story 6.4: Render Daemon-Sequence Timeline and Event Detail Panel
 - [x] Story 6.5: Open Focused Trace Reader with CLI Handoff Commands
 - [x] Story 6.6: Send Safe Direct Messages from the UI
-  > As a developer
-  > I want to send a direct message to one selected agent only after reviewing target identity and payload preview
-  > So that human-originated UI sends are intentional, validated, and auditable.
-  > AC: Given a developer selects one target agent, When the safe composer opens in direct mode, Then it shows target display name, stable agent ID, transport/source, status, capability summary, high-privilege warnings, message body, subject/operation where applicable, payload preview, and validation state, And direct mode is visually and textually distinct from broadcast mode.
-  > AC: Given the target is stale, disconnected, missing required capability, denied by allowlist, unavailable because the daemon is offline, or the message body/subject is invalid, When the developer attempts to send, Then the send action is blocked with an explanatory validation error, And disabled actions explain why without requiring hover-only affordances.
-  > AC: Given the direct message is valid, When the developer sends it, Then the UI prevents duplicate submission while pending and displays queued, delivered, acknowledged, rejected, timed-out, or dead-lettered outcome states as they arrive, And persistent outcome display is not replaced by a transient toast.
-  > AC: Given a valid direct send targets one available recipient, When the daemon accepts the send, Then terminal delivery outcome is displayed within 5 seconds unless the explicit agent timeout policy exceeds that budget, And over-budget pending state remains visible with the active timeout policy.
-  > AC: Given the direct send is accepted by the daemon, When audit evidence is persisted, Then the record links actor/session, target recipient, trace/correlation ID, payload summary, validation outcome, and delivery outcome, And raw secrets or protected payload fields are not exposed in UI audit summaries.
-  > AC: Given direct-send tests run, When valid send, invalid recipient, stale recipient, denied capability, empty body, invalid subject, daemon unavailable, duplicate click, rejected send, timed-out send, dead-lettered send, and audit-link scenarios execute, Then direct composer behavior and audit linkage are deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-6-6
-- [ ] Story 6.7: Confirm Broadcast Scope and Show Per-Recipient Outcomes
+- [x] Story 6.7: Confirm Broadcast Scope and Show Per-Recipient Outcomes
   > As a developer
   > I want broadcasts to require explicit scope review and show per-recipient outcomes
   > So that broad-impact sends are deliberate and failures are visible for each target.

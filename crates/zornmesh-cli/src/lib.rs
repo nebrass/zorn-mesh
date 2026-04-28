@@ -7322,6 +7322,783 @@ pub fn ui_referrer_policy() -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
+pub(crate) enum BroadcastExclusionReason {
+    Incompatible,
+    Stale,
+    Disconnected,
+    DeniedByAllowlist,
+    UnsafeScope,
+}
+
+impl BroadcastExclusionReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Incompatible => "incompatible_capability",
+            Self::Stale => "stale_recipient",
+            Self::Disconnected => "disconnected_recipient",
+            Self::DeniedByAllowlist => "denied_by_allowlist",
+            Self::UnsafeScope => "unsafe_scope",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum BroadcastAggregateOutcome {
+    Pending,
+    Success,
+    PartialSuccess,
+    AllFailed,
+}
+
+impl BroadcastAggregateOutcome {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Success => "success",
+            Self::PartialSuccess => "partial_success",
+            Self::AllFailed => "all_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum BroadcastSubmitError {
+    NoConfirmation,
+    DuplicateInFlight,
+    SnapshotDrift,
+    ValidationFailed(DirectComposerValidation),
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct BroadcastExclusion {
+    pub recipient: RosterEntry,
+    pub reason: BroadcastExclusionReason,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct RecipientOutcomeRow {
+    pub agent_id: String,
+    pub display_name: String,
+    pub outcome: DirectSendOutcome,
+    pub failure_reason: Option<&'static str>,
+    pub recorded_unix_ms: Option<u64>,
+    pub retry_handoff_available: bool,
+    pub inspect_handoff_available: bool,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct BroadcastConfirmation {
+    pub snapshot_revision: u64,
+    pub included_recipient_ids: Vec<String>,
+    pub excluded_recipient_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct BroadcastAuditLink {
+    pub actor_session: String,
+    pub correlation_id: String,
+    pub trace_id: String,
+    pub requested_recipient_ids: Vec<String>,
+    pub previewed_snapshot_revision: u64,
+    pub accepted_snapshot_revision: u64,
+    pub actual_recipient_ids: Vec<String>,
+    pub excluded_recipient_ids: Vec<String>,
+    pub drift_reconfirmation_required: bool,
+    pub safe_payload_summary: serde_json::Value,
+    pub per_recipient_outcomes: Vec<(String, &'static str)>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct BroadcastComposerState {
+    pub mode: DirectComposerMode,
+    pub draft: DirectMessageDraft,
+    pub validation: DirectComposerValidation,
+    pub included: Vec<RosterEntry>,
+    pub excluded: Vec<BroadcastExclusion>,
+    pub current_snapshot_revision: u64,
+    pub confirmation: Option<BroadcastConfirmation>,
+    pub pending: bool,
+    pub per_recipient: Vec<RecipientOutcomeRow>,
+    pub aggregate_outcome: BroadcastAggregateOutcome,
+    pub correlation_id: Option<String>,
+    pub audit_link: Option<BroadcastAuditLink>,
+    pub mapping_version: &'static str,
+}
+
+#[allow(dead_code)]
+impl BroadcastComposerState {
+    pub(crate) fn open(
+        recipients: Vec<RosterEntry>,
+        draft: DirectMessageDraft,
+        daemon_offline: bool,
+    ) -> Self {
+        let validation = compute_broadcast_validation(&draft, daemon_offline);
+        let mut included = Vec::new();
+        let mut excluded = Vec::new();
+        for recipient in recipients {
+            match classify_broadcast_recipient(&recipient, &draft.subject) {
+                Ok(()) => included.push(recipient),
+                Err(reason) => excluded.push(BroadcastExclusion { recipient, reason }),
+            }
+        }
+        let current_snapshot_revision = compute_broadcast_snapshot_revision(&included, &draft);
+        Self {
+            mode: DirectComposerMode::Broadcast,
+            draft,
+            validation,
+            included,
+            excluded,
+            current_snapshot_revision,
+            confirmation: None,
+            pending: false,
+            per_recipient: Vec::new(),
+            aggregate_outcome: BroadcastAggregateOutcome::Pending,
+            correlation_id: None,
+            audit_link: None,
+            mapping_version: "zornmesh.ui.broadcast_composer.v1",
+        }
+    }
+
+    pub(crate) fn preview(&self) -> BroadcastConfirmation {
+        BroadcastConfirmation {
+            snapshot_revision: self.current_snapshot_revision,
+            included_recipient_ids: self
+                .included
+                .iter()
+                .map(|entry| entry.agent_id.clone())
+                .collect(),
+            excluded_recipient_ids: self
+                .excluded
+                .iter()
+                .map(|exclusion| exclusion.recipient.agent_id.clone())
+                .collect(),
+        }
+    }
+
+    pub(crate) fn confirm(mut self, confirmation: BroadcastConfirmation) -> Self {
+        self.confirmation = Some(confirmation);
+        self
+    }
+
+    pub(crate) fn submit(
+        mut self,
+        correlation_id: impl Into<String>,
+    ) -> Result<Self, (Self, BroadcastSubmitError)> {
+        if self.pending {
+            return Err((self, BroadcastSubmitError::DuplicateInFlight));
+        }
+        if !self.validation.is_ok() {
+            let validation = self.validation;
+            return Err((
+                self,
+                BroadcastSubmitError::ValidationFailed(validation),
+            ));
+        }
+        let confirmation = match self.confirmation.clone() {
+            Some(value) => value,
+            None => return Err((self, BroadcastSubmitError::NoConfirmation)),
+        };
+        if confirmation.snapshot_revision != self.current_snapshot_revision {
+            self.confirmation = None;
+            return Err((self, BroadcastSubmitError::SnapshotDrift));
+        }
+        self.pending = true;
+        self.correlation_id = Some(correlation_id.into());
+        self.per_recipient = self
+            .included
+            .iter()
+            .map(|entry| RecipientOutcomeRow {
+                agent_id: entry.agent_id.clone(),
+                display_name: entry.display_name.clone(),
+                outcome: DirectSendOutcome::Queued,
+                failure_reason: None,
+                recorded_unix_ms: None,
+                retry_handoff_available: false,
+                inspect_handoff_available: false,
+            })
+            .collect();
+        self.aggregate_outcome = if self.per_recipient.is_empty() {
+            BroadcastAggregateOutcome::AllFailed
+        } else {
+            BroadcastAggregateOutcome::Pending
+        };
+        Ok(self)
+    }
+
+    pub(crate) fn record_recipient_outcome(
+        mut self,
+        recipient_id: &str,
+        outcome: DirectSendOutcome,
+        failure_reason: Option<&'static str>,
+        recorded_unix_ms: u64,
+    ) -> Self {
+        for row in &mut self.per_recipient {
+            if row.agent_id == recipient_id {
+                row.outcome = outcome;
+                row.failure_reason = failure_reason;
+                row.recorded_unix_ms = Some(recorded_unix_ms);
+                row.retry_handoff_available = matches!(
+                    outcome,
+                    DirectSendOutcome::TimedOut | DirectSendOutcome::DeadLettered
+                );
+                row.inspect_handoff_available = matches!(
+                    outcome,
+                    DirectSendOutcome::Rejected
+                        | DirectSendOutcome::TimedOut
+                        | DirectSendOutcome::DeadLettered
+                );
+            }
+        }
+        self.aggregate_outcome = aggregate_broadcast_outcome(&self.per_recipient);
+        if matches!(
+            self.aggregate_outcome,
+            BroadcastAggregateOutcome::Success
+                | BroadcastAggregateOutcome::PartialSuccess
+                | BroadcastAggregateOutcome::AllFailed
+        ) {
+            self.pending = false;
+        }
+        self
+    }
+
+    pub(crate) fn record_drift_after_preview(mut self, new_recipients: Vec<RosterEntry>) -> Self {
+        let mut included = Vec::new();
+        let mut excluded = Vec::new();
+        for recipient in new_recipients {
+            match classify_broadcast_recipient(&recipient, &self.draft.subject) {
+                Ok(()) => included.push(recipient),
+                Err(reason) => excluded.push(BroadcastExclusion { recipient, reason }),
+            }
+        }
+        self.included = included;
+        self.excluded = excluded;
+        self.current_snapshot_revision =
+            compute_broadcast_snapshot_revision(&self.included, &self.draft);
+        if let Some(confirmation) = &self.confirmation
+            && confirmation.snapshot_revision != self.current_snapshot_revision
+        {
+            self.confirmation = None;
+        }
+        self
+    }
+
+    pub(crate) fn finalize_audit(
+        mut self,
+        actor_session: impl Into<String>,
+        trace_id: impl Into<String>,
+        requested_recipient_ids: Vec<String>,
+    ) -> Self {
+        let confirmation = self
+            .confirmation
+            .clone()
+            .unwrap_or_else(|| BroadcastConfirmation {
+                snapshot_revision: 0,
+                included_recipient_ids: Vec::new(),
+                excluded_recipient_ids: Vec::new(),
+            });
+        let drift_reconfirmation_required =
+            confirmation.snapshot_revision != self.current_snapshot_revision;
+        let per_recipient_outcomes: Vec<(String, &'static str)> = self
+            .per_recipient
+            .iter()
+            .map(|row| (row.agent_id.clone(), row.outcome.as_str()))
+            .collect();
+        self.audit_link = Some(BroadcastAuditLink {
+            actor_session: actor_session.into(),
+            correlation_id: self.correlation_id.clone().unwrap_or_default(),
+            trace_id: trace_id.into(),
+            requested_recipient_ids,
+            previewed_snapshot_revision: confirmation.snapshot_revision,
+            accepted_snapshot_revision: self.current_snapshot_revision,
+            actual_recipient_ids: self
+                .included
+                .iter()
+                .map(|entry| entry.agent_id.clone())
+                .collect(),
+            excluded_recipient_ids: self
+                .excluded
+                .iter()
+                .map(|exclusion| exclusion.recipient.agent_id.clone())
+                .collect(),
+            drift_reconfirmation_required,
+            safe_payload_summary: serde_json::json!({
+                "subject": self.draft.subject,
+                "body_len": self.draft.body.len(),
+            }),
+            per_recipient_outcomes,
+        });
+        self
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": self.mapping_version,
+            "mode": self.mode.as_str(),
+            "validation": self.validation.as_str(),
+            "draft": {
+                "subject": self.draft.subject,
+                "body_length": self.draft.body.len(),
+            },
+            "current_snapshot_revision": self.current_snapshot_revision,
+            "confirmation": self.confirmation.as_ref().map(|c| serde_json::json!({
+                "snapshot_revision": c.snapshot_revision,
+                "included_recipient_ids": c.included_recipient_ids,
+                "excluded_recipient_ids": c.excluded_recipient_ids,
+            })),
+            "included": self.included.iter().map(|entry| serde_json::json!({
+                "agent_id": entry.agent_id,
+                "display_name": entry.display_name,
+                "status": entry.status.as_str(),
+            })).collect::<Vec<_>>(),
+            "excluded": self.excluded.iter().map(|exclusion| serde_json::json!({
+                "agent_id": exclusion.recipient.agent_id,
+                "display_name": exclusion.recipient.display_name,
+                "reason": exclusion.reason.as_str(),
+            })).collect::<Vec<_>>(),
+            "pending": self.pending,
+            "aggregate_outcome": self.aggregate_outcome.as_str(),
+            "per_recipient": self.per_recipient.iter().map(|row| serde_json::json!({
+                "agent_id": row.agent_id,
+                "display_name": row.display_name,
+                "outcome": row.outcome.as_str(),
+                "failure_reason": row.failure_reason,
+                "recorded_unix_ms": row.recorded_unix_ms,
+                "retry_handoff_available": row.retry_handoff_available,
+                "inspect_handoff_available": row.inspect_handoff_available,
+            })).collect::<Vec<_>>(),
+            "correlation_id": self.correlation_id,
+            "audit_link": self.audit_link.as_ref().map(|link| serde_json::json!({
+                "actor_session": link.actor_session,
+                "correlation_id": link.correlation_id,
+                "trace_id": link.trace_id,
+                "requested_recipient_ids": link.requested_recipient_ids,
+                "previewed_snapshot_revision": link.previewed_snapshot_revision,
+                "accepted_snapshot_revision": link.accepted_snapshot_revision,
+                "actual_recipient_ids": link.actual_recipient_ids,
+                "excluded_recipient_ids": link.excluded_recipient_ids,
+                "drift_reconfirmation_required": link.drift_reconfirmation_required,
+                "safe_payload_summary": link.safe_payload_summary,
+                "per_recipient_outcomes": link.per_recipient_outcomes.iter().map(|(id, outcome)| {
+                    serde_json::json!({"agent_id": id, "outcome": outcome})
+                }).collect::<Vec<_>>(),
+            })),
+        })
+    }
+}
+
+#[allow(dead_code)]
+fn compute_broadcast_validation(
+    draft: &DirectMessageDraft,
+    daemon_offline: bool,
+) -> DirectComposerValidation {
+    if daemon_offline {
+        return DirectComposerValidation::DaemonOffline;
+    }
+    if draft.body.trim().is_empty() {
+        return DirectComposerValidation::EmptyBody;
+    }
+    if draft.body.len() > DIRECT_BODY_BUDGET {
+        return DirectComposerValidation::BodyTooLarge;
+    }
+    if draft.subject.trim().is_empty() {
+        return DirectComposerValidation::EmptySubject;
+    }
+    if draft.subject == "zorn" || draft.subject.starts_with("zorn.") {
+        return DirectComposerValidation::ReservedSubject;
+    }
+    DirectComposerValidation::Ok
+}
+
+#[allow(dead_code)]
+fn classify_broadcast_recipient(
+    recipient: &RosterEntry,
+    subject: &str,
+) -> Result<(), BroadcastExclusionReason> {
+    if recipient
+        .warnings
+        .iter()
+        .any(|warning| *warning == "denied_by_allowlist")
+    {
+        return Err(BroadcastExclusionReason::DeniedByAllowlist);
+    }
+    if recipient
+        .warnings
+        .iter()
+        .any(|warning| *warning == "unsafe_scope")
+    {
+        return Err(BroadcastExclusionReason::UnsafeScope);
+    }
+    match recipient.status {
+        RosterStatus::Stale => return Err(BroadcastExclusionReason::Stale),
+        RosterStatus::Disconnected | RosterStatus::Errored => {
+            return Err(BroadcastExclusionReason::Disconnected);
+        }
+        _ => {}
+    }
+    if !recipient
+        .capability_summary
+        .iter()
+        .any(|cap| cap == subject)
+    {
+        return Err(BroadcastExclusionReason::Incompatible);
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn compute_broadcast_snapshot_revision(included: &[RosterEntry], draft: &DirectMessageDraft) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in draft.subject.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for byte in (draft.body.len() as u64).to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let mut sorted_ids: Vec<&str> = included.iter().map(|entry| entry.agent_id.as_str()).collect();
+    sorted_ids.sort();
+    for id in sorted_ids {
+        hash ^= 0x9e_3779_b97f_4a7c_15;
+        hash = hash.wrapping_mul(0x100000001b3);
+        for byte in id.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+#[allow(dead_code)]
+fn aggregate_broadcast_outcome(rows: &[RecipientOutcomeRow]) -> BroadcastAggregateOutcome {
+    if rows.is_empty() {
+        return BroadcastAggregateOutcome::AllFailed;
+    }
+    let mut any_success = false;
+    let mut any_failure = false;
+    let mut any_pending = false;
+    for row in rows {
+        match row.outcome {
+            DirectSendOutcome::Acknowledged | DirectSendOutcome::Delivered => any_success = true,
+            DirectSendOutcome::Rejected
+            | DirectSendOutcome::TimedOut
+            | DirectSendOutcome::DeadLettered => any_failure = true,
+            DirectSendOutcome::Queued | DirectSendOutcome::Stale => any_pending = true,
+        }
+    }
+    if any_pending {
+        return BroadcastAggregateOutcome::Pending;
+    }
+    match (any_success, any_failure) {
+        (true, false) => BroadcastAggregateOutcome::Success,
+        (true, true) => BroadcastAggregateOutcome::PartialSuccess,
+        (false, true) => BroadcastAggregateOutcome::AllFailed,
+        (false, false) => BroadcastAggregateOutcome::Pending,
+    }
+}
+
+#[cfg(test)]
+mod broadcast_composer_tests {
+    use super::*;
+
+    fn entry(id: &str, status: RosterStatus, capability: &str) -> RosterEntry {
+        RosterEntry {
+            display_name: id.to_owned(),
+            agent_id: id.to_owned(),
+            status,
+            transport: RosterTransport::NativeSdk,
+            capability_summary: vec![capability.to_owned()],
+            last_seen_unix_ms: 1_700_000_000_000,
+            recent_activity_count: 0,
+            warnings: Vec::new(),
+            high_privilege_required: false,
+        }
+    }
+
+    fn draft(subject: &str, body: &str) -> DirectMessageDraft {
+        DirectMessageDraft {
+            subject: subject.to_owned(),
+            body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn open_partitions_recipients_into_included_and_excluded() {
+        let active = entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go");
+        let stale = entry("agent.local/b", RosterStatus::Stale, "mesh.broadcast.go");
+        let mismatched = entry("agent.local/c", RosterStatus::Active, "mesh.other");
+        let mut denied = entry("agent.local/d", RosterStatus::Active, "mesh.broadcast.go");
+        denied.warnings.push("denied_by_allowlist");
+        let state = BroadcastComposerState::open(
+            vec![active.clone(), stale, mismatched, denied],
+            draft("mesh.broadcast.go", "hi everyone"),
+            false,
+        );
+        assert_eq!(state.mode, DirectComposerMode::Broadcast);
+        assert_eq!(state.included.len(), 1);
+        assert_eq!(state.included[0].agent_id, "agent.local/a");
+        let exclusion_reasons: Vec<&'static str> = state
+            .excluded
+            .iter()
+            .map(|excl| excl.reason.as_str())
+            .collect();
+        assert!(exclusion_reasons.contains(&"stale_recipient"));
+        assert!(exclusion_reasons.contains(&"incompatible_capability"));
+        assert!(exclusion_reasons.contains(&"denied_by_allowlist"));
+    }
+
+    #[test]
+    fn submit_without_confirmation_is_rejected() {
+        let state = BroadcastComposerState::open(
+            vec![entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go")],
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        match state.submit("corr-broadcast") {
+            Err((_state, BroadcastSubmitError::NoConfirmation)) => {}
+            other => panic!("expected NoConfirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirmed_broadcast_with_unchanged_snapshot_marks_pending_and_seeds_recipient_rows() {
+        let state = BroadcastComposerState::open(
+            vec![
+                entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go"),
+                entry("agent.local/b", RosterStatus::Active, "mesh.broadcast.go"),
+            ],
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        let snapshot = state.preview();
+        assert_eq!(snapshot.included_recipient_ids.len(), 2);
+        let confirmed = state.confirm(snapshot);
+        let pending = confirmed.submit("corr-broadcast").expect("submit accepted");
+        assert!(pending.pending);
+        assert_eq!(pending.per_recipient.len(), 2);
+        assert!(pending
+            .per_recipient
+            .iter()
+            .all(|row| row.outcome == DirectSendOutcome::Queued));
+        assert_eq!(pending.aggregate_outcome, BroadcastAggregateOutcome::Pending);
+    }
+
+    #[test]
+    fn drift_after_preview_invalidates_confirmation_and_blocks_submit() {
+        let state = BroadcastComposerState::open(
+            vec![
+                entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go"),
+                entry("agent.local/b", RosterStatus::Active, "mesh.broadcast.go"),
+            ],
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        let snapshot = state.preview();
+        let confirmed = state.confirm(snapshot.clone());
+        // Recipient set drifts: b becomes stale, c joins.
+        let drifted = confirmed.record_drift_after_preview(vec![
+            entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go"),
+            entry("agent.local/b", RosterStatus::Stale, "mesh.broadcast.go"),
+            entry("agent.local/c", RosterStatus::Active, "mesh.broadcast.go"),
+        ]);
+        assert!(
+            drifted.confirmation.is_none(),
+            "drift invalidates the prior confirmation"
+        );
+        match drifted.submit("corr-broadcast") {
+            Err((_state, BroadcastSubmitError::NoConfirmation)) => {}
+            other => panic!("drifted submit must require reconfirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_snapshot_reconfirmation_is_explicitly_required() {
+        let state = BroadcastComposerState::open(
+            vec![
+                entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go"),
+                entry("agent.local/b", RosterStatus::Active, "mesh.broadcast.go"),
+            ],
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        let stale_snapshot = BroadcastConfirmation {
+            snapshot_revision: state.current_snapshot_revision.wrapping_add(1),
+            included_recipient_ids: vec!["agent.local/a".to_owned()],
+            excluded_recipient_ids: Vec::new(),
+        };
+        let confirmed = state.confirm(stale_snapshot);
+        match confirmed.submit("corr-broadcast") {
+            Err((_state, BroadcastSubmitError::SnapshotDrift)) => {}
+            other => panic!("expected snapshot drift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn per_recipient_outcomes_drive_aggregate_state_through_partial_failure() {
+        let state = BroadcastComposerState::open(
+            vec![
+                entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go"),
+                entry("agent.local/b", RosterStatus::Active, "mesh.broadcast.go"),
+                entry("agent.local/c", RosterStatus::Active, "mesh.broadcast.go"),
+            ],
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        let snapshot = state.preview();
+        let after_submit = state.confirm(snapshot).submit("corr-broadcast").expect("submit");
+
+        let one_done = after_submit.record_recipient_outcome(
+            "agent.local/a",
+            DirectSendOutcome::Acknowledged,
+            None,
+            1_700_000_001_000,
+        );
+        assert_eq!(one_done.aggregate_outcome, BroadcastAggregateOutcome::Pending);
+        assert!(one_done.pending);
+
+        let two_done = one_done.record_recipient_outcome(
+            "agent.local/b",
+            DirectSendOutcome::Rejected,
+            Some("policy_denied"),
+            1_700_000_001_100,
+        );
+        assert_eq!(two_done.aggregate_outcome, BroadcastAggregateOutcome::Pending);
+
+        let final_state = two_done.record_recipient_outcome(
+            "agent.local/c",
+            DirectSendOutcome::DeadLettered,
+            Some("retry_exhausted"),
+            1_700_000_001_200,
+        );
+        assert_eq!(
+            final_state.aggregate_outcome,
+            BroadcastAggregateOutcome::PartialSuccess
+        );
+        assert!(!final_state.pending);
+        let row_c = final_state
+            .per_recipient
+            .iter()
+            .find(|row| row.agent_id == "agent.local/c")
+            .unwrap();
+        assert!(row_c.retry_handoff_available);
+        assert!(row_c.inspect_handoff_available);
+    }
+
+    #[test]
+    fn all_failed_aggregate_when_every_recipient_terminates_with_failure() {
+        let state = BroadcastComposerState::open(
+            vec![
+                entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go"),
+                entry("agent.local/b", RosterStatus::Active, "mesh.broadcast.go"),
+            ],
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        let after = state
+            .clone()
+            .confirm(state.preview())
+            .submit("corr-broadcast")
+            .expect("submit")
+            .record_recipient_outcome(
+                "agent.local/a",
+                DirectSendOutcome::Rejected,
+                Some("policy_denied"),
+                1_700_000_001_000,
+            )
+            .record_recipient_outcome(
+                "agent.local/b",
+                DirectSendOutcome::TimedOut,
+                Some("agent_timeout"),
+                1_700_000_001_100,
+            );
+        assert_eq!(after.aggregate_outcome, BroadcastAggregateOutcome::AllFailed);
+        assert!(!after.pending);
+    }
+
+    #[test]
+    fn duplicate_submit_is_rejected_while_pending() {
+        let state = BroadcastComposerState::open(
+            vec![entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go")],
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        let snapshot = state.preview();
+        let pending = state.confirm(snapshot).submit("corr-1").expect("first submit");
+        match pending.submit("corr-2") {
+            Err((_state, BroadcastSubmitError::DuplicateInFlight)) => {}
+            other => panic!("expected duplicate-in-flight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audit_link_records_snapshot_revisions_drift_status_and_per_recipient_outcomes() {
+        let state = BroadcastComposerState::open(
+            vec![
+                entry("agent.local/a", RosterStatus::Active, "mesh.broadcast.go"),
+                entry("agent.local/b", RosterStatus::Active, "mesh.broadcast.go"),
+            ],
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        let snapshot = state.preview();
+        let confirmed = state.confirm(snapshot);
+        let revision_before = confirmed.current_snapshot_revision;
+        let final_state = confirmed
+            .submit("corr-broadcast")
+            .expect("submit")
+            .record_recipient_outcome(
+                "agent.local/a",
+                DirectSendOutcome::Acknowledged,
+                None,
+                1_700_000_001_000,
+            )
+            .record_recipient_outcome(
+                "agent.local/b",
+                DirectSendOutcome::Acknowledged,
+                None,
+                1_700_000_001_100,
+            )
+            .finalize_audit(
+                "session-1",
+                "trace-1",
+                vec!["agent.local/a".to_owned(), "agent.local/b".to_owned()],
+            );
+        let json = final_state.to_json();
+        let audit = &json["audit_link"];
+        assert_eq!(audit["previewed_snapshot_revision"], revision_before);
+        assert_eq!(audit["accepted_snapshot_revision"], revision_before);
+        assert_eq!(audit["drift_reconfirmation_required"], false);
+        let outcomes = audit["per_recipient_outcomes"].as_array().unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0]["outcome"], "acknowledged");
+        assert_eq!(audit["safe_payload_summary"]["subject"], "mesh.broadcast.go");
+        assert_eq!(audit["safe_payload_summary"]["body_len"], 2);
+    }
+
+    #[test]
+    fn schema_version_pins_broadcast_composer_contract() {
+        let state = BroadcastComposerState::open(
+            Vec::new(),
+            draft("mesh.broadcast.go", "hi"),
+            false,
+        );
+        assert_eq!(state.mapping_version, "zornmesh.ui.broadcast_composer.v1");
+        assert_eq!(
+            state.to_json()["schema_version"],
+            "zornmesh.ui.broadcast_composer.v1"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum DirectComposerMode {
     Direct,
     Broadcast,
