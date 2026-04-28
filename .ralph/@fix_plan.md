@@ -46,17 +46,7 @@
 - [x] Story 4.7: Live-Tail Envelopes by Subject Pattern
 - [x] Story 4.8: Redeliver Previously Sent Envelopes Safely
 - [x] Story 4.9: Configure Retention and Surface Retention Gaps
-  > As an operator
-  > I want configurable retention for messages, dead letters, and audit records
-  > So that local storage remains bounded while trace gaps are explicit and explainable.
-  > AC: Given default retention settings are active, When messages, dead letters, and audit records age past their configured thresholds, Then retention jobs purge eligible records within the documented window, And purge actions are themselves observable as audit/retention events.
-  > AC: Given retention purges audit entries from the middle of an audit hash chain, When purge work commits, Then purged rows are replaced by retention checkpoint/tombstone evidence containing sequence range, hash anchors, purge reason, and safe metadata, And offline verification can distinguish valid retention continuity from tampering without requiring raw purged payloads.
-  > AC: Given an operator configures retention by age, count, or capability class, When the daemon starts or reloads supported config, Then valid settings are applied deterministically, And invalid settings are rejected with stable validation errors and no partial unsafe config.
-  > AC: Given trace or inspect output references records removed by retention, When a developer queries the affected correlation ID or time window, Then the output marks a retention gap explicitly, And provides next-step guidance instead of returning misleading empty success.
-  > AC: Given retention sweeps run while publishes, subscriptions, trace, or inspect operations are active, When purge work executes, Then active read/write operations are not blocked beyond the documented budget, And no unexpired record is removed.
-  > AC: Given retention tests run, When default purge, configured purge, invalid config, retention gap, middle-chain purge, retention checkpoint, verify-after-retention, active read/write, and audit-of-purge scenarios execute, Then purging behavior is deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-4-9
-- [ ] Story 4.10: Verify Audit Log Tamper Evidence Offline
+- [x] Story 4.10: Verify Audit Log Tamper Evidence Offline
   > As a compliance-minded developer or operator
   > I want to verify the audit log hash chain without a running daemon
   > So that I can prove local evidence has not been silently modified.

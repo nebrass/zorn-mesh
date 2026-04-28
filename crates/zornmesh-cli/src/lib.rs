@@ -18,8 +18,8 @@ use std::{
 use zornmesh_broker::SubjectPattern;
 use zornmesh_store::{
     DeadLetterFailureCategory, DeadLetterQuery, EvidenceAuditEntry, EvidenceEnvelopeRecord,
-    EvidenceQuery, EvidenceStateTransitionInput, EvidenceStore, FileEvidenceStore, RetentionPolicy,
-    RetentionReport,
+    EvidenceQuery, EvidenceStateTransitionInput, EvidenceStore, EvidenceStoreErrorCode,
+    FileEvidenceStore, RetentionPolicy, RetentionReport,
 };
 
 pub const ROOT_HELP: &str = include_str!("../../../fixtures/cli/root-help.stdout");
@@ -27,6 +27,7 @@ pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.st
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
+pub const AUDIT_HELP: &str = "zornmesh audit\nVerify the audit log hash chain offline.\n\nUsage: zornmesh audit verify [OPTIONS]\n\nOptions:\n      --evidence <PATH>  Read this evidence log\n      --output <FORMAT>  Select human or json output\n  -h, --help            Print help\n\nVerification walks the on-disk hash chain without requiring a running\ndaemon, distinguishing valid, tampered, missing, unreadable, and\nunsupported-schema results with stable exit codes.\n";
 pub const RETENTION_HELP: &str = "zornmesh retention\nPlan retention purges and surface retention gaps.\n\nUsage: zornmesh retention plan [OPTIONS]\n\nOptions:\n      --evidence <PATH>     Read this evidence log\n      --max-age-ms <MS>     Mark records older than this age as purgeable\n      --max-count <N>       Mark all but the most recent N envelopes as purgeable\n      --now-unix-ms <MS>    Override the current time (defaults to wall clock)\n      --output <FORMAT>     Select human or json output\n  -h, --help                Print help\n\nThe plan subcommand never mutates the evidence log; it computes the records\nthat would be purged under the configured policy and reports retention\ncheckpoint metadata that downstream tooling can verify offline.\n";
 pub const VERSION: &str = "zornmesh 0.1.0\n";
 const READ_SCHEMA_VERSION: &str = "zornmesh.cli.read.v1";
@@ -47,7 +48,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -83,7 +84,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay retention completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention audit completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -103,7 +104,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -485,6 +486,8 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
             print_help("retention help", RETENTION_HELP, invocation.output)
         }
         [command, rest @ ..] if command == "retention" => run_retention(rest, &invocation),
+        [command] if command == "audit" => print_help("audit help", AUDIT_HELP, invocation.output),
+        [command, rest @ ..] if command == "audit" => run_audit(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2866,6 +2869,238 @@ fn evaluate_replay_eligibility(
         return ("ineligible", Some("redaction_blocks_replay"));
     }
     ("eligible", None)
+}
+
+#[derive(Debug, Clone, Default)]
+struct AuditVerifyOptions {
+    evidence_path: Option<PathBuf>,
+}
+
+fn parse_audit_verify_options(args: &[String]) -> Result<AuditVerifyOptions, CliError> {
+    let mut options = AuditVerifyOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = arg.strip_prefix("--evidence=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence", value)?);
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--evidence-path=") {
+            options.evidence_path = Some(parse_non_empty_path("--evidence-path", value)?);
+            index += 1;
+        } else if matches!(arg.as_str(), "--evidence" | "--evidence-path") {
+            let value = inspect_option_value(args, index, arg)?;
+            options.evidence_path = Some(parse_non_empty_path(arg, value)?);
+            index += 2;
+        } else {
+            return Err(CliError::new(
+                "E_UNSUPPORTED_COMMAND",
+                format!("unsupported zornmesh audit argument '{arg}'"),
+                ExitKind::UserError,
+            ));
+        }
+    }
+    Ok(options)
+}
+
+fn run_audit(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("audit help", AUDIT_HELP, invocation.output),
+        [flag] if is_help(flag) => print_help("audit help", AUDIT_HELP, invocation.output),
+        [command, rest @ ..] if command == "verify" => {
+            let options = parse_audit_verify_options(rest)?;
+            audit_verify(options, invocation.output)
+        }
+        [command, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh audit subcommand '{command}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn audit_verify(options: AuditVerifyOptions, output: OutputFormat) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("audit verify"));
+    }
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?.ok_or_else(|| {
+        CliError::new(
+            "E_AUDIT_EVIDENCE_PATH_REQUIRED",
+            format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            ),
+            ExitKind::UserError,
+        )
+    })?;
+
+    let metadata = fs::metadata(&evidence_path);
+    if let Err(error) = &metadata
+        && error.kind() == std::io::ErrorKind::NotFound
+    {
+        return emit_audit_outcome(
+            output,
+            AuditVerificationOutcome {
+                status: "missing_store",
+                exit_kind: ExitKind::NotFound,
+                evidence_path: &evidence_path,
+                audit_entries: 0,
+                first_break: None,
+                error_code: "E_AUDIT_STORE_MISSING",
+                remediation: "evidence store does not exist at the configured path; verify the daemon has written records or correct --evidence",
+            },
+        );
+    }
+    if let Err(error) = &metadata {
+        return emit_audit_outcome(
+            output,
+            AuditVerificationOutcome {
+                status: "unreadable",
+                exit_kind: ExitKind::Io,
+                evidence_path: &evidence_path,
+                audit_entries: 0,
+                first_break: Some(format!("evidence store metadata unavailable: {error}")),
+                error_code: "E_AUDIT_STORE_UNREADABLE",
+                remediation: "check filesystem permissions and that the path is a regular file",
+            },
+        );
+    }
+
+    match FileEvidenceStore::open_evidence(&evidence_path) {
+        Ok(store) => {
+            let count = store.audit_entries().len();
+            emit_audit_outcome(
+                output,
+                AuditVerificationOutcome {
+                    status: "valid",
+                    exit_kind: ExitKind::UserError,
+                    evidence_path: &evidence_path,
+                    audit_entries: count,
+                    first_break: None,
+                    error_code: "",
+                    remediation: "",
+                },
+            )
+        }
+        Err(error) => {
+            let (status, exit_kind, code, remediation) = match error.code() {
+                EvidenceStoreErrorCode::FutureSchema => (
+                    "unsupported_schema",
+                    ExitKind::Validation,
+                    "E_AUDIT_UNSUPPORTED_SCHEMA",
+                    "the evidence store was written by a newer schema version; upgrade the verifier to read it",
+                ),
+                EvidenceStoreErrorCode::Corrupt | EvidenceStoreErrorCode::Validation => (
+                    "tampered",
+                    ExitKind::Validation,
+                    "E_AUDIT_VERIFICATION_FAILED",
+                    "audit chain broken; do not trust this evidence and investigate before further use",
+                ),
+                EvidenceStoreErrorCode::MigrationLocked => (
+                    "unreadable",
+                    ExitKind::TemporaryUnavailable,
+                    "E_AUDIT_STORE_LOCKED",
+                    "evidence store is locked for migration; retry once the migration completes",
+                ),
+                EvidenceStoreErrorCode::Io => (
+                    "unreadable",
+                    ExitKind::Io,
+                    "E_AUDIT_STORE_UNREADABLE",
+                    "the evidence store could not be read; check filesystem permissions and integrity",
+                ),
+            };
+            emit_audit_outcome(
+                output,
+                AuditVerificationOutcome {
+                    status,
+                    exit_kind,
+                    evidence_path: &evidence_path,
+                    audit_entries: 0,
+                    first_break: Some(error.message().to_owned()),
+                    error_code: code,
+                    remediation,
+                },
+            )
+        }
+    }
+}
+
+struct AuditVerificationOutcome<'a> {
+    status: &'static str,
+    exit_kind: ExitKind,
+    evidence_path: &'a Path,
+    audit_entries: usize,
+    first_break: Option<String>,
+    error_code: &'static str,
+    remediation: &'static str,
+}
+
+fn emit_audit_outcome(
+    output: OutputFormat,
+    outcome: AuditVerificationOutcome<'_>,
+) -> Result<(), CliError> {
+    let path_string = outcome.evidence_path.display().to_string();
+    let warning = if outcome.status == "valid" {
+        None
+    } else {
+        Some(DiagnosticWarning::new(
+            outcome.error_code,
+            outcome
+                .first_break
+                .clone()
+                .unwrap_or_else(|| outcome.remediation.to_owned()),
+        ))
+    };
+    let warnings: Vec<DiagnosticWarning> = warning.into_iter().collect();
+
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "audit verify: status={} entries={} evidence={}",
+                outcome.status, outcome.audit_entries, path_string
+            );
+            if let Some(first_break) = &outcome.first_break {
+                println!("  first_break: {first_break}");
+            }
+            if !outcome.remediation.is_empty() {
+                println!("  remediation: {}", outcome.remediation);
+            }
+            for warning in &warnings {
+                eprintln!("{}: {}", warning.code, warning.message);
+            }
+        }
+        OutputFormat::Json => {
+            let data = serde_json::json!({
+                "status": outcome.status,
+                "evidence_path": path_string,
+                "audit_entries": outcome.audit_entries,
+                "first_break": outcome.first_break,
+                "error_code": if outcome.error_code.is_empty() { None } else { Some(outcome.error_code) },
+                "remediation": if outcome.remediation.is_empty() { None } else { Some(outcome.remediation) },
+            });
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "audit",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before audit rendering"),
+    }
+
+    if outcome.status == "valid" {
+        Ok(())
+    } else {
+        Err(CliError::new(
+            outcome.error_code,
+            outcome
+                .first_break
+                .unwrap_or_else(|| outcome.remediation.to_owned()),
+            outcome.exit_kind,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -2455,6 +2455,196 @@ fn retention_plan_max_count_marks_oldest_envelopes_for_purge() {
     );
 }
 
+fn seed_audit_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("audit evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/source",
+                    "mesh.audit.created",
+                    "corr-audit",
+                    1_700_000_000_500,
+                ),
+                "msg-audit-1",
+                "trace-audit",
+                "accepted",
+            )
+            .expect("audit envelope input")
+            .with_target("agent.local/target"),
+        )
+        .expect("audit envelope persists");
+}
+
+#[test]
+fn audit_verify_reports_valid_chain_for_untouched_store() {
+    let path = temp_evidence_path("audit-valid");
+    seed_audit_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "audit",
+        "verify",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "audit");
+    assert_eq!(value["data"]["status"], "valid");
+    assert_eq!(value["data"]["audit_entries"], 1);
+    assert!(value["data"]["first_break"].is_null());
+    assert!(
+        value["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .is_empty(),
+        "valid chain emits no warnings"
+    );
+}
+
+#[test]
+fn audit_verify_detects_modified_row_and_reports_tamper() {
+    let path = temp_evidence_path("audit-tampered");
+    seed_audit_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let original = fs::read_to_string(&path).expect("read evidence file");
+    let mut tampered_lines: Vec<String> = original.lines().map(str::to_owned).collect();
+    let target = tampered_lines
+        .iter_mut()
+        .find(|line| line.starts_with("v1|accepted|"))
+        .expect("accepted envelope row exists");
+    let last_char = target.pop().expect("non-empty row");
+    let replacement = if last_char == 'a' { 'b' } else { 'a' };
+    target.push(replacement);
+    let tampered = format!("{}\n", tampered_lines.join("\n"));
+    assert_ne!(original, tampered, "tamper modified the file content");
+    fs::write(&path, tampered).expect("rewrite tampered evidence");
+
+    let output = zornmesh(&[
+        "audit",
+        "verify",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success(), "tampered chain fails verification");
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_AUDIT_VERIFICATION_FAILED"));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("structured outcome on stdout");
+    assert_eq!(value["data"]["status"], "tampered");
+    assert!(
+        value["data"]["first_break"]
+            .as_str()
+            .map(|message| !message.is_empty())
+            .unwrap_or(false),
+        "tampered outcome includes first-break diagnostics"
+    );
+    assert_eq!(value["data"]["error_code"], "E_AUDIT_VERIFICATION_FAILED");
+}
+
+#[test]
+fn audit_verify_detects_deleted_audit_row() {
+    let path = temp_evidence_path("audit-deleted");
+    let store = FileEvidenceStore::open_evidence(&path).expect("audit evidence store opens");
+    for index in 0..2u64 {
+        store
+            .persist_accepted_envelope(
+                EvidenceEnvelopeInput::new(
+                    evidence_envelope(
+                        "agent.local/source",
+                        "mesh.audit.created",
+                        &format!("corr-audit-{index}"),
+                        1_700_000_000_600 + index,
+                    ),
+                    &format!("msg-audit-{index}"),
+                    &format!("trace-audit-{index}"),
+                    "accepted",
+                )
+                .expect("audit envelope input")
+                .with_target("agent.local/target"),
+            )
+            .expect("audit envelope persists");
+    }
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let original = fs::read_to_string(&path).expect("read evidence file");
+    let mut lines: Vec<&str> = original.lines().collect();
+    assert!(lines.len() >= 3, "schema + two accepted envelopes");
+    lines.remove(1);
+    let truncated = format!("{}\n", lines.join("\n"));
+    fs::write(&path, truncated).expect("rewrite truncated evidence");
+
+    let output = zornmesh(&[
+        "audit",
+        "verify",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_AUDIT_VERIFICATION_FAILED"));
+}
+
+#[test]
+fn audit_verify_reports_missing_store() {
+    let dir = std::env::temp_dir().join(format!(
+        "zornmesh-audit-missing-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos(),
+    ));
+    let missing_path = dir.join("evidence.log");
+    let path_str = missing_path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "audit",
+        "verify",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success(), "missing store fails verification");
+    assert_eq!(output.status.code(), Some(66));
+    assert!(stderr(&output).contains("E_AUDIT_STORE_MISSING"));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("structured outcome on stdout");
+    assert_eq!(value["data"]["status"], "missing_store");
+}
+
+#[test]
+fn audit_verify_reports_unsupported_schema_for_future_marker() {
+    let path = temp_evidence_path("audit-future-schema");
+    fs::write(&path, "v999|schema|evidence-store\n").expect("write future schema marker");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "audit",
+        "verify",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success(), "future schema fails verification");
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_AUDIT_UNSUPPORTED_SCHEMA"));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("structured outcome on stdout");
+    assert_eq!(value["data"]["status"], "unsupported_schema");
+}
+
 #[test]
 fn tail_invalid_subject_pattern_returns_validation_error() {
     let path = temp_evidence_path("tail-invalid");
