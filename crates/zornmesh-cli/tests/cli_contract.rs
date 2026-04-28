@@ -2455,6 +2455,252 @@ fn retention_plan_max_count_marks_oldest_envelopes_for_purge() {
     );
 }
 
+fn seed_redact_evidence(path: &std::path::Path) {
+    let store = FileEvidenceStore::open_evidence(path).expect("redact evidence store opens");
+    store
+        .persist_accepted_envelope(
+            EvidenceEnvelopeInput::new(
+                evidence_envelope(
+                    "agent.local/sender",
+                    "mesh.redact.original",
+                    "corr-redact",
+                    1_700_000_000_700,
+                ),
+                "msg-redact-original",
+                "trace-redact",
+                "accepted",
+            )
+            .expect("redact envelope input")
+            .with_target("agent.local/recipient"),
+        )
+        .expect("redact envelope persists");
+}
+
+#[test]
+fn redact_preview_emits_confirmation_token_without_persisting() {
+    let path = temp_evidence_path("redact-preview");
+    seed_redact_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+    let baseline = {
+        let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+        store.audit_entries().len()
+    };
+
+    let output = zornmesh(&[
+        "redact",
+        "apply",
+        "--evidence",
+        &path_str,
+        "--message-id",
+        "msg-redact-original",
+        "--actor",
+        "operator.local/dpo",
+        "--policy-version",
+        "privacy-2026-01",
+        "--reason",
+        "subject_data_request",
+        "--preview",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_read_json_contract(&value, "redact");
+    assert_eq!(value["data"]["mode"], "preview");
+    assert_eq!(value["data"]["side_effect"], false);
+    let token = value["data"]["confirmation_token"]
+        .as_str()
+        .expect("preview confirmation token");
+    assert!(token.starts_with("zmrk-"));
+    assert_eq!(value["data"]["scope"]["message_id"], "msg-redact-original");
+    assert_eq!(
+        value["data"]["scope"]["checkpoint_daemon_sequence"],
+        1
+    );
+
+    let post = {
+        let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+        store.audit_entries().len()
+    };
+    assert_eq!(post, baseline, "preview must not persist new audit rows");
+}
+
+#[test]
+fn redact_without_confirmation_refuses_with_validation_exit() {
+    let path = temp_evidence_path("redact-refuse");
+    seed_redact_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "redact",
+        "apply",
+        "--evidence",
+        &path_str,
+        "--message-id",
+        "msg-redact-original",
+        "--actor",
+        "operator.local/dpo",
+        "--policy-version",
+        "privacy-2026-01",
+        "--reason",
+        "subject_data_request",
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_REDACT_CONFIRMATION_REQUIRED"));
+}
+
+#[test]
+fn redact_yes_persists_append_only_redaction_proof_and_passes_audit_verify() {
+    let path = temp_evidence_path("redact-yes");
+    seed_redact_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+    let baseline = {
+        let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+        store.audit_entries().len()
+    };
+
+    let output = zornmesh(&[
+        "redact",
+        "apply",
+        "--evidence",
+        &path_str,
+        "--message-id",
+        "msg-redact-original",
+        "--actor",
+        "operator.local/dpo",
+        "--policy-version",
+        "privacy-2026-01",
+        "--reason",
+        "subject_data_request",
+        "--yes",
+        "--output",
+        "json",
+    ]);
+    assert_success(&output);
+    let value = read_json(&output);
+    assert_eq!(value["data"]["mode"], "commit");
+    assert_eq!(value["data"]["side_effect"], true);
+    assert_eq!(value["data"]["audit_action"], "redaction_applied");
+    assert_eq!(value["data"]["audit_state_to"], "redaction_applied");
+    let prev_hash = value["data"]["audit_previous_hash"]
+        .as_str()
+        .expect("previous hash present");
+    let curr_hash = value["data"]["audit_current_hash"]
+        .as_str()
+        .expect("current hash present");
+    assert_ne!(prev_hash, curr_hash, "redaction proof advances the hash chain");
+
+    let store = FileEvidenceStore::open_evidence(&path).expect("evidence store reopens");
+    let audit = store.audit_entries();
+    assert_eq!(audit.len(), baseline + 1, "redaction appends a single audit row");
+    let last = audit.last().expect("trailing audit entry");
+    assert_eq!(last.action(), "redaction_applied");
+    assert!(last.outcome_details().contains("policy_version=privacy-2026-01"));
+    assert!(last.outcome_details().contains("actor=operator.local/dpo"));
+
+    let verify = zornmesh(&[
+        "audit",
+        "verify",
+        "--evidence",
+        &path_str,
+        "--output",
+        "json",
+    ]);
+    assert!(
+        verify.status.success(),
+        "audit verify still passes after authorised redaction"
+    );
+    let verify_value: serde_json::Value =
+        serde_json::from_slice(&verify.stdout).expect("verify outcome JSON");
+    assert_eq!(verify_value["data"]["status"], "valid");
+}
+
+#[test]
+fn redact_with_stale_token_refuses() {
+    let path = temp_evidence_path("redact-stale");
+    seed_redact_evidence(&path);
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "redact",
+        "apply",
+        "--evidence",
+        &path_str,
+        "--message-id",
+        "msg-redact-original",
+        "--actor",
+        "operator.local/dpo",
+        "--policy-version",
+        "privacy-2026-01",
+        "--reason",
+        "subject_data_request",
+        "--confirmation-token",
+        "zmrk-deadbeefdeadbeef",
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_REDACT_STALE_CONFIRMATION"));
+}
+
+#[test]
+fn redact_missing_message_returns_not_found() {
+    let path = temp_evidence_path("redact-missing");
+    FileEvidenceStore::open_evidence(&path).expect("evidence store opens");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "redact",
+        "apply",
+        "--evidence",
+        &path_str,
+        "--message-id",
+        "missing-msg",
+        "--actor",
+        "operator.local/dpo",
+        "--policy-version",
+        "privacy-2026-01",
+        "--reason",
+        "subject_data_request",
+        "--preview",
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(66));
+    assert!(stderr(&output).contains("E_REDACT_NOT_FOUND"));
+}
+
+#[test]
+fn redact_missing_required_scope_is_rejected() {
+    let path = temp_evidence_path("redact-no-scope");
+    FileEvidenceStore::open_evidence(&path).expect("evidence store opens");
+    let path_str = path.to_str().expect("evidence path is utf8").to_owned();
+
+    let output = zornmesh(&[
+        "redact",
+        "apply",
+        "--evidence",
+        &path_str,
+        "--actor",
+        "operator.local/dpo",
+        "--policy-version",
+        "privacy-2026-01",
+        "--reason",
+        "subject_data_request",
+        "--preview",
+        "--output",
+        "json",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(65));
+    assert!(stderr(&output).contains("E_REDACT_SCOPE_REQUIRED"));
+}
+
 fn seed_evidence_export(path: &std::path::Path) {
     let store =
         FileEvidenceStore::open_evidence(path).expect("evidence export store opens");

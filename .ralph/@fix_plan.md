@@ -53,17 +53,7 @@
 - [x] Story 5.1: Produce and Verify Release Signatures, SBOMs, and Reproducibility Evidence
 - [x] Story 5.2: Enforce Compliance Traceability Fields on Envelopes
 - [x] Story 5.3: Export Evidence Bundle for a Time Window
-  > As a compliance reviewer
-  > I want to export a self-contained evidence bundle for a time window
-  > So that I can review local agent activity, release integrity, and configuration posture without manual file gathering.
-  > AC: Given audit, trace, signature, SBOM, and configuration evidence exists for a requested time window, When the reviewer runs the evidence export command with `--since` and `--until`, Then the command emits a self-contained bundle containing audit-log slice, trace/correlation references, SBOM, signature verification status, and sanitized config snapshot, And the bundle includes a manifest describing included sections and evidence gaps.
-  > AC: Given a 7-day evidence window is exported on the v0.1 reference machine, When audit export runs, Then the export completes within 5 minutes, And the manifest records duration and any performance-limit evidence gaps.
-  > AC: Given the requested time window includes retained and purged data, When export runs, Then retained data is included and purged portions are marked as retention gaps, And the export does not represent missing records as complete evidence.
-  > AC: Given evidence contains secrets or personal-data redaction markers, When the bundle is generated, Then raw secrets are not emitted, And redaction/proof markers remain sufficient for audit-chain and traceability review.
-  > AC: Given export cannot complete because of unreadable store, invalid time window, missing release metadata, or unsupported schema, When the command fails, Then it returns a stable structured error, And no partial bundle is reported as complete.
-  > AC: Given evidence export tests run, When complete export, incident-review export, release-review export, retention gap, redacted export, missing SBOM/signature, invalid time window, and store error scenarios execute, Then exported bundle content and manifest are deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-5-3
-- [ ] Story 5.4: Redact Personal Data While Preserving Audit Integrity
+- [x] Story 5.4: Redact Personal Data While Preserving Audit Integrity
   > As a subject data owner or compliance reviewer
   > I want personal data referenced in envelopes to be redacted through a documented procedure
   > So that privacy obligations can be met without destroying audit-chain integrity.

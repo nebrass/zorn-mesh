@@ -27,6 +27,7 @@ pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.st
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
+pub const REDACT_HELP: &str = "zornmesh redact\nApply append-only redaction proofs while preserving audit integrity.\n\nUsage: zornmesh redact apply --message-id <ID> --actor <ID> --policy-version <VERSION> --reason <TEXT> [OPTIONS]\n\nOptions:\n      --evidence <PATH>             Read this evidence log\n      --message-id <ID>             Scope redaction to this message\n      --actor <ID>                  Operator/actor identity authorising the redaction\n      --policy-version <VERSION>    Privacy/redaction policy version reference\n      --reason <TEXT>               Documented reason for the redaction\n      --preview                     Emit a preview without persisting evidence\n      --yes                         Confirm redaction without preview\n      --confirmation-token <TOKEN>  Confirm a previously previewed redaction\n      --output <FORMAT>             Select human or json output\n  -h, --help                        Print help\n\nA committed redaction appends a `redaction_applied` audit transition\ncarrying actor, policy version, reason, redaction scope, original\naudit hash anchors, and the daemon-sequence checkpoint. Existing\naudit-chain entries and prior hashes are never rewritten, deleted,\nor re-linked.\n";
 pub const EVIDENCE_HELP: &str = "zornmesh evidence\nExport self-contained evidence bundles for a time window.\n\nUsage: zornmesh evidence export [OPTIONS]\n\nOptions:\n      --evidence <PATH>          Read this evidence log\n      --release-manifest <PATH>  Include this release manifest in the bundle\n      --since <UNIX_MS>          Lower bound (inclusive) of the time window\n      --until <UNIX_MS>          Upper bound (inclusive) of the time window\n      --output <FORMAT>          Select human or json output\n  -h, --help                     Print help\n\nExports a single self-contained JSON bundle containing the audit-log\nslice, envelope and dead-letter records, release evidence (where\navailable), and a manifest enumerating included sections plus any\nevidence gaps. Raw secrets are never emitted; redaction markers remain\nvisible. Stable structured errors prevent partial bundles from being\nreported as complete.\n";
 pub const COMPLIANCE_HELP: &str = "zornmesh compliance\nAudit compliance traceability fields on evidence records.\n\nUsage: zornmesh compliance traceability [OPTIONS]\n\nOptions:\n      --evidence <PATH>           Read this evidence log\n      --correlation-id <ID>       Restrict to one correlation ID\n      --output <FORMAT>           Select human or json output\n  -h, --help                      Print help\n\nClassifies each persisted record as complete, partial, or evidence_gap\nbased on the AC-required traceability fields (agent identity, capability\nor subject, timestamp, correlation ID, trace ID, prior-message lineage).\nRedaction markers preserve compliance status; missing required fields\nproduce explicit evidence-gap reasons rather than silent completeness.\n";
 pub const RELEASE_HELP: &str = "zornmesh release\nVerify release signatures and inspect SBOM evidence.\n\nUsage: zornmesh release verify [OPTIONS]\n       zornmesh release sbom   [OPTIONS]\n\nOptions:\n      --manifest <PATH>  Read this release evidence manifest\n      --output <FORMAT>  Select human or json output\n  -h, --help            Print help\n\nVerification reads only local manifest evidence; no network or remote\ntrust decision is performed unless an operator explicitly configures\none. The manifest path may also be set via ZORN_RELEASE_MANIFEST.\n";
@@ -52,7 +53,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -88,7 +89,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -108,7 +109,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -504,6 +505,10 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
             print_help("evidence help", EVIDENCE_HELP, invocation.output)
         }
         [command, rest @ ..] if command == "evidence" => run_evidence(rest, &invocation),
+        [command] if command == "redact" => {
+            print_help("redact help", REDACT_HELP, invocation.output)
+        }
+        [command, rest @ ..] if command == "redact" => run_redact(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -2885,6 +2890,356 @@ fn evaluate_replay_eligibility(
         return ("ineligible", Some("redaction_blocks_replay"));
     }
     ("eligible", None)
+}
+
+#[derive(Debug, Clone, Default)]
+struct RedactOptions {
+    evidence_path: Option<PathBuf>,
+    message_id: Option<String>,
+    actor: Option<String>,
+    policy_version: Option<String>,
+    reason: Option<String>,
+    preview: bool,
+    yes: bool,
+    confirmation_token: Option<String>,
+}
+
+fn parse_redact_options(args: &[String]) -> Result<RedactOptions, CliError> {
+    let mut options = RedactOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--preview" {
+            options.preview = true;
+            index += 1;
+            continue;
+        }
+        if arg == "--yes" {
+            options.yes = true;
+            index += 1;
+            continue;
+        }
+        let (key, value, advance) = if let Some((k, v)) = arg.split_once('=') {
+            (k.to_owned(), v.to_owned(), 1)
+        } else {
+            let value = inspect_option_value(args, index, arg)?.to_owned();
+            (arg.clone(), value, 2)
+        };
+        match key.as_str() {
+            "--evidence" | "--evidence-path" => {
+                options.evidence_path = Some(parse_non_empty_path(&key, &value)?);
+            }
+            "--message-id" => {
+                options.message_id = Some(parse_non_empty_string(&key, &value)?);
+            }
+            "--actor" => {
+                options.actor = Some(parse_non_empty_string(&key, &value)?);
+            }
+            "--policy-version" => {
+                options.policy_version = Some(parse_non_empty_string(&key, &value)?);
+            }
+            "--reason" => {
+                options.reason = Some(parse_non_empty_string(&key, &value)?);
+            }
+            "--confirmation-token" => {
+                options.confirmation_token = Some(parse_non_empty_string(&key, &value)?);
+            }
+            other => {
+                return Err(CliError::new(
+                    "E_UNSUPPORTED_COMMAND",
+                    format!("unsupported zornmesh redact argument '{other}'"),
+                    ExitKind::UserError,
+                ));
+            }
+        }
+        index += advance;
+    }
+    if options.preview && (options.yes || options.confirmation_token.is_some()) {
+        return Err(CliError::new(
+            "E_REDACT_INVALID_FLAGS",
+            "--preview cannot be combined with --yes or --confirmation-token".to_owned(),
+            ExitKind::UserError,
+        ));
+    }
+    if options.yes && options.confirmation_token.is_some() {
+        return Err(CliError::new(
+            "E_REDACT_INVALID_FLAGS",
+            "--yes cannot be combined with --confirmation-token".to_owned(),
+            ExitKind::UserError,
+        ));
+    }
+    Ok(options)
+}
+
+fn run_redact(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_help("redact help", REDACT_HELP, invocation.output),
+        [flag] if is_help(flag) => print_help("redact help", REDACT_HELP, invocation.output),
+        [command, rest @ ..] if command == "apply" => {
+            let options = parse_redact_options(rest)?;
+            redact_apply(options, invocation.output)
+        }
+        [command, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh redact subcommand '{command}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn redact_apply(options: RedactOptions, output: OutputFormat) -> Result<(), CliError> {
+    if output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("redact apply"));
+    }
+    let message_id = options.message_id.as_deref().ok_or_else(|| {
+        CliError::new(
+            "E_REDACT_SCOPE_REQUIRED",
+            "redact apply requires --message-id <ID> to scope the redaction".to_owned(),
+            ExitKind::Validation,
+        )
+    })?;
+    let actor = options.actor.as_deref().ok_or_else(|| {
+        CliError::new(
+            "E_REDACT_ACTOR_REQUIRED",
+            "redact apply requires --actor <ID> to authorise the redaction".to_owned(),
+            ExitKind::Validation,
+        )
+    })?;
+    let policy_version = options.policy_version.as_deref().ok_or_else(|| {
+        CliError::new(
+            "E_REDACT_POLICY_REQUIRED",
+            "redact apply requires --policy-version <VERSION>".to_owned(),
+            ExitKind::Validation,
+        )
+    })?;
+    let reason = options.reason.as_deref().ok_or_else(|| {
+        CliError::new(
+            "E_REDACT_REASON_REQUIRED",
+            "redact apply requires --reason <TEXT>".to_owned(),
+            ExitKind::Validation,
+        )
+    })?;
+
+    let evidence_path = resolve_evidence_path(options.evidence_path.as_ref())?.ok_or_else(|| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!(
+                "evidence store path is not configured; pass --evidence <PATH> or set {ENV_EVIDENCE_PATH}"
+            ),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+    let store = FileEvidenceStore::open_evidence(&evidence_path).map_err(|error| {
+        CliError::new(
+            "E_EVIDENCE_STORE_UNAVAILABLE",
+            format!("evidence store is unavailable: {error}"),
+            ExitKind::TemporaryUnavailable,
+        )
+    })?;
+
+    let record = store
+        .get_envelope(message_id)
+        .map_err(|error| {
+            CliError::new(
+                "E_EVIDENCE_STORE_UNAVAILABLE",
+                format!("evidence store cannot be queried: {error}"),
+                ExitKind::TemporaryUnavailable,
+            )
+        })?
+        .ok_or_else(|| {
+            CliError::new(
+                "E_REDACT_NOT_FOUND",
+                format!("no envelope evidence matched message id '{message_id}'"),
+                ExitKind::NotFound,
+            )
+        })?;
+
+    let prior_audit_hash = store
+        .audit_entries()
+        .into_iter()
+        .filter(|entry| entry.message_id() == record.message_id())
+        .next_back()
+        .map(|entry| entry.current_audit_hash().to_owned())
+        .unwrap_or_else(|| "0".to_owned());
+    let token = redact_confirmation_token(&record, actor, policy_version, reason);
+    let scope_summary = serde_json::json!({
+        "message_id": record.message_id(),
+        "correlation_id": record.correlation_id(),
+        "trace_id": record.trace_id(),
+        "subject": record.subject(),
+        "checkpoint_daemon_sequence": record.daemon_sequence(),
+        "prior_audit_hash": prior_audit_hash,
+    });
+
+    if options.preview {
+        let data = serde_json::json!({
+            "mode": "preview",
+            "side_effect": false,
+            "confirmation_token": token,
+            "scope": scope_summary,
+            "actor": actor,
+            "policy_version": policy_version,
+            "reason": reason,
+            "expected_effect": "appends a redaction_applied audit transition that anchors the redaction proof to the original message without rewriting prior audit rows",
+            "policy_checks": [
+                "evidence_store_available",
+                "record_exists",
+                "actor_present",
+                "policy_version_present",
+                "reason_present"
+            ],
+            "required_confirmation": "rerun with --yes or --confirmation-token <TOKEN>",
+        });
+        return emit_redact_response(output, data, None);
+    }
+
+    if !options.yes {
+        match options.confirmation_token.as_deref() {
+            None => {
+                return Err(CliError::new(
+                    "E_REDACT_CONFIRMATION_REQUIRED",
+                    format!(
+                        "redaction of '{message_id}' requires confirmation; rerun with --preview, --yes, or --confirmation-token <TOKEN>"
+                    ),
+                    ExitKind::Validation,
+                ));
+            }
+            Some(provided) if provided != token => {
+                return Err(CliError::new(
+                    "E_REDACT_STALE_CONFIRMATION",
+                    format!(
+                        "confirmation token does not match preview for '{message_id}'; rerun --preview to obtain a fresh token"
+                    ),
+                    ExitKind::Validation,
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let outcome_details = format!(
+        "redaction_applied actor={actor} policy_version={policy_version} reason={reason} prior_audit_hash={prior_audit_hash} checkpoint_sequence={}",
+        record.daemon_sequence()
+    );
+    let transition = EvidenceStateTransitionInput::new(
+        record.daemon_sequence(),
+        record.message_id(),
+        actor,
+        "redaction_applied",
+        record.subject(),
+        record.correlation_id(),
+        record.trace_id(),
+        record.delivery_state(),
+        "redaction_applied",
+        outcome_details,
+    )
+    .map_err(|error| {
+        CliError::new(
+            "E_REDACT_INVALID_INPUT",
+            format!("redaction transition input invalid: {error}"),
+            ExitKind::Validation,
+        )
+    })?;
+    let audit = store.persist_state_transition(transition).map_err(|error| {
+        CliError::new(
+            "E_REDACT_PERSIST_FAILED",
+            format!("redaction proof could not be persisted: {error}"),
+            ExitKind::Io,
+        )
+    })?;
+
+    let data = serde_json::json!({
+        "mode": "commit",
+        "side_effect": true,
+        "confirmation_source": if options.yes { "yes_flag" } else { "confirmation_token" },
+        "confirmation_token": token,
+        "scope": scope_summary,
+        "actor": actor,
+        "policy_version": policy_version,
+        "reason": reason,
+        "audit_action": audit.action(),
+        "audit_state_to": audit.state_to(),
+        "audit_daemon_sequence": audit.daemon_sequence(),
+        "audit_previous_hash": audit.previous_audit_hash(),
+        "audit_current_hash": audit.current_audit_hash(),
+    });
+    emit_redact_response(output, data, None)
+}
+
+fn redact_confirmation_token(
+    record: &EvidenceEnvelopeRecord,
+    actor: &str,
+    policy_version: &str,
+    reason: &str,
+) -> String {
+    let parts = format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        record.message_id(),
+        record.correlation_id(),
+        record.trace_id(),
+        record.subject(),
+        record.daemon_sequence(),
+        actor,
+        policy_version,
+        reason,
+    );
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in parts.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("zmrk-{hash:016x}")
+}
+
+fn emit_redact_response(
+    output: OutputFormat,
+    data: serde_json::Value,
+    warning: Option<DiagnosticWarning>,
+) -> Result<(), CliError> {
+    let warnings: Vec<DiagnosticWarning> = warning.into_iter().collect();
+    match output {
+        OutputFormat::Human => {
+            println!(
+                "redact apply: mode={} side_effect={} message_id={}",
+                data["mode"].as_str().unwrap_or(""),
+                data["side_effect"].as_bool().unwrap_or(false),
+                data["scope"]["message_id"].as_str().unwrap_or(""),
+            );
+            if let Some(token) = data["confirmation_token"].as_str() {
+                println!("  confirmation_token={token}");
+            }
+            if let Some(actor) = data["actor"].as_str() {
+                println!("  actor={actor}");
+            }
+            if let Some(policy) = data["policy_version"].as_str() {
+                println!("  policy_version={policy}");
+            }
+            if let Some(reason) = data["reason"].as_str() {
+                println!("  reason={reason}");
+            }
+            if let Some(checkpoint) = data["scope"]["checkpoint_daemon_sequence"].as_u64() {
+                println!("  checkpoint_daemon_sequence={checkpoint}");
+            }
+            for warning in &warnings {
+                eprintln!("{}: {}", warning.code, warning.message);
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "redact",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": warnings.iter().map(warning_json).collect::<Vec<_>>(),
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before redact rendering"),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
