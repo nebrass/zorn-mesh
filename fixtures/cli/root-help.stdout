@@ -19,6 +19,7 @@ Commands:
   evidence  Export self-contained evidence bundles for a time window
   redact    Apply append-only redaction proofs while preserving audit integrity
   airmf     Map evidence records to NIST AI RMF functions and categories
+  ui        Launch the protected loopback local UI session
   completion  Generate shell completions
   help     Print command help
 

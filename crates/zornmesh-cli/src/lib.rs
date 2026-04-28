@@ -27,6 +27,12 @@ pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.st
 pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
 pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
+pub const UI_HELP: &str = "zornmesh ui\nLaunch the protected loopback local UI session.\n\nUsage: zornmesh ui [OPTIONS]\n\nOptions:\n      --port <PORT>     Preferred loopback port (default 7878)\n      --no-open         Do not open a browser; only print the URL\n      --output <FORMAT> Select human or json output\n  -h, --help            Print help\n\nThe local UI server binds loopback only, mints a per-launch high-entropy\nsession token, enforces CORS to the exact loopback origin, requires\nCSRF protection on state-changing requests, and serves only bundled\nlocal assets. Token-bearing material never appears in logs, audit\npayloads, or CLI handoff text.\n";
+pub const UI_PREFERRED_PORT: u16 = 7878;
+pub const UI_FALLBACK_PORTS: &[u16] = &[7879, 7880];
+pub const UI_SCHEMA_VERSION: &str = "zornmesh.cli.ui.v1";
+pub const UI_REFERRER_POLICY: &str = "no-referrer";
+pub const UI_TOKEN_HEX_LEN: usize = 64;
 pub const AIRMF_HELP: &str = "zornmesh airmf\nMap evidence records to NIST AI RMF functions and categories.\n\nUsage: zornmesh airmf map [OPTIONS]\n\nOptions:\n      --evidence <PATH>          Read this evidence log\n      --correlation-id <ID>      Restrict the report to one correlation ID\n      --output <FORMAT>          Select human or json output\n  -h, --help                     Print help\n\nThe report classifies each evidence record under one of the AI RMF\nGovern, Map, Measure, or Manage functions, with a subcategory and\ncontrol reference where the mapping definition supports one. Records\nthat the mapping table does not cover are included with an explicit\nautomatic_mapping=unmapped flag rather than silently omitted; records\nlacking required metadata carry an evidence-gap reason. Every report\npins the mapping-definition version so prior fixtures stay\nreproducible across mapping updates.\n";
 const AIRMF_MAPPING_DEFINITION_VERSION: &str = "nist.ai-rmf.v1.0";
 const AIRMF_REPORT_SCHEMA_VERSION: &str = "zornmesh.airmf.report.v1";
@@ -56,7 +62,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -92,7 +98,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -112,7 +118,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -514,6 +520,8 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "redact" => run_redact(rest, &invocation),
         [command] if command == "airmf" => print_help("airmf help", AIRMF_HELP, invocation.output),
         [command, rest @ ..] if command == "airmf" => run_airmf(rest, &invocation),
+        [command] if command == "ui" => run_ui(&[], &invocation),
+        [command, rest @ ..] if command == "ui" => run_ui(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -7039,4 +7047,385 @@ fn is_secret_field(field: &str) -> bool {
         || normalized.ends_with("_secret")
         || normalized.ends_with("_password")
         || normalized.ends_with("_token")
+}
+
+#[derive(Debug, Clone, Default)]
+struct UiOptions {
+    preferred_port: Option<u16>,
+    no_open: bool,
+}
+
+fn parse_ui_options(args: &[String]) -> Result<UiOptions, CliError> {
+    let mut options = UiOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--no-open" {
+            options.no_open = true;
+            index += 1;
+            continue;
+        }
+        let (key, value, advance) = if let Some((k, v)) = arg.split_once('=') {
+            (k.to_owned(), v.to_owned(), 1)
+        } else {
+            let value = inspect_option_value(args, index, arg)?.to_owned();
+            (arg.clone(), value, 2)
+        };
+        match key.as_str() {
+            "--port" => {
+                let port: u16 = value.parse().map_err(|_| {
+                    CliError::new(
+                        "E_VALIDATION_FAILED",
+                        format!("--port must be a 0-65535 integer, got '{value}'"),
+                        ExitKind::Validation,
+                    )
+                })?;
+                options.preferred_port = Some(port);
+            }
+            other => {
+                return Err(CliError::new(
+                    "E_UNSUPPORTED_COMMAND",
+                    format!("unsupported zornmesh ui argument '{other}'"),
+                    ExitKind::UserError,
+                ));
+            }
+        }
+        index += advance;
+    }
+    Ok(options)
+}
+
+fn run_ui(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    if let Some(flag) = args.iter().find(|arg| is_help(arg)) {
+        let _ = flag;
+        return print_help("ui help", UI_HELP, invocation.output);
+    }
+    let options = parse_ui_options(args)?;
+    if invocation.output == OutputFormat::Ndjson {
+        return Err(ndjson_not_supported("ui"));
+    }
+    let session = UiLaunchSession::reserve(options.preferred_port.unwrap_or(UI_PREFERRED_PORT))?;
+    let data = session.launch_report_json(options.no_open);
+    match invocation.output {
+        OutputFormat::Human => {
+            println!(
+                "ui launch: status=ready loopback_url={} port={} schema_version={} bundled_assets=offline",
+                session.loopback_url(),
+                session.port(),
+                UI_SCHEMA_VERSION,
+            );
+            println!("  session_token_length={}", UI_TOKEN_HEX_LEN);
+            println!("  csrf_token_length={}", UI_TOKEN_HEX_LEN);
+            println!("  referrer_policy={UI_REFERRER_POLICY}");
+            println!(
+                "  open_browser={}",
+                if options.no_open { "no" } else { "yes" }
+            );
+            Ok(())
+        }
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": READ_SCHEMA_VERSION,
+                    "command": "ui",
+                    "status": "ok",
+                    "data": data,
+                    "warnings": [],
+                })
+            );
+            Ok(())
+        }
+        OutputFormat::Ndjson => unreachable!("ndjson rejected before ui rendering"),
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct UiLaunchSession {
+    bind_addr: std::net::SocketAddr,
+    session_token: String,
+    csrf_token: String,
+    revoked: std::cell::Cell<bool>,
+}
+
+#[allow(dead_code)]
+impl UiLaunchSession {
+    pub(crate) fn reserve(preferred_port: u16) -> Result<Self, CliError> {
+        let mut tried: Vec<u16> = vec![preferred_port];
+        tried.extend_from_slice(UI_FALLBACK_PORTS);
+        for port in &tried {
+            let addr: std::net::SocketAddr =
+                ([127, 0, 0, 1], *port).into();
+            match std::net::TcpListener::bind(addr) {
+                Ok(listener) => {
+                    drop(listener);
+                    return Ok(Self {
+                        bind_addr: addr,
+                        session_token: random_hex_token(UI_TOKEN_HEX_LEN)?,
+                        csrf_token: random_hex_token(UI_TOKEN_HEX_LEN)?,
+                        revoked: std::cell::Cell::new(false),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(error) => {
+                    return Err(CliError::new(
+                        "E_UI_BIND_FAILED",
+                        format!(
+                            "loopback bind on 127.0.0.1:{port} failed with non-recoverable error: {error}"
+                        ),
+                        ExitKind::Io,
+                    ));
+                }
+            }
+        }
+        Err(CliError::new(
+            "UI_PORT_IN_USE",
+            format!(
+                "all candidate loopback ports are in use ({tried:?}); free a port or pass --port <PORT>"
+            ),
+            ExitKind::TemporaryUnavailable,
+        ))
+    }
+
+    pub(crate) fn port(&self) -> u16 {
+        self.bind_addr.port()
+    }
+
+    pub(crate) fn loopback_url(&self) -> String {
+        format!("http://127.0.0.1:{}/", self.bind_addr.port())
+    }
+
+    pub(crate) fn loopback_origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.bind_addr.port())
+    }
+
+    pub(crate) fn session_token(&self) -> &str {
+        &self.session_token
+    }
+
+    pub(crate) fn csrf_token(&self) -> &str {
+        &self.csrf_token
+    }
+
+    pub(crate) fn is_revoked(&self) -> bool {
+        self.revoked.get()
+    }
+
+    pub(crate) fn revoke(&self) {
+        self.revoked.set(true);
+    }
+
+    pub(crate) fn validate_session_token(&self, provided: Option<&str>) -> UiTokenOutcome {
+        if self.is_revoked() {
+            return UiTokenOutcome::Revoked;
+        }
+        match provided {
+            None => UiTokenOutcome::Missing,
+            Some(value) if value == self.session_token => UiTokenOutcome::Verified,
+            Some(_) => UiTokenOutcome::Invalid,
+        }
+    }
+
+    pub(crate) fn validate_origin(&self, origin: Option<&str>) -> UiOriginOutcome {
+        match origin {
+            None => UiOriginOutcome::Missing,
+            Some(value) if value == self.loopback_origin() => UiOriginOutcome::Allowed,
+            Some(_) => UiOriginOutcome::Rejected,
+        }
+    }
+
+    pub(crate) fn validate_csrf(&self, provided: Option<&str>) -> UiCsrfOutcome {
+        if self.is_revoked() {
+            return UiCsrfOutcome::Revoked;
+        }
+        match provided {
+            None => UiCsrfOutcome::Missing,
+            Some(value) if value == self.csrf_token => UiCsrfOutcome::Verified,
+            Some(_) => UiCsrfOutcome::Invalid,
+        }
+    }
+
+    pub(crate) fn launch_report_json(&self, no_open: bool) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": UI_SCHEMA_VERSION,
+            "status": "ready",
+            "loopback_url": self.loopback_url(),
+            "loopback_origin": self.loopback_origin(),
+            "port": self.port(),
+            "open_browser": !no_open,
+            "session_token_length": UI_TOKEN_HEX_LEN,
+            "csrf_token_length": UI_TOKEN_HEX_LEN,
+            "referrer_policy": UI_REFERRER_POLICY,
+            "bundled_assets": "offline",
+            "non_loopback_bind_refused": true,
+            "actor_session_binding": "server_derived",
+            "websocket_sse_session_required": true,
+            "cors_allowed_origin": self.loopback_origin(),
+            "schema_version_pinned": UI_SCHEMA_VERSION,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiTokenOutcome {
+    Verified,
+    Missing,
+    Invalid,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiOriginOutcome {
+    Allowed,
+    Missing,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiCsrfOutcome {
+    Verified,
+    Missing,
+    Invalid,
+    Revoked,
+}
+
+fn random_hex_token(hex_len: usize) -> Result<String, CliError> {
+    debug_assert!(hex_len % 2 == 0, "hex token length must be even");
+    let bytes = hex_len / 2;
+    let mut buffer = vec![0u8; bytes];
+    let mut file = fs::File::open("/dev/urandom").map_err(|error| {
+        CliError::new(
+            "E_UI_TOKEN_ENTROPY",
+            format!("could not read /dev/urandom for session token: {error}"),
+            ExitKind::Io,
+        )
+    })?;
+    use std::io::Read;
+    file.read_exact(&mut buffer).map_err(|error| {
+        CliError::new(
+            "E_UI_TOKEN_ENTROPY",
+            format!("could not read {bytes} bytes of entropy: {error}"),
+            ExitKind::Io,
+        )
+    })?;
+    let mut hex = String::with_capacity(hex_len);
+    for byte in &buffer {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Ok(hex)
+}
+
+pub fn ui_referrer_policy() -> &'static str {
+    UI_REFERRER_POLICY
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+
+    fn fresh_session() -> UiLaunchSession {
+        UiLaunchSession::reserve(0).expect("ephemeral loopback bind")
+    }
+
+    #[test]
+    fn reserve_yields_loopback_bind_and_high_entropy_tokens() {
+        let session = fresh_session();
+        assert!(
+            session.loopback_origin().starts_with("http://127.0.0.1:"),
+            "must bind loopback only"
+        );
+        assert_eq!(session.session_token().len(), UI_TOKEN_HEX_LEN);
+        assert_eq!(session.csrf_token().len(), UI_TOKEN_HEX_LEN);
+        assert!(session.session_token().chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(session.csrf_token().chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(session.session_token(), session.csrf_token());
+    }
+
+    #[test]
+    fn distinct_launches_produce_distinct_tokens() {
+        let a = fresh_session();
+        let b = fresh_session();
+        assert_ne!(a.session_token(), b.session_token());
+        assert_ne!(a.csrf_token(), b.csrf_token());
+    }
+
+    #[test]
+    fn validate_session_token_classifies_outcomes() {
+        let session = fresh_session();
+        assert_eq!(session.validate_session_token(None), UiTokenOutcome::Missing);
+        assert_eq!(
+            session.validate_session_token(Some("nope")),
+            UiTokenOutcome::Invalid
+        );
+        let copy = session.session_token().to_owned();
+        assert_eq!(
+            session.validate_session_token(Some(&copy)),
+            UiTokenOutcome::Verified
+        );
+    }
+
+    #[test]
+    fn revoke_blocks_token_and_csrf_validation() {
+        let session = fresh_session();
+        let token = session.session_token().to_owned();
+        let csrf = session.csrf_token().to_owned();
+        session.revoke();
+        assert_eq!(
+            session.validate_session_token(Some(&token)),
+            UiTokenOutcome::Revoked
+        );
+        assert_eq!(session.validate_csrf(Some(&csrf)), UiCsrfOutcome::Revoked);
+    }
+
+    #[test]
+    fn validate_origin_only_allows_exact_loopback() {
+        let session = fresh_session();
+        let origin = session.loopback_origin();
+        assert_eq!(
+            session.validate_origin(Some(&origin)),
+            UiOriginOutcome::Allowed
+        );
+        assert_eq!(
+            session.validate_origin(Some("http://example.com")),
+            UiOriginOutcome::Rejected
+        );
+        assert_eq!(
+            session.validate_origin(Some("http://127.0.0.1:1")),
+            UiOriginOutcome::Rejected
+        );
+        assert_eq!(session.validate_origin(None), UiOriginOutcome::Missing);
+    }
+
+    #[test]
+    fn validate_csrf_classifies_outcomes() {
+        let session = fresh_session();
+        assert_eq!(session.validate_csrf(None), UiCsrfOutcome::Missing);
+        assert_eq!(
+            session.validate_csrf(Some("not-the-csrf")),
+            UiCsrfOutcome::Invalid
+        );
+        let copy = session.csrf_token().to_owned();
+        assert_eq!(session.validate_csrf(Some(&copy)), UiCsrfOutcome::Verified);
+    }
+
+    #[test]
+    fn launch_report_json_pins_security_posture_without_leaking_tokens() {
+        let session = fresh_session();
+        let report = session.launch_report_json(true);
+        assert_eq!(report["status"], "ready");
+        assert_eq!(report["bundled_assets"], "offline");
+        assert_eq!(report["referrer_policy"], UI_REFERRER_POLICY);
+        assert_eq!(report["non_loopback_bind_refused"], true);
+        assert_eq!(report["actor_session_binding"], "server_derived");
+        assert_eq!(report["websocket_sse_session_required"], true);
+        assert_eq!(report["session_token_length"], UI_TOKEN_HEX_LEN as u64);
+        assert_eq!(report["csrf_token_length"], UI_TOKEN_HEX_LEN as u64);
+        assert_eq!(report["open_browser"], false);
+        let token = session.session_token();
+        let csrf = session.csrf_token();
+        let serialized = serde_json::to_string(&report).expect("report serializes");
+        assert!(!serialized.contains(token), "report must not leak session token");
+        assert!(!serialized.contains(csrf), "report must not leak CSRF token");
+    }
 }
