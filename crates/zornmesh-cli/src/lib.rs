@@ -7322,6 +7322,572 @@ pub fn ui_referrer_policy() -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
+pub(crate) enum CliHandoffOperation {
+    Trace,
+    Inspect,
+    Replay,
+    Agents,
+    Doctor,
+    Audit,
+}
+
+impl CliHandoffOperation {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Inspect => "inspect",
+            Self::Replay => "replay",
+            Self::Agents => "agents",
+            Self::Doctor => "doctor",
+            Self::Audit => "audit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum CliHandoffAvailability {
+    Available,
+    RequiresDaemon,
+    RequiresOfflineAudit,
+    InsufficientContext,
+    Unsafe,
+}
+
+impl CliHandoffAvailability {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::RequiresDaemon => "requires_daemon",
+            Self::RequiresOfflineAudit => "requires_offline_audit",
+            Self::InsufficientContext => "insufficient_context",
+            Self::Unsafe => "unsafe",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct CliHandoff {
+    pub operation: CliHandoffOperation,
+    pub argv: Vec<String>,
+    pub description: &'static str,
+    pub expected_outcome: &'static str,
+    pub availability: CliHandoffAvailability,
+    pub unavailable_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum CliHandoffError {
+    NewlineInValue,
+    NulByteInValue,
+    EmptyValue,
+}
+
+#[allow(dead_code)]
+impl CliHandoff {
+    pub(crate) fn build(
+        operation: CliHandoffOperation,
+        positional: &[&str],
+        flags: &[(&str, &str)],
+        description: &'static str,
+        expected_outcome: &'static str,
+    ) -> Result<Self, CliHandoffError> {
+        let mut argv: Vec<String> = vec!["zornmesh".to_owned(), operation.as_str().to_owned()];
+        let mut needs_separator = false;
+        for value in positional {
+            validate_handoff_value(value)?;
+            if !needs_separator && value.starts_with('-') {
+                argv.push("--".to_owned());
+                needs_separator = true;
+            }
+            argv.push((*value).to_owned());
+        }
+        for (flag, value) in flags {
+            validate_handoff_flag(flag)?;
+            validate_handoff_value(value)?;
+            argv.push((*flag).to_owned());
+            argv.push((*value).to_owned());
+        }
+        Ok(Self {
+            operation,
+            argv,
+            description,
+            expected_outcome,
+            availability: CliHandoffAvailability::Available,
+            unavailable_reason: None,
+        })
+    }
+
+    pub(crate) fn unavailable(
+        operation: CliHandoffOperation,
+        availability: CliHandoffAvailability,
+        reason: &'static str,
+        description: &'static str,
+        expected_outcome: &'static str,
+    ) -> Self {
+        Self {
+            operation,
+            argv: Vec::new(),
+            description,
+            expected_outcome,
+            availability,
+            unavailable_reason: Some(reason),
+        }
+    }
+
+    pub(crate) fn shell_command(&self) -> String {
+        if self.argv.is_empty() {
+            return String::new();
+        }
+        self.argv
+            .iter()
+            .map(|token| posix_quote_token(token))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "operation": self.operation.as_str(),
+            "argv": self.argv,
+            "shell_command": self.shell_command(),
+            "description": self.description,
+            "expected_outcome": self.expected_outcome,
+            "availability": self.availability.as_str(),
+            "unavailable_reason": self.unavailable_reason,
+            "copy_action": if matches!(self.availability, CliHandoffAvailability::Available) {
+                "copy_to_clipboard"
+            } else {
+                "no_command_offered"
+            },
+        })
+    }
+}
+
+#[allow(dead_code)]
+fn validate_handoff_value(value: &str) -> Result<(), CliHandoffError> {
+    if value.is_empty() {
+        return Err(CliHandoffError::EmptyValue);
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(CliHandoffError::NewlineInValue);
+    }
+    if value.contains('\0') {
+        return Err(CliHandoffError::NulByteInValue);
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn validate_handoff_flag(flag: &str) -> Result<(), CliHandoffError> {
+    if !flag.starts_with('-') {
+        return Err(CliHandoffError::EmptyValue);
+    }
+    validate_handoff_value(flag)
+}
+
+#[allow(dead_code)]
+fn posix_quote_token(token: &str) -> String {
+    let safe = !token.is_empty()
+        && token.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '.' | '_' | '-' | '/' | '=' | ':' | ',' | '@' | '+')
+        });
+    if safe {
+        return token.to_owned();
+    }
+    let mut quoted = String::with_capacity(token.len() + 2);
+    quoted.push('\'');
+    for ch in token.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum FocusedTraceMode {
+    Full,
+    Windowed,
+}
+
+impl FocusedTraceMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Windowed => "windowed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum FocusedTraceRecoveryCue {
+    InspectTrace,
+    InspectDeadLetter,
+    Replay,
+    Reconnect,
+    AuditVerify,
+}
+
+impl FocusedTraceRecoveryCue {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InspectTrace => "inspect_trace",
+            Self::InspectDeadLetter => "inspect_dead_letter",
+            Self::Replay => "replay",
+            Self::Reconnect => "reconnect",
+            Self::AuditVerify => "audit_verify",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct FocusedTrace {
+    pub correlation_id: String,
+    pub mode: FocusedTraceMode,
+    pub page: TimelinePage,
+    pub recovery_cues: Vec<FocusedTraceRecoveryCue>,
+    pub handoffs: Vec<CliHandoff>,
+    pub paused: bool,
+    pub mapping_version: &'static str,
+}
+
+#[allow(dead_code)]
+impl FocusedTrace {
+    pub(crate) const FULL_RENDER_BUDGET: usize = 500;
+
+    pub(crate) fn open(
+        correlation_id: impl Into<String>,
+        page: TimelinePage,
+        recovery_cues: Vec<FocusedTraceRecoveryCue>,
+        handoffs: Vec<CliHandoff>,
+    ) -> Self {
+        let correlation_id = correlation_id.into();
+        let mode = if page.partial_window || page.events.len() > Self::FULL_RENDER_BUDGET {
+            FocusedTraceMode::Windowed
+        } else {
+            FocusedTraceMode::Full
+        };
+        Self {
+            correlation_id,
+            mode,
+            page,
+            recovery_cues,
+            handoffs,
+            paused: false,
+            mapping_version: "zornmesh.ui.focused_trace.v1",
+        }
+    }
+
+    pub(crate) fn pause(mut self) -> Self {
+        self.paused = true;
+        self
+    }
+
+    pub(crate) fn resume(mut self) -> Self {
+        self.paused = false;
+        self
+    }
+
+    pub(crate) fn ingest_live(self, events: Vec<TimelineEvent>) -> Self {
+        if self.paused {
+            return self;
+        }
+        let new_page = self.page.append_live(events);
+        Self {
+            correlation_id: self.correlation_id,
+            mode: self.mode,
+            page: new_page,
+            recovery_cues: self.recovery_cues,
+            handoffs: self.handoffs,
+            paused: self.paused,
+            mapping_version: self.mapping_version,
+        }
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": self.mapping_version,
+            "correlation_id": self.correlation_id,
+            "mode": self.mode.as_str(),
+            "paused": self.paused,
+            "page": self.page.to_json(),
+            "recovery_cues": self.recovery_cues.iter().map(|cue| cue.as_str()).collect::<Vec<_>>(),
+            "handoffs": self.handoffs.iter().map(CliHandoff::to_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod cli_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn argv_starts_with_zornmesh_and_operation() {
+        let handoff = CliHandoff::build(
+            CliHandoffOperation::Trace,
+            &["corr-123"],
+            &[("--evidence", "/tmp/evidence.log")],
+            "inspect trace by correlation",
+            "structured timeline JSON",
+        )
+        .expect("valid handoff");
+        assert_eq!(handoff.argv[0], "zornmesh");
+        assert_eq!(handoff.argv[1], "trace");
+        assert_eq!(handoff.argv[2], "corr-123");
+        assert_eq!(handoff.argv[3], "--evidence");
+        assert_eq!(handoff.argv[4], "/tmp/evidence.log");
+    }
+
+    #[test]
+    fn shell_command_quotes_metacharacters_and_preserves_semantics() {
+        let handoff = CliHandoff::build(
+            CliHandoffOperation::Inspect,
+            &["dead_letters"],
+            &[("--correlation-id", "corr; rm -rf /")],
+            "inspect dead letters",
+            "filtered DLQ records",
+        )
+        .expect("metacharacters are quoted, not concatenated");
+        let cmd = handoff.shell_command();
+        assert!(cmd.contains("'corr; rm -rf /'"), "metacharacters single-quoted: {cmd}");
+        assert!(!cmd.contains("`"));
+        assert!(!cmd.contains("$("));
+    }
+
+    #[test]
+    fn shell_command_escapes_embedded_single_quote() {
+        let handoff = CliHandoff::build(
+            CliHandoffOperation::Replay,
+            &["msg-it's-here"],
+            &[],
+            "replay message",
+            "audit transition",
+        )
+        .expect("embedded quotes are escaped");
+        let cmd = handoff.shell_command();
+        assert!(
+            cmd.contains("'msg-it'\\''s-here'"),
+            "embedded quote uses '\\'' escape: {cmd}"
+        );
+    }
+
+    #[test]
+    fn newline_in_value_is_refused_at_construction() {
+        let result = CliHandoff::build(
+            CliHandoffOperation::Trace,
+            &["corr\nrm -rf /"],
+            &[],
+            "ignored",
+            "ignored",
+        );
+        assert!(matches!(result, Err(CliHandoffError::NewlineInValue)));
+    }
+
+    #[test]
+    fn nul_byte_in_value_is_refused_at_construction() {
+        let result = CliHandoff::build(
+            CliHandoffOperation::Trace,
+            &["corr\0extra"],
+            &[],
+            "ignored",
+            "ignored",
+        );
+        assert!(matches!(result, Err(CliHandoffError::NulByteInValue)));
+    }
+
+    #[test]
+    fn option_like_positional_value_gets_double_dash_separator() {
+        let handoff = CliHandoff::build(
+            CliHandoffOperation::Trace,
+            &["--malicious-id"],
+            &[],
+            "preserve option-like ID as positional",
+            "looked up trace",
+        )
+        .expect("option-like positional accepted");
+        assert!(handoff.argv.contains(&"--".to_owned()));
+        let dash_idx = handoff.argv.iter().position(|t| t == "--").unwrap();
+        let mal_idx = handoff
+            .argv
+            .iter()
+            .position(|t| t == "--malicious-id")
+            .unwrap();
+        assert!(dash_idx < mal_idx, "double dash precedes option-like value");
+    }
+
+    #[test]
+    fn shell_metachars_dollar_backtick_and_glob_are_single_quoted() {
+        let handoff = CliHandoff::build(
+            CliHandoffOperation::Inspect,
+            &["messages"],
+            &[("--subject", "$(cat /etc/passwd)")],
+            "test",
+            "test",
+        )
+        .expect("dollar substitution is quoted");
+        let cmd = handoff.shell_command();
+        assert!(cmd.contains("'$(cat /etc/passwd)'"));
+        let backtick = CliHandoff::build(
+            CliHandoffOperation::Inspect,
+            &["messages"],
+            &[("--subject", "`whoami`")],
+            "test",
+            "test",
+        )
+        .expect("backtick substitution is quoted");
+        assert!(backtick.shell_command().contains("'`whoami`'"));
+        let glob = CliHandoff::build(
+            CliHandoffOperation::Inspect,
+            &["messages"],
+            &[("--subject", "*.log")],
+            "test",
+            "test",
+        )
+        .expect("glob is quoted");
+        assert!(glob.shell_command().contains("'*.log'"));
+    }
+
+    #[test]
+    fn unavailable_handoff_carries_reason_and_offers_no_command() {
+        let handoff = CliHandoff::unavailable(
+            CliHandoffOperation::Replay,
+            CliHandoffAvailability::RequiresDaemon,
+            "daemon_offline",
+            "replay requires running daemon",
+            "would create new replay attempt",
+        );
+        assert!(handoff.argv.is_empty());
+        assert_eq!(handoff.shell_command(), "");
+        let json = handoff.to_json();
+        assert_eq!(json["availability"], "requires_daemon");
+        assert_eq!(json["unavailable_reason"], "daemon_offline");
+        assert_eq!(json["copy_action"], "no_command_offered");
+        assert_eq!(json["shell_command"], "");
+    }
+
+    #[test]
+    fn safe_token_does_not_get_quoted_unnecessarily() {
+        assert_eq!(posix_quote_token("zornmesh"), "zornmesh");
+        assert_eq!(posix_quote_token("--evidence"), "--evidence");
+        assert_eq!(posix_quote_token("/tmp/evidence.log"), "/tmp/evidence.log");
+        assert_eq!(posix_quote_token("corr-123"), "corr-123");
+    }
+}
+
+#[cfg(test)]
+mod focused_trace_tests {
+    use super::*;
+
+    fn event(seq: u64, msg: &str) -> TimelineEvent {
+        TimelineEvent {
+            daemon_sequence: seq,
+            message_id: msg.to_owned(),
+            correlation_id: "corr-focus".to_owned(),
+            trace_id: "trace-focus".to_owned(),
+            source_agent: "agent.local/sender".to_owned(),
+            target_or_subject: "agent.local/target".to_owned(),
+            subject: "mesh.focus.created".to_owned(),
+            timestamp_unix_ms: 1_700_000_000_000 + seq,
+            browser_received_unix_ms: None,
+            state: TimelineEventState::Accepted,
+            causal_marker: TimelineCausalMarker::Root,
+            parent_message_id: None,
+            safe_payload_summary: serde_json::json!({}),
+            suggested_next_action: None,
+            cli_handoff_command: None,
+            recovery_cue: None,
+        }
+    }
+
+    #[test]
+    fn within_budget_trace_renders_full_mode() {
+        let page = TimelinePage::ready(vec![event(1, "msg-1"), event(2, "msg-2")]);
+        let trace = FocusedTrace::open("corr-focus", page, Vec::new(), Vec::new());
+        assert_eq!(trace.mode, FocusedTraceMode::Full);
+        assert_eq!(trace.to_json()["mode"], "full");
+    }
+
+    #[test]
+    fn over_budget_or_partial_window_trace_renders_windowed_mode() {
+        let events: Vec<TimelineEvent> = (1..=600u64).map(|s| event(s, &format!("msg-{s}"))).collect();
+        let page = TimelinePage::ready(events);
+        let trace = FocusedTrace::open("corr-focus", page, Vec::new(), Vec::new());
+        assert_eq!(trace.mode, FocusedTraceMode::Windowed);
+
+        let small_partial = TimelinePage::paginate(
+            vec![event(1, "msg-1")],
+            (1, 10),
+            10,
+            Vec::new(),
+        );
+        let partial_trace = FocusedTrace::open("corr-focus", small_partial, Vec::new(), Vec::new());
+        assert_eq!(partial_trace.mode, FocusedTraceMode::Windowed);
+    }
+
+    #[test]
+    fn paused_trace_does_not_ingest_live_events() {
+        let page = TimelinePage::ready(vec![event(1, "msg-1")]);
+        let trace = FocusedTrace::open("corr-focus", page, Vec::new(), Vec::new()).pause();
+        let updated = trace.ingest_live(vec![event(2, "msg-2")]);
+        assert_eq!(updated.page.events.len(), 1);
+        let resumed = updated.resume().ingest_live(vec![event(2, "msg-2")]);
+        assert_eq!(resumed.page.events.len(), 2);
+    }
+
+    #[test]
+    fn recovery_cues_and_handoffs_appear_in_json() {
+        let page = TimelinePage::ready(vec![event(1, "msg-1")]);
+        let handoff = CliHandoff::build(
+            CliHandoffOperation::Trace,
+            &["corr-focus"],
+            &[],
+            "inspect trace",
+            "json output",
+        )
+        .expect("valid handoff");
+        let trace = FocusedTrace::open(
+            "corr-focus",
+            page,
+            vec![
+                FocusedTraceRecoveryCue::InspectTrace,
+                FocusedTraceRecoveryCue::AuditVerify,
+            ],
+            vec![handoff],
+        );
+        let json = trace.to_json();
+        assert_eq!(json["correlation_id"], "corr-focus");
+        let cues = json["recovery_cues"].as_array().unwrap();
+        assert!(cues.iter().any(|c| c == "inspect_trace"));
+        assert!(cues.iter().any(|c| c == "audit_verify"));
+        let handoffs = json["handoffs"].as_array().unwrap();
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0]["operation"], "trace");
+    }
+
+    #[test]
+    fn schema_version_pins_focused_trace_contract() {
+        let page = TimelinePage::ready(Vec::new());
+        let trace = FocusedTrace::open("corr-focus", page, Vec::new(), Vec::new());
+        assert_eq!(trace.mapping_version, "zornmesh.ui.focused_trace.v1");
+        assert_eq!(
+            trace.to_json()["schema_version"],
+            "zornmesh.ui.focused_trace.v1"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum TimelineEventState {
     Pending,
     Queued,

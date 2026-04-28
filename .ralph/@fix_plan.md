@@ -62,18 +62,7 @@
 - [x] Story 6.2: Launch Protected Loopback UI with Offline Assets
 - [x] Story 6.3: Render Live Agent Roster and Local Trust Status
 - [x] Story 6.4: Render Daemon-Sequence Timeline and Event Detail Panel
-  > As a developer
-  > I want a daemon-sequenced trace timeline with event details
-  > So that I can understand message flow and delivery state without stitching logs together manually.
-  > AC: Given trace and message events are available from the daemon, When the control room renders the timeline, Then events are ordered by daemon sequence as the primary chronology, And browser receipt time appears only as secondary diagnostic metadata.
-  > AC: Given timeline events include causality and delivery metadata, When events render, Then each row shows event summary, sender/recipient, subject or operation, daemon sequence, timestamp, causal marker, delivery state badge, keyboard selection, and expansion/selection affordance, And pending, queued, accepted, delivered, acknowledged, rejected, failed, cancelled, replayed, dead-lettered, stale, and unknown states use consistent labels.
-  > AC: Given a developer selects a trace event, When the detail panel opens, Then it shows event summary, sender, recipients, subject, correlation ID, daemon sequence, timestamp, parent/child links, payload metadata, delivery outcome, timing, source/target agent, suggested next action, and copyable relevant command where available, And selected detail remains stable while new live events arrive.
-  > AC: Given a trace exceeds the browser rendering or memory budget, When the timeline loads, Then the UI requests daemon-sequence pages/windows and renders a virtualized timeline rather than materializing the full trace in the DOM, And loaded range, total/unknown count, gaps, and partial-window state are visible without changing daemon-sequence ordering.
-  > AC: Given a trace contains <= 500 events, When the timeline and selected-event detail render on the reference browser profile, Then ordered timeline and selected detail are visible within 1 second, And performance evidence is recorded with the fixture result.
-  > AC: Given late, reconstructed, replayed, missing-parent, gap, or dead-letter states appear, When the timeline and detail panel render those events, Then each state is labeled with accessible text and a recovery/inspection cue, And the UI does not imply a complete trace when evidence gaps exist.
-  > AC: Given timeline/detail tests run, When complete trace, partial trace, missing parent, late event, replayed event, dead letter, keyboard navigation, live append, selected-detail stability, large trace virtualization, paged timeline window, partial-window gap markers, and unknown delivery state scenarios execute, Then timeline ordering and detail rendering are deterministic and fixture-covered.
-  > Spec: specs/planning-artifacts/epics.md#story-6-4
-- [ ] Story 6.5: Open Focused Trace Reader with CLI Handoff Commands
+- [x] Story 6.5: Open Focused Trace Reader with CLI Handoff Commands
   > As a developer debugging a multi-agent conversation
   > I want to open a focused trace reader for one correlation ID and copy matching CLI handoff commands
   > So that I can move between visual inspection and terminal investigation without losing context.
