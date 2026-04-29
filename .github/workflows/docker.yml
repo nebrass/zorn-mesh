@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, Linux, X64, zorn-mesh]
     steps:
       - uses: actions/checkout@v4
 
