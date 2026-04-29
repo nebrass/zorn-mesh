@@ -144,7 +144,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
-            dist/*.zip
             dist/SHA256SUMS
 
   homebrew:
