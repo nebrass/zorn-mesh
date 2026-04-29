@@ -1,0 +1,225 @@
+name: release
+
+# Cuts a GitHub Release with prebuilt zornmesh binaries on a v* tag push.
+# - Cross-compiles for macOS arm64/x86_64, Linux x86_64/arm64, Windows x86_64
+# - Attaches sha256 checksums alongside each artifact
+# - Bumps the Homebrew formula in nebrass/homebrew-tap (requires HOMEBREW_TAP_TOKEN)
+# crates.io publish stays manual; see RELEASE.md.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.gz
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux arm64 only)
+        if: matrix.cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p zornmesh
+          else
+            cargo build --release --target ${{ matrix.target }} -p zornmesh
+          fi
+
+      - name: Stage artifact
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="zornmesh-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "target/${{ matrix.target }}/release/zornmesh.exe" "dist/${name}/"
+            cp README.md LICENSE* "dist/${name}/" 2>/dev/null || true
+            (cd dist && 7z a "${name}.zip" "${name}")
+            echo "artifact=dist/${name}.zip" >>"$GITHUB_OUTPUT"
+          else
+            cp "target/${{ matrix.target }}/release/zornmesh" "dist/${name}/"
+            cp README.md LICENSE* "dist/${name}/" 2>/dev/null || true
+            (cd dist && tar -czf "${name}.tar.gz" "${name}")
+            echo "artifact=dist/${name}.tar.gz" >>"$GITHUB_OUTPUT"
+          fi
+          # Compute checksum next to the archive.
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "$(basename "${{ steps.stage.outputs.artifact || '' }}")") >/dev/null 2>&1 || true
+            (cd dist && sha256sum "${name}.${{ matrix.archive }}" >"${name}.${{ matrix.archive }}.sha256")
+          else
+            (cd dist && shasum -a 256 "${name}.${{ matrix.archive }}" >"${name}.${{ matrix.archive }}.sha256")
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zornmesh-${{ matrix.target }}
+          path: |
+            dist/zornmesh-${{ matrix.target }}.${{ matrix.archive }}
+            dist/zornmesh-${{ matrix.target }}.${{ matrix.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish github release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "name=${{ inputs.tag }}" >>"$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Aggregate checksums
+        run: |
+          set -euo pipefail
+          (cd dist && cat *.sha256 >SHA256SUMS && rm *.sha256)
+          ls -la dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+
+  homebrew:
+    name: bump homebrew tap
+    needs: release
+    runs-on: ubuntu-22.04
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS artifacts for sha256
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: zornmesh-*-apple-darwin
+
+      - name: Compute formula values
+        id: formula
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          arm_sha=$(sha256sum dist/zornmesh-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
+          x86_sha=$(sha256sum dist/zornmesh-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "arm_sha=${arm_sha}"
+            echo "x86_sha=${x86_sha}"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Render Formula/zornmesh.rb
+        run: |
+          set -euo pipefail
+          cat >zornmesh.rb <<EOF
+          class Zornmesh < Formula
+            desc "Local-first agent mesh CLI and Model Context Protocol stdio bridge"
+            homepage "https://github.com/nebrass/zorn-mesh"
+            version "${{ steps.formula.outputs.version }}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/nebrass/zorn-mesh/releases/download/${{ steps.formula.outputs.tag }}/zornmesh-aarch64-apple-darwin.tar.gz"
+                sha256 "${{ steps.formula.outputs.arm_sha }}"
+              else
+                url "https://github.com/nebrass/zorn-mesh/releases/download/${{ steps.formula.outputs.tag }}/zornmesh-x86_64-apple-darwin.tar.gz"
+                sha256 "${{ steps.formula.outputs.x86_sha }}"
+              end
+            end
+
+            def install
+              bin.install "zornmesh"
+            end
+
+            test do
+              assert_match "zornmesh", shell_output("#{bin}/zornmesh --version")
+            end
+          end
+          EOF
+
+      - name: Push formula to nebrass/homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_TOKEN secret is unset; skipping tap update." >&2
+            exit 0
+          fi
+          git config --global user.name "zornmesh release bot"
+          git config --global user.email "release-bot@users.noreply.github.com"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/nebrass/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp zornmesh.rb tap/Formula/zornmesh.rb
+          cd tap
+          git add Formula/zornmesh.rb
+          git commit -m "zornmesh ${{ steps.formula.outputs.version }}" || { echo "no changes"; exit 0; }
+          git push origin HEAD
