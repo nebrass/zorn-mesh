@@ -149,15 +149,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
-name = "zornmesh-broker"
-version = "0.1.0"
-dependencies = [
- "zornmesh-core",
- "zornmesh-store",
-]
-
-[[package]]
-name = "zornmesh-cli"
+name = "zornmesh"
 version = "0.1.0"
 dependencies = [
  "serde_json",
@@ -166,6 +158,14 @@ dependencies = [
  "zornmesh-daemon",
  "zornmesh-rpc",
  "zornmesh-sdk",
+ "zornmesh-store",
+]
+
+[[package]]
+name = "zornmesh-broker"
+version = "0.1.0"
+dependencies = [
+ "zornmesh-core",
  "zornmesh-store",
 ]
 

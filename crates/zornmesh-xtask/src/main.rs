@@ -107,12 +107,12 @@ fn conformance(root: &Path) -> Result<(), String> {
     )?;
     run_tool(
         "cargo",
-        &["test", "-p", "zornmesh-cli", "--test", "golden_help"],
+        &["test", "-p", "zornmesh", "--test", "golden_help"],
         root,
     )?;
     run_tool(
         "cargo",
-        &["test", "-p", "zornmesh-cli", "--test", "daemon_help"],
+        &["test", "-p", "zornmesh", "--test", "daemon_help"],
         root,
     )
 }

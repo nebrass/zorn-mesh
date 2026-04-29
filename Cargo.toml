@@ -17,6 +17,8 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/nebrass/zorn-mesh"
+homepage = "https://github.com/nebrass/zorn-mesh"
+authors = ["zornmesh contributors"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
