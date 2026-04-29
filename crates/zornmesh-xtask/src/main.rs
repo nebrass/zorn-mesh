@@ -136,10 +136,10 @@ fn fixtures(root: &Path, args: &[String]) -> Result<(), String> {
     }
 
     for path in [
-        "fixtures/cli/README.md",
-        "fixtures/cli/daemon-help.stdout",
-        "fixtures/cli/root-help.stdout",
-        "fixtures/cli/trace-help.stdout",
+        "crates/zornmesh-cli/fixtures/README.md",
+        "crates/zornmesh-cli/fixtures/daemon-help.stdout",
+        "crates/zornmesh-cli/fixtures/root-help.stdout",
+        "crates/zornmesh-cli/fixtures/trace-help.stdout",
         "fixtures/errors/README.md",
         "fixtures/errors/manifest.toml",
         "conformance/README.md",

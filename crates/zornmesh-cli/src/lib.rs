@@ -23,10 +23,10 @@ use zornmesh_store::{
     FileEvidenceStore, RetentionPolicy, RetentionReport,
 };
 
-pub const ROOT_HELP: &str = include_str!("../../../fixtures/cli/root-help.stdout");
-pub const DAEMON_HELP: &str = include_str!("../../../fixtures/cli/daemon-help.stdout");
-pub const TRACE_HELP: &str = include_str!("../../../fixtures/cli/trace-help.stdout");
-pub const TAIL_HELP: &str = include_str!("../../../fixtures/cli/tail-help.stdout");
+pub const ROOT_HELP: &str = include_str!("../fixtures/root-help.stdout");
+pub const DAEMON_HELP: &str = include_str!("../fixtures/daemon-help.stdout");
+pub const TRACE_HELP: &str = include_str!("../fixtures/trace-help.stdout");
+pub const TAIL_HELP: &str = include_str!("../fixtures/tail-help.stdout");
 pub const REPLAY_HELP: &str = "zornmesh replay\nRedeliver a previously sent envelope by message ID.\n\nUsage: zornmesh replay <MESSAGE_ID> [OPTIONS]\n\nOptions:\n      --evidence <PATH>            Read this evidence log\n      --preview                    Emit a preview without delivery side effect\n      --yes                        Confirm replay without preview\n      --confirmation-token <TOKEN> Confirm a previously previewed replay\n      --output <FORMAT>            Select human or json output\n  -h, --help                       Print help\n";
 pub const UI_HELP: &str = "zornmesh ui\nLaunch the protected loopback local UI session.\n\nUsage: zornmesh ui [OPTIONS]\n\nOptions:\n      --port <PORT>     Preferred loopback port (default 7878)\n      --no-open         Do not open a browser; only print the URL\n      --output <FORMAT> Select human or json output\n  -h, --help            Print help\n\nThe local UI server binds loopback only, mints a per-launch high-entropy\nsession token, enforces CORS to the exact loopback origin, requires\nCSRF protection on state-changing requests, and serves only bundled\nlocal assets. Token-bearing material never appears in logs, audit\npayloads, or CLI handoff text.\n";
 pub const UI_PREFERRED_PORT: u16 = 7878;
