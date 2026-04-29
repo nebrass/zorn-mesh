@@ -41,10 +41,10 @@ jobs:
             os: macos-14
             archive: tar.gz
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: [self-hosted, Linux, X64, zorn-mesh]
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: [self-hosted, Linux, X64, zorn-mesh]
             archive: tar.gz
             cross: true
           # Windows is intentionally excluded — the CLI uses std::os::unix::*
@@ -110,7 +110,7 @@ jobs:
   release:
     name: publish github release
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, Linux, X64, zorn-mesh]
     steps:
       - uses: actions/checkout@v4
 
@@ -149,7 +149,7 @@ jobs:
   homebrew:
     name: bump homebrew tap
     needs: release
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, Linux, X64, zorn-mesh]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     steps:
       - uses: actions/checkout@v4
