@@ -65,7 +65,8 @@ fn test(root: &Path) -> Result<(), String> {
     require_tool("cargo")?;
     require_tool("bun")?;
     run_tool("cargo", &["test", "--workspace", "--all-targets"], root)?;
-    run_tool("bun", &["test"], &root.join("sdks/typescript"))
+    run_tool("bun", &["test"], &root.join("sdks/typescript"))?;
+    run_tool("bun", &["test"], &root.join("apps/local-ui"))
 }
 
 fn lint(root: &Path) -> Result<(), String> {
@@ -106,12 +107,12 @@ fn conformance(root: &Path) -> Result<(), String> {
     )?;
     run_tool(
         "cargo",
-        &["test", "-p", "zornmesh-cli", "--test", "golden_help"],
+        &["test", "-p", "zornmesh", "--test", "golden_help"],
         root,
     )?;
     run_tool(
         "cargo",
-        &["test", "-p", "zornmesh-cli", "--test", "daemon_help"],
+        &["test", "-p", "zornmesh", "--test", "daemon_help"],
         root,
     )
 }
@@ -143,8 +144,12 @@ fn fixtures(root: &Path, args: &[String]) -> Result<(), String> {
         "fixtures/errors/manifest.toml",
         "conformance/README.md",
         "conformance/manifest.toml",
+        "conformance/ui/README.md",
+        "conformance/ui/manifest.toml",
         "test-infra/README.md",
         "test-infra/manifest.toml",
+        "fixtures/ui/README.md",
+        "fixtures/ui/quality-readiness.json",
     ] {
         let path = root.join(path);
         if !path.is_file() {

@@ -7,7 +7,20 @@ Commands:
   daemon   Start or inspect the local zornmesh daemon
   agents   List and inspect registered agents
   doctor   Run first-day local mesh diagnostics
-  trace    Inspect trace and fixture scaffolding
+  stdio    Bridge an MCP-compatible host over stdio
+  inspect  Inspect persisted messages, dead letters, audit entries, and metadata
+  trace    Reconstruct conversation timelines by correlation ID
+  tail     Live-tail envelope flow by subject pattern
+  replay   Redeliver a previously sent envelope by message ID
+  retention Plan retention purges and surface retention gaps
+  audit    Verify the audit log hash chain offline
+  release  Verify release signatures and inspect SBOM evidence
+  compliance  Audit compliance traceability fields on evidence records
+  evidence  Export self-contained evidence bundles for a time window
+  redact    Apply append-only redaction proofs while preserving audit integrity
+  airmf     Map evidence records to NIST AI RMF functions and categories
+  ui        Launch the protected loopback local UI session
+  service   Manage the per-user daemon as a launchd or systemd service
   completion  Generate shell completions
   help     Print command help
 

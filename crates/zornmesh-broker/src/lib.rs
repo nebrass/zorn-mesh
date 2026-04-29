@@ -12,8 +12,9 @@ use std::{
 
 use zornmesh_core::{
     AgentCard, CapabilityDescriptor, CapabilityDirection, CoordinationOutcome,
-    CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome, Envelope, NackReasonCategory,
-    SubjectValidationError, validate_subject, validate_subject_pattern,
+    CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome, Envelope, LocalTelemetry,
+    NackReasonCategory, SubjectValidationError, TelemetryLabel, TelemetryMetric, TelemetrySpan,
+    TraceContext, validate_subject, validate_subject_pattern,
 };
 
 pub const CRATE_BOUNDARY: &str = "zornmesh-broker";
@@ -32,12 +33,21 @@ impl BrokerBoundary {
 #[derive(Debug, Clone)]
 pub struct Broker {
     inner: Arc<Mutex<BrokerInner>>,
+    telemetry: Option<LocalTelemetry>,
 }
 
 impl Broker {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(BrokerInner::default())),
+            telemetry: None,
+        }
+    }
+
+    pub fn with_telemetry(telemetry: LocalTelemetry) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(BrokerInner::default())),
+            telemetry: Some(telemetry),
         }
     }
 
@@ -86,22 +96,67 @@ impl Broker {
 
     pub fn publish(&self, envelope: Envelope) -> Result<PublishReceipt, BrokerError> {
         validate_subject(envelope.subject()).map_err(BrokerError::from)?;
-        let inner = self.inner.lock().expect("broker lock is not poisoned");
-        let delivery = DeliveryAttempt::new(envelope, 1);
+        let route_parent = envelope.trace_context().span_id().to_owned();
+        let route_context = envelope.trace_context().child();
+        self.record_span(
+            "zornmesh.publish.route",
+            &route_context,
+            Some(&route_parent),
+            "publish_subscribe",
+            "routed",
+            "accepted",
+        );
+        let subscribers = {
+            let inner = self.inner.lock().expect("broker lock is not poisoned");
+            inner
+                .subscriptions
+                .iter()
+                .filter(|subscription| subscription.pattern.matches(envelope.subject()))
+                .map(|subscription| subscription.delivery_tx.clone())
+                .collect::<Vec<_>>()
+        };
         let mut delivered = 0;
+        let mut delivery_contexts = Vec::new();
 
-        for subscription in inner
-            .subscriptions
-            .iter()
-            .filter(|subscription| subscription.pattern.matches(delivery.envelope().subject()))
-        {
-            if subscription.delivery_tx.send(delivery.clone()).is_ok() {
+        for delivery_tx in subscribers {
+            let parent_span = route_context.span_id().to_owned();
+            let delivery_context = route_context.child();
+            let delivery = DeliveryAttempt::new(
+                envelope.with_trace_context_value(delivery_context.clone()),
+                1,
+            );
+            if delivery_tx.send(delivery.clone()).is_ok() {
                 delivered += 1;
+                delivery_contexts
+                    .push((delivery.delivery_id().to_owned(), delivery_context.clone()));
+                self.record_span(
+                    "zornmesh.publish.deliver",
+                    &delivery_context,
+                    Some(&parent_span),
+                    "publish_subscribe",
+                    "delivered",
+                    "delivered",
+                );
             }
         }
 
-        let delivery_attempts =
-            u32::try_from(delivered).expect("subscriber caps fit in coordination delivery attempts");
+        if !delivery_contexts.is_empty() {
+            let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+            for (delivery_id, trace_context) in delivery_contexts {
+                inner
+                    .delivery_trace_contexts
+                    .insert(delivery_id, trace_context);
+            }
+        }
+        let delivery_attempts = u32::try_from(delivered)
+            .expect("subscriber caps fit in coordination delivery attempts");
+        self.record_metric(
+            "zornmesh.delivery.attempts",
+            u64::from(delivery_attempts),
+            "publish_subscribe",
+            "accepted",
+            envelope.source_agent(),
+        );
         Ok(PublishReceipt::new(delivery_attempts))
     }
 
@@ -113,15 +168,25 @@ impl Broker {
             .len()
     }
 
-    pub fn record_ack(&self, delivery_id: impl Into<String>) -> Result<DeliveryOutcome, BrokerError> {
+    pub fn record_ack(
+        &self,
+        delivery_id: impl Into<String>,
+    ) -> Result<DeliveryOutcome, BrokerError> {
         let delivery_id = delivery_id.into();
         validate_delivery_id(&delivery_id)?;
         let outcome = DeliveryOutcome::acknowledged(delivery_id);
-        self.inner
-            .lock()
-            .expect("broker lock is not poisoned")
-            .delivery_outcomes
-            .push(outcome.clone());
+        let trace_context = {
+            let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+            inner.delivery_outcomes.push(outcome.clone());
+            inner.delivery_trace_contexts.remove(outcome.delivery_id())
+        };
+        self.record_span_for_optional_context(
+            "zornmesh.delivery.ack",
+            trace_context.as_ref(),
+            "ack",
+            "acknowledged",
+            "acknowledged",
+        );
         Ok(outcome)
     }
 
@@ -133,11 +198,18 @@ impl Broker {
         let delivery_id = delivery_id.into();
         validate_delivery_id(&delivery_id)?;
         let outcome = DeliveryOutcome::rejected(delivery_id, reason);
-        self.inner
-            .lock()
-            .expect("broker lock is not poisoned")
-            .delivery_outcomes
-            .push(outcome.clone());
+        let trace_context = {
+            let mut inner = self.inner.lock().expect("broker lock is not poisoned");
+            inner.delivery_outcomes.push(outcome.clone());
+            inner.delivery_trace_contexts.remove(outcome.delivery_id())
+        };
+        self.record_span_for_optional_context(
+            "zornmesh.delivery.nack",
+            trace_context.as_ref(),
+            "nack",
+            "rejected",
+            reason.as_str(),
+        );
         Ok(outcome)
     }
 
@@ -156,7 +228,10 @@ impl Broker {
     ) -> Result<RequestHandle, BrokerError> {
         registration.validate()?;
         let mut inner = self.inner.lock().expect("broker lock is not poisoned");
-        if inner.pending_requests.contains_key(&registration.correlation_id) {
+        if inner
+            .pending_requests
+            .contains_key(&registration.correlation_id)
+        {
             return Err(BrokerError::new(
                 BrokerErrorCode::DeliveryValidation,
                 format!(
@@ -174,6 +249,13 @@ impl Broker {
                 deadline,
                 resolution_tx: tx,
             },
+        );
+        self.record_span_for_optional_context(
+            "zornmesh.request.register",
+            Some(registration.trace_context()),
+            "request_reply",
+            "registered",
+            "pending",
         );
         Ok(RequestHandle {
             correlation_id: registration.correlation_id,
@@ -199,35 +281,39 @@ impl Broker {
         }
         let mut inner = self.inner.lock().expect("broker lock is not poisoned");
         let Some(pending) = inner.pending_requests.remove(correlation_id) else {
-            if inner.timed_out_correlations.contains(correlation_id) {
-                inner.late_events.push(LateRequestEvent::late_after_timeout(
-                    correlation_id,
-                    now,
-                ));
-                return Ok(ReplySubmissionOutcome::LateAfterTimeout);
-            }
-            if inner.completed_correlations.contains(correlation_id) {
-                inner
-                    .late_events
-                    .push(LateRequestEvent::duplicate_after_terminal(
-                        correlation_id,
-                        now,
-                    ));
-                return Ok(ReplySubmissionOutcome::DuplicateAfterTerminal);
-            }
-            inner
-                .late_events
-                .push(LateRequestEvent::unknown_correlation(correlation_id, now));
-            return Ok(ReplySubmissionOutcome::UnknownCorrelation);
+            let (outcome, event, trace_context) =
+                Self::record_late_request_event(&mut inner, correlation_id, now);
+            drop(inner);
+            self.record_span_for_optional_context(
+                "zornmesh.request.reply",
+                trace_context.as_ref(),
+                "request_reply",
+                event,
+                event,
+            );
+            return Ok(outcome);
         };
         inner
             .completed_correlations
             .insert(correlation_id.to_owned());
+        let trace_context = pending.registration.trace_context().clone();
+        let reply_context = trace_context.child();
+        inner
+            .terminal_request_trace_contexts
+            .insert(correlation_id.to_owned(), reply_context.clone());
         let resolution = RequestResolution::Replied {
             envelope,
             attempt: 1,
         };
         let _ = pending.resolution_tx.send(resolution);
+        self.record_span(
+            "zornmesh.request.reply",
+            &reply_context,
+            Some(trace_context.span_id()),
+            "request_reply",
+            "replied",
+            "replied",
+        );
         Ok(ReplySubmissionOutcome::Accepted)
     }
 
@@ -242,30 +328,26 @@ impl Broker {
         let message = message.into();
         let mut inner = self.inner.lock().expect("broker lock is not poisoned");
         let Some(pending) = inner.pending_requests.remove(correlation_id) else {
-            if inner.timed_out_correlations.contains(correlation_id) {
-                inner.late_events.push(LateRequestEvent::late_after_timeout(
-                    correlation_id,
-                    now,
-                ));
-                return Ok(ReplySubmissionOutcome::LateAfterTimeout);
-            }
-            if inner.completed_correlations.contains(correlation_id) {
-                inner
-                    .late_events
-                    .push(LateRequestEvent::duplicate_after_terminal(
-                        correlation_id,
-                        now,
-                    ));
-                return Ok(ReplySubmissionOutcome::DuplicateAfterTerminal);
-            }
-            inner
-                .late_events
-                .push(LateRequestEvent::unknown_correlation(correlation_id, now));
-            return Ok(ReplySubmissionOutcome::UnknownCorrelation);
+            let (outcome, event, trace_context) =
+                Self::record_late_request_event(&mut inner, correlation_id, now);
+            drop(inner);
+            self.record_span_for_optional_context(
+                "zornmesh.request.reject",
+                trace_context.as_ref(),
+                "request_reply",
+                event,
+                event,
+            );
+            return Ok(outcome);
         };
         inner
             .completed_correlations
             .insert(correlation_id.to_owned());
+        let trace_context = pending.registration.trace_context().clone();
+        let reject_context = trace_context.child();
+        inner
+            .terminal_request_trace_contexts
+            .insert(correlation_id.to_owned(), reject_context.clone());
         let outcome = CoordinationOutcome::new(
             CoordinationOutcomeKind::Rejected,
             CoordinationStage::Delivery,
@@ -278,6 +360,14 @@ impl Broker {
         let _ = pending
             .resolution_tx
             .send(RequestResolution::Rejected { outcome, reason });
+        self.record_span(
+            "zornmesh.request.reject",
+            &reject_context,
+            Some(trace_context.span_id()),
+            "request_reply",
+            "rejected",
+            reason.as_str(),
+        );
         Ok(ReplySubmissionOutcome::Accepted)
     }
 
@@ -286,7 +376,8 @@ impl Broker {
         let expired_ids: Vec<String> = inner
             .pending_requests
             .iter()
-            .filter_map(|(id, pending)| (pending.deadline <= now).then(|| id.clone()))
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|(id, _)| id.clone())
             .collect();
         let mut expired = Vec::with_capacity(expired_ids.len());
         for id in expired_ids {
@@ -296,9 +387,7 @@ impl Broker {
                     CoordinationOutcomeKind::TimedOut,
                     CoordinationStage::Transport,
                     "REQUEST_TIMED_OUT",
-                    format!(
-                        "request {id} did not receive a reply within configured timeout"
-                    ),
+                    format!("request {id} did not receive a reply within configured timeout"),
                     true,
                     true,
                     0,
@@ -307,6 +396,19 @@ impl Broker {
                     correlation_id: id.clone(),
                     outcome: outcome.clone(),
                 });
+                let request_context = pending.registration.trace_context();
+                let timeout_context = request_context.child();
+                inner
+                    .terminal_request_trace_contexts
+                    .insert(id.clone(), timeout_context.clone());
+                self.record_span(
+                    "zornmesh.request.timeout",
+                    &timeout_context,
+                    Some(request_context.span_id()),
+                    "request_reply",
+                    "late",
+                    "timed_out",
+                );
                 expired.push(ExpiredRequest {
                     correlation_id: id,
                     outcome,
@@ -342,11 +444,7 @@ impl Broker {
             .collect()
     }
 
-    pub fn enqueue(
-        &self,
-        queue: impl Into<String>,
-        envelope: Envelope,
-    ) -> Result<(), BrokerError> {
+    pub fn enqueue(&self, queue: impl Into<String>, envelope: Envelope) -> Result<(), BrokerError> {
         let queue = queue.into();
         if queue.trim().is_empty() {
             return Err(BrokerError::new(
@@ -380,6 +478,11 @@ impl Broker {
                 queue.pop_front()
             };
             let Some(item) = item else { break };
+            let parent_span = item.envelope.trace_context().span_id().to_owned();
+            let lease_context = item.envelope.trace_context().child();
+            let lease_envelope = item
+                .envelope
+                .with_trace_context_value(lease_context.clone());
             inner.next_lease_id += 1;
             let lease_id = format!("lease-{}", inner.next_lease_id);
             let expiry = now + request.lease_duration;
@@ -387,7 +490,7 @@ impl Broker {
                 lease_id: lease_id.clone(),
                 consumer_id: request.consumer_id.clone(),
                 queue: request.queue.clone(),
-                envelope: item.envelope,
+                envelope: lease_envelope,
                 attempt: item.attempt,
                 expiry,
             };
@@ -397,7 +500,24 @@ impl Broker {
                     lease: lease.clone(),
                 },
             );
+            self.record_span(
+                "zornmesh.lease.fetch",
+                &lease_context,
+                Some(&parent_span),
+                "fetch_lease",
+                "leased",
+                "leased",
+            );
             leases.push(lease);
+        }
+        if !leases.is_empty() {
+            self.record_metric(
+                "zornmesh.lease.fetched",
+                leases.len() as u64,
+                "fetch_lease",
+                "leased",
+                &request.consumer_id,
+            );
         }
         Ok(leases)
     }
@@ -430,22 +550,26 @@ impl Broker {
         if active.lease.consumer_id != consumer_id {
             return Err(LeaseError::new(
                 LeaseErrorCode::LeaseNotOwned,
-                format!(
-                    "lease {lease_id} is owned by a different consumer than {consumer_id}"
-                ),
+                format!("lease {lease_id} is owned by a different consumer than {consumer_id}"),
             ));
         }
+        let trace_context = active.lease.envelope.trace_context().clone();
         let lease_id_owned = lease_id.to_owned();
         inner.active_leases.remove(&lease_id_owned);
         inner.terminal_lease_ids.insert(lease_id_owned.clone());
-        let outcome = CoordinationOutcome::acknowledged(
-            format!("lease {lease_id_owned} acknowledged"),
-            1,
-        );
+        let outcome =
+            CoordinationOutcome::acknowledged(format!("lease {lease_id_owned} acknowledged"), 1);
         inner.lease_audit.push(LeaseAuditEvent {
             lease_id: lease_id_owned,
             kind: LeaseAuditKind::Acknowledged,
         });
+        self.record_span_for_optional_context(
+            "zornmesh.lease.ack",
+            Some(&trace_context),
+            "ack",
+            "acknowledged",
+            "acknowledged",
+        );
         Ok(LeaseAckOutcome::Acknowledged(outcome))
     }
 
@@ -478,18 +602,17 @@ impl Broker {
         if active.lease.consumer_id != consumer_id {
             return Err(LeaseError::new(
                 LeaseErrorCode::LeaseNotOwned,
-                format!(
-                    "lease {lease_id} is owned by a different consumer than {consumer_id}"
-                ),
+                format!("lease {lease_id} is owned by a different consumer than {consumer_id}"),
             ));
         }
+        let trace_context = active.lease.envelope.trace_context().clone();
         let lease_id_owned = lease_id.to_owned();
-        let active = inner.active_leases.remove(&lease_id_owned).expect("lease present");
+        let active = inner
+            .active_leases
+            .remove(&lease_id_owned)
+            .expect("lease present");
         inner.terminal_lease_ids.insert(lease_id_owned.clone());
-        let queue = inner
-            .queues
-            .entry(active.lease.queue.clone())
-            .or_default();
+        let queue = inner.queues.entry(active.lease.queue.clone()).or_default();
         queue.push_back(QueuedEnvelope {
             envelope: active.lease.envelope.clone(),
             attempt: active.lease.attempt + 1,
@@ -498,7 +621,10 @@ impl Broker {
             CoordinationOutcomeKind::Rejected,
             CoordinationStage::Delivery,
             "LEASE_NACKED",
-            format!("lease {lease_id_owned} rejected with reason {}", reason.as_str()),
+            format!(
+                "lease {lease_id_owned} rejected with reason {}",
+                reason.as_str()
+            ),
             true,
             true,
             active.lease.attempt,
@@ -507,6 +633,13 @@ impl Broker {
             lease_id: lease_id_owned,
             kind: LeaseAuditKind::Nacked(reason),
         });
+        self.record_span_for_optional_context(
+            "zornmesh.lease.nack",
+            Some(&trace_context),
+            "nack",
+            "retry",
+            reason.as_str(),
+        );
         Ok(LeaseAckOutcome::Nacked { outcome, reason })
     }
 
@@ -545,9 +678,7 @@ impl Broker {
         if active.lease.consumer_id != consumer_id {
             return Err(LeaseError::new(
                 LeaseErrorCode::LeaseNotOwned,
-                format!(
-                    "lease {lease_id} is owned by a different consumer than {consumer_id}"
-                ),
+                format!("lease {lease_id} is owned by a different consumer than {consumer_id}"),
             ));
         }
         let new_expiry = now + extension;
@@ -564,16 +695,15 @@ impl Broker {
         let expired_ids: Vec<String> = inner
             .active_leases
             .iter()
-            .filter_map(|(id, active)| (active.lease.expiry <= now).then(|| id.clone()))
+            .filter(|(_, active)| active.lease.expiry <= now)
+            .map(|(id, _)| id.clone())
             .collect();
         let mut expired = Vec::with_capacity(expired_ids.len());
         for id in expired_ids {
             if let Some(active) = inner.active_leases.remove(&id) {
+                let trace_context = active.lease.envelope.trace_context().clone();
                 inner.expired_lease_ids.insert(id.clone());
-                let queue = inner
-                    .queues
-                    .entry(active.lease.queue.clone())
-                    .or_default();
+                let queue = inner.queues.entry(active.lease.queue.clone()).or_default();
                 queue.push_back(QueuedEnvelope {
                     envelope: active.lease.envelope.clone(),
                     attempt: active.lease.attempt + 1,
@@ -582,6 +712,13 @@ impl Broker {
                     lease_id: id.clone(),
                     kind: LeaseAuditKind::Expired,
                 });
+                self.record_span_for_optional_context(
+                    "zornmesh.lease.expire",
+                    Some(&trace_context),
+                    "retry",
+                    "retry",
+                    "expired",
+                );
                 expired.push(active.lease);
             }
         }
@@ -858,11 +995,7 @@ impl Broker {
         }
     }
 
-    pub fn record_session_disconnect(
-        &self,
-        agent_canonical_id: &str,
-        session_id: &str,
-    ) {
+    pub fn record_session_disconnect(&self, agent_canonical_id: &str, session_id: &str) {
         let mut inner = self.inner.lock().expect("broker lock is not poisoned");
         let Some(entry) = inner.agent_presence.get_mut(agent_canonical_id) else {
             return;
@@ -888,10 +1021,7 @@ impl Broker {
             .unwrap_or_default()
     }
 
-    pub fn routing_session(
-        &self,
-        agent_canonical_id: &str,
-    ) -> Option<SessionDescriptor> {
+    pub fn routing_session(&self, agent_canonical_id: &str) -> Option<SessionDescriptor> {
         let inner = self.inner.lock().expect("broker lock is not poisoned");
         let record = inner.agent_presence.get(agent_canonical_id)?;
         record
@@ -1202,11 +1332,9 @@ impl Broker {
         Ok(IdempotencyDecision::FirstAttempt)
     }
 
-    pub fn open_stream(
-        &self,
-        registration: StreamRegistration,
-    ) -> Result<(), StreamError> {
+    pub fn open_stream(&self, registration: StreamRegistration) -> Result<(), StreamError> {
         registration.validate()?;
+        let trace_context = registration.trace_context().clone();
         let mut inner = self.inner.lock().expect("broker lock is not poisoned");
         if inner.streams.contains_key(&registration.stream_id) {
             return Err(StreamError::new(
@@ -1214,9 +1342,10 @@ impl Broker {
                 format!("stream '{}' is already open", registration.stream_id),
             ));
         }
-        inner
-            .stream_correlation_index
-            .insert(registration.correlation_id.clone(), registration.stream_id.clone());
+        inner.stream_correlation_index.insert(
+            registration.correlation_id.clone(),
+            registration.stream_id.clone(),
+        );
         inner.streams.insert(
             registration.stream_id.clone(),
             StreamRecord {
@@ -1225,6 +1354,13 @@ impl Broker {
                 outstanding_bytes: 0,
                 state: StreamState::Open,
             },
+        );
+        self.record_span_for_optional_context(
+            "zornmesh.stream.open",
+            Some(&trace_context),
+            "stream",
+            "opened",
+            "open",
         );
         Ok(())
     }
@@ -1245,18 +1381,29 @@ impl Broker {
                 true,
                 pending.deadline.duration_since(now).map(|_| 0).unwrap_or(0),
             );
-            let _ = pending
-                .resolution_tx
-                .send(RequestResolution::Cancelled {
-                    correlation_id: correlation_id.to_owned(),
-                    outcome: outcome.clone(),
-                });
+            let _ = pending.resolution_tx.send(RequestResolution::Cancelled {
+                correlation_id: correlation_id.to_owned(),
+                outcome: outcome.clone(),
+            });
             inner
                 .completed_correlations
                 .insert(correlation_id.to_owned());
             inner
                 .cancelled_correlations
                 .insert(correlation_id.to_owned());
+            let request_context = pending.registration.trace_context();
+            let cancel_context = request_context.child();
+            inner
+                .terminal_request_trace_contexts
+                .insert(correlation_id.to_owned(), cancel_context.clone());
+            self.record_span(
+                "zornmesh.request.cancel",
+                &cancel_context,
+                Some(request_context.span_id()),
+                "cancellation",
+                "cancellation",
+                "cancelled",
+            );
             return Ok(CancellationOutcome::Cancelled(outcome));
         }
         if inner.timed_out_correlations.contains(correlation_id) {
@@ -1284,6 +1431,7 @@ impl Broker {
             StreamState::Aborted => return Ok(CancellationOutcome::AlreadyComplete),
             StreamState::Open => {}
         }
+        let trace_context = record.registration.trace_context().clone();
         record.state = StreamState::Aborted;
         let outcome = CoordinationOutcome::new(
             CoordinationOutcomeKind::Terminal,
@@ -1297,6 +1445,13 @@ impl Broker {
         inner
             .cancelled_correlations
             .insert(correlation_id.to_owned());
+        self.record_span_for_optional_context(
+            "zornmesh.stream.cancel",
+            Some(&trace_context),
+            "cancellation",
+            "cancellation",
+            "cancelled",
+        );
         Ok(CancellationOutcome::Cancelled(outcome))
     }
 
@@ -1357,12 +1512,22 @@ impl Broker {
         record.next_sequence += 1;
         let sequence = chunk.sequence;
         let outstanding_bytes = record.outstanding_bytes;
+        let trace_context = record.registration.trace_context().clone();
         match chunk.finality {
-            StreamFinality::Continue => Ok(ChunkSubmissionOutcome::Accepted {
-                sequence,
-                outstanding_bytes,
-                chunk_size,
-            }),
+            StreamFinality::Continue => {
+                self.record_span_for_optional_context(
+                    "zornmesh.stream.chunk",
+                    Some(&trace_context),
+                    "stream",
+                    "chunk",
+                    "accepted",
+                );
+                Ok(ChunkSubmissionOutcome::Accepted {
+                    sequence,
+                    outstanding_bytes,
+                    chunk_size,
+                })
+            }
             StreamFinality::Final => {
                 record.state = StreamState::Completed;
                 let total_chunks = record.next_sequence;
@@ -1372,6 +1537,13 @@ impl Broker {
                         chunk.stream_id, total_chunks
                     ),
                     total_chunks,
+                );
+                self.record_span_for_optional_context(
+                    "zornmesh.stream.chunk",
+                    Some(&trace_context),
+                    "stream",
+                    "completed",
+                    "completed",
                 );
                 Ok(ChunkSubmissionOutcome::Completed {
                     sequence,
@@ -1425,7 +1597,15 @@ impl Broker {
                 format!("stream '{stream_id}' is already in terminal state"),
             ));
         }
+        let trace_context = record.registration.trace_context().clone();
         record.state = StreamState::Aborted;
+        self.record_span_for_optional_context(
+            "zornmesh.stream.abort",
+            Some(&trace_context),
+            "stream",
+            "cancellation",
+            reason.as_str(),
+        );
         Ok(CoordinationOutcome::failed(
             "STREAM_ABORTED",
             format!(
@@ -1474,6 +1654,114 @@ impl Broker {
         record.state = IdempotencyState::Committed(coord);
         Ok(())
     }
+
+    fn record_span(
+        &self,
+        name: &str,
+        context: &TraceContext,
+        parent_span_id: Option<&str>,
+        operation: &str,
+        event: &str,
+        delivery_state: &str,
+    ) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_span(
+                TelemetrySpan::new(name, context, parent_span_id)
+                    .with_attribute("mesh.operation", operation)
+                    .with_attribute("delivery.state", delivery_state)
+                    .with_event(event),
+            );
+        }
+    }
+
+    fn record_span_for_optional_context(
+        &self,
+        name: &str,
+        context: Option<&TraceContext>,
+        operation: &str,
+        event: &str,
+        delivery_state: &str,
+    ) {
+        let Some(telemetry) = &self.telemetry else {
+            return;
+        };
+        let base_context = context.cloned().unwrap_or_else(TraceContext::generated);
+        let parent_span = base_context.span_id().to_owned();
+        let child_context = base_context.child();
+        telemetry.record_span(
+            TelemetrySpan::new(name, &child_context, Some(&parent_span))
+                .with_attribute("mesh.operation", operation)
+                .with_attribute("delivery.state", delivery_state)
+                .with_event(event),
+        );
+    }
+
+    fn record_late_request_event(
+        inner: &mut BrokerInner,
+        correlation_id: &str,
+        observed_at: SystemTime,
+    ) -> (ReplySubmissionOutcome, &'static str, Option<TraceContext>) {
+        let trace_context = inner
+            .terminal_request_trace_contexts
+            .get(correlation_id)
+            .cloned();
+        if inner.timed_out_correlations.contains(correlation_id) {
+            inner.late_events.push(LateRequestEvent::late_after_timeout(
+                correlation_id,
+                observed_at,
+            ));
+            return (
+                ReplySubmissionOutcome::LateAfterTimeout,
+                "late_after_timeout",
+                trace_context,
+            );
+        }
+        if inner.completed_correlations.contains(correlation_id) {
+            inner
+                .late_events
+                .push(LateRequestEvent::duplicate_after_terminal(
+                    correlation_id,
+                    observed_at,
+                ));
+            return (
+                ReplySubmissionOutcome::DuplicateAfterTerminal,
+                "duplicate_after_terminal",
+                trace_context,
+            );
+        }
+        inner
+            .late_events
+            .push(LateRequestEvent::unknown_correlation(
+                correlation_id,
+                observed_at,
+            ));
+        (
+            ReplySubmissionOutcome::UnknownCorrelation,
+            "unknown_correlation",
+            trace_context,
+        )
+    }
+
+    fn record_metric(
+        &self,
+        name: &str,
+        value: u64,
+        operation: &str,
+        delivery_state: &str,
+        agent: &str,
+    ) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_metric(TelemetryMetric::new(
+                name,
+                value,
+                vec![
+                    TelemetryLabel::new("operation", operation),
+                    TelemetryLabel::new("delivery_state", delivery_state),
+                    TelemetryLabel::new("agent", agent),
+                ],
+            ));
+        }
+    }
 }
 
 impl Default for Broker {
@@ -1487,7 +1775,9 @@ struct BrokerInner {
     next_subscription_id: u64,
     subscriptions: Vec<SubscriptionEntry>,
     delivery_outcomes: Vec<DeliveryOutcome>,
+    delivery_trace_contexts: HashMap<String, TraceContext>,
     pending_requests: HashMap<String, PendingRequest>,
+    terminal_request_trace_contexts: HashMap<String, TraceContext>,
     completed_correlations: HashSet<String>,
     timed_out_correlations: HashSet<String>,
     late_events: Vec<LateRequestEvent>,
@@ -1861,8 +2151,12 @@ impl std::error::Error for CapabilityError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRegistrationOutcome {
-    Registered { canonical: AgentCard },
-    Compatible { canonical: AgentCard },
+    Registered {
+        canonical: AgentCard,
+    },
+    Compatible {
+        canonical: AgentCard,
+    },
     Conflict {
         existing: AgentCard,
         attempted: AgentCard,
@@ -2020,6 +2314,7 @@ pub struct StreamRegistration {
     receiver_agent: String,
     max_chunk_size: usize,
     byte_budget: usize,
+    trace_context: TraceContext,
 }
 
 impl StreamRegistration {
@@ -2038,7 +2333,13 @@ impl StreamRegistration {
             receiver_agent: receiver_agent.into(),
             max_chunk_size,
             byte_budget,
+            trace_context: TraceContext::generated(),
         }
+    }
+
+    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
+        self.trace_context = trace_context;
+        self
     }
 
     pub fn stream_id(&self) -> &str {
@@ -2063,6 +2364,10 @@ impl StreamRegistration {
 
     pub const fn byte_budget(&self) -> usize {
         self.byte_budget
+    }
+
+    pub const fn trace_context(&self) -> &TraceContext {
+        &self.trace_context
     }
 
     fn validate(&self) -> Result<(), StreamError> {
@@ -2743,6 +3048,7 @@ pub struct RequestRegistration {
     target_agent: String,
     subject: String,
     timeout: Duration,
+    trace_context: TraceContext,
 }
 
 impl RequestRegistration {
@@ -2759,7 +3065,13 @@ impl RequestRegistration {
             target_agent: target_agent.into(),
             subject: subject.into(),
             timeout,
+            trace_context: TraceContext::generated(),
         }
+    }
+
+    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
+        self.trace_context = trace_context;
+        self
     }
 
     pub fn correlation_id(&self) -> &str {
@@ -2780,6 +3092,10 @@ impl RequestRegistration {
 
     pub const fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    pub const fn trace_context(&self) -> &TraceContext {
+        &self.trace_context
     }
 
     fn validate(&self) -> Result<(), BrokerError> {

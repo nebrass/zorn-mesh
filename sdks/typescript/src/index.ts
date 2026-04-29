@@ -650,7 +650,7 @@ function defaultDaemonStarter(context: DaemonStarterContext): StartedDaemon {
 }
 
 function defaultDaemonCommand(socketPath: string): readonly string[] {
-  return ["cargo", "run", "-q", "-p", "zornmesh-cli", "--", "daemon", "--socket", socketPath];
+  return ["cargo", "run", "-q", "-p", "zornmesh", "--", "daemon", "--socket", socketPath];
 }
 
 async function waitForReadiness(options: NormalizedConnectOptions, uid: number | undefined): Promise<void> {

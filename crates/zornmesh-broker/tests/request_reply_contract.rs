@@ -1,11 +1,9 @@
 use std::time::{Duration, SystemTime};
 
 use zornmesh_broker::{
-    Broker, LateRequestKind, RequestRegistration, RequestResolution, ReplySubmissionOutcome,
+    Broker, LateRequestKind, ReplySubmissionOutcome, RequestRegistration, RequestResolution,
 };
-use zornmesh_core::{
-    CoordinationOutcomeKind, CoordinationStage, Envelope, NackReasonCategory,
-};
+use zornmesh_core::{CoordinationOutcomeKind, CoordinationStage, Envelope, NackReasonCategory};
 
 const REPLY_CONTENT: &[u8] = b"{\"ok\":true}";
 
@@ -41,7 +39,11 @@ fn happy_path_delivers_one_correlated_reply_before_timeout() {
         .expect("request registers");
 
     let submission = broker
-        .submit_reply("corr-happy-1", reply_envelope("corr-happy-1", "agent.local/b"), at(11))
+        .submit_reply(
+            "corr-happy-1",
+            reply_envelope("corr-happy-1", "agent.local/b"),
+            at(11),
+        )
         .expect("reply submits");
 
     assert!(matches!(submission, ReplySubmissionOutcome::Accepted));
@@ -160,14 +162,25 @@ fn first_terminal_reply_wins_and_subsequent_replies_are_recorded_as_duplicates()
         .expect("request registers");
 
     let first = broker
-        .submit_reply("corr-dup-1", reply_envelope("corr-dup-1", "agent.local/b"), at(11))
+        .submit_reply(
+            "corr-dup-1",
+            reply_envelope("corr-dup-1", "agent.local/b"),
+            at(11),
+        )
         .expect("first reply accepted");
     assert!(matches!(first, ReplySubmissionOutcome::Accepted));
 
     let second = broker
-        .submit_reply("corr-dup-1", reply_envelope("corr-dup-1", "agent.local/b"), at(12))
+        .submit_reply(
+            "corr-dup-1",
+            reply_envelope("corr-dup-1", "agent.local/b"),
+            at(12),
+        )
         .expect("second reply outcome");
-    assert!(matches!(second, ReplySubmissionOutcome::DuplicateAfterTerminal));
+    assert!(matches!(
+        second,
+        ReplySubmissionOutcome::DuplicateAfterTerminal
+    ));
 
     // Only one resolution reaches the requester.
     let _ = handle
@@ -241,7 +254,10 @@ fn unknown_correlation_id_reply_is_recorded_as_orphan_and_not_delivered() {
             at(10),
         )
         .expect("orphan reply outcome returns");
-    assert!(matches!(outcome, ReplySubmissionOutcome::UnknownCorrelation));
+    assert!(matches!(
+        outcome,
+        ReplySubmissionOutcome::UnknownCorrelation
+    ));
 
     let late = broker.late_request_events();
     assert_eq!(late.len(), 1);

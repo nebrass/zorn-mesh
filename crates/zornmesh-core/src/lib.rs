@@ -1,8 +1,12 @@
 #![doc = "Core domain types for the zornmesh workspace scaffold."]
 
 use std::{
+    collections::{HashMap, HashSet},
     fmt,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -17,8 +21,15 @@ pub const COORDINATION_CONTRACT_VERSION: &str = "zornmesh.coordination.v1";
 pub const ENVELOPE_SCHEMA_VERSION: &str = "zornmesh.envelope.v1";
 pub const ERROR_CONTRACT_VERSION: &str = "zornmesh.error.v1";
 pub const DELIVERY_STATE_TAXONOMY_VERSION: &str = "zornmesh.delivery-state.v1";
+pub const TELEMETRY_SCHEMA_VERSION: &str = "zornmesh.telemetry.v1";
+pub const TELEMETRY_CARDINALITY_LIMIT: usize = 64;
+pub const TELEMETRY_OVERFLOW_LABEL: &str = "__overflow__";
+pub const TELEMETRY_EXPORT_BUDGET_MS: u64 = 5;
+const MAX_TRACESTATE_BYTES: usize = 512;
+const MAX_TRACESTATE_MEMBERS: usize = 32;
 
 static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinationOutcomeKind {
@@ -383,7 +394,10 @@ impl DeliveryOutcome {
         let delivery_id = delivery_id.into();
         Self {
             outcome: CoordinationOutcome::rejected(
-                format!("delivery {delivery_id} rejected with reason {}", reason.as_str()),
+                format!(
+                    "delivery {delivery_id} rejected with reason {}",
+                    reason.as_str()
+                ),
                 1,
             ),
             delivery_id,
@@ -446,6 +460,7 @@ pub struct Envelope {
     subject: Subject,
     timestamp_unix_ms: u64,
     correlation_id: String,
+    trace_context: TraceContext,
     payload_metadata: PayloadMetadata,
     payload: Vec<u8>,
 }
@@ -479,6 +494,51 @@ impl Envelope {
         correlation_id: impl Into<String>,
         content_type: impl Into<String>,
     ) -> Result<Self, EnvelopeError> {
+        Self::with_metadata_and_trace_context(
+            source_agent,
+            subject,
+            payload,
+            timestamp_unix_ms,
+            correlation_id,
+            content_type,
+            TraceContext::generated(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_trace_context(
+        source_agent: impl Into<String>,
+        subject: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+        timestamp_unix_ms: u64,
+        correlation_id: impl Into<String>,
+        content_type: impl Into<String>,
+        traceparent: impl AsRef<str>,
+        tracestate: Option<&str>,
+    ) -> Result<Self, EnvelopeError> {
+        let trace_context = TraceContext::from_w3c(traceparent, tracestate)
+            .map_err(EnvelopeError::InvalidTraceContext)?;
+        Self::with_metadata_and_trace_context(
+            source_agent,
+            subject,
+            payload,
+            timestamp_unix_ms,
+            correlation_id,
+            content_type,
+            trace_context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_metadata_and_trace_context(
+        source_agent: impl Into<String>,
+        subject: impl Into<String>,
+        payload: impl Into<Vec<u8>>,
+        timestamp_unix_ms: u64,
+        correlation_id: impl Into<String>,
+        content_type: impl Into<String>,
+        trace_context: TraceContext,
+    ) -> Result<Self, EnvelopeError> {
         let payload = payload.into();
         if payload.len() > MAX_ENVELOPE_PAYLOAD_BYTES {
             return Err(EnvelopeError::PayloadTooLarge {
@@ -497,9 +557,16 @@ impl Envelope {
             subject: Subject::new(subject)?,
             timestamp_unix_ms,
             correlation_id,
+            trace_context,
             payload_metadata: PayloadMetadata::new(content_type, payload.len())?,
             payload,
         })
+    }
+
+    pub fn with_trace_context_value(&self, trace_context: TraceContext) -> Self {
+        let mut envelope = self.clone();
+        envelope.trace_context = trace_context;
+        envelope
     }
 
     pub fn source_agent(&self) -> &str {
@@ -516,6 +583,14 @@ impl Envelope {
 
     pub fn correlation_id(&self) -> &str {
         &self.correlation_id
+    }
+
+    pub const fn trace_context(&self) -> &TraceContext {
+        &self.trace_context
+    }
+
+    pub fn trace_id(&self) -> &str {
+        self.trace_context.trace_id()
     }
 
     pub const fn payload_metadata(&self) -> &PayloadMetadata {
@@ -683,10 +758,414 @@ impl fmt::Display for SubjectValidationError {
 impl std::error::Error for SubjectValidationError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceContext {
+    trace_id: String,
+    span_id: String,
+    trace_flags: String,
+    tracestate: Option<String>,
+}
+
+impl TraceContext {
+    pub fn from_w3c(
+        traceparent: impl AsRef<str>,
+        tracestate: Option<&str>,
+    ) -> Result<Self, TraceContextError> {
+        let parts = traceparent.as_ref().split('-').collect::<Vec<_>>();
+        if parts.len() != 4 {
+            return Err(TraceContextError::MalformedTraceparent);
+        }
+        let version = parts[0];
+        let trace_id = parts[1];
+        let span_id = parts[2];
+        let trace_flags = parts[3];
+        if version != "00" {
+            return Err(TraceContextError::UnsupportedTraceparentVersion);
+        }
+        validate_lower_hex("trace ID", trace_id, 32)?;
+        validate_lower_hex("span ID", span_id, 16)?;
+        validate_lower_hex("trace flags", trace_flags, 2)?;
+        if trace_id.bytes().all(|byte| byte == b'0') {
+            return Err(TraceContextError::ZeroTraceId);
+        }
+        if span_id.bytes().all(|byte| byte == b'0') {
+            return Err(TraceContextError::ZeroSpanId);
+        }
+        Ok(Self {
+            trace_id: trace_id.to_owned(),
+            span_id: span_id.to_owned(),
+            trace_flags: trace_flags.to_owned(),
+            tracestate: normalize_tracestate(tracestate)?,
+        })
+    }
+
+    pub fn generated() -> Self {
+        Self {
+            trace_id: generated_hex_id(32),
+            span_id: generated_hex_id(16),
+            trace_flags: "01".to_owned(),
+            tracestate: None,
+        }
+    }
+
+    pub fn child(&self) -> Self {
+        Self {
+            trace_id: self.trace_id.clone(),
+            span_id: generated_hex_id(16),
+            trace_flags: self.trace_flags.clone(),
+            tracestate: self.tracestate.clone(),
+        }
+    }
+
+    pub fn traceparent(&self) -> String {
+        format!("00-{}-{}-{}", self.trace_id, self.span_id, self.trace_flags)
+    }
+
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    pub fn span_id(&self) -> &str {
+        &self.span_id
+    }
+
+    pub fn trace_flags(&self) -> &str {
+        &self.trace_flags
+    }
+
+    pub fn tracestate(&self) -> Option<&str> {
+        self.tracestate.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceContextError {
+    MalformedTraceparent,
+    UnsupportedTraceparentVersion,
+    InvalidHexField { field: &'static str },
+    ZeroTraceId,
+    ZeroSpanId,
+    MalformedTracestate,
+    TracestateTooLong { actual: usize, limit: usize },
+    TracestateTooManyMembers { actual: usize, limit: usize },
+}
+
+impl TraceContextError {
+    pub const fn code(&self) -> &'static str {
+        "E_TRACE_CONTEXT_VALIDATION"
+    }
+}
+
+impl fmt::Display for TraceContextError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedTraceparent => f.write_str("traceparent is malformed"),
+            Self::UnsupportedTraceparentVersion => {
+                f.write_str("traceparent version is unsupported")
+            }
+            Self::InvalidHexField { field } => {
+                write!(f, "traceparent {field} must be lowercase hexadecimal")
+            }
+            Self::ZeroTraceId => f.write_str("traceparent trace ID must not be all zero"),
+            Self::ZeroSpanId => f.write_str("traceparent span ID must not be all zero"),
+            Self::MalformedTracestate => f.write_str("tracestate is malformed"),
+            Self::TracestateTooLong { actual, limit } => {
+                write!(f, "tracestate is {actual} bytes; maximum is {limit} bytes")
+            }
+            Self::TracestateTooManyMembers { actual, limit } => {
+                write!(f, "tracestate has {actual} members; maximum is {limit}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TraceContextError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryAttribute {
+    key: String,
+    value: String,
+}
+
+impl TelemetryAttribute {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetrySpan {
+    schema_version: &'static str,
+    name: String,
+    trace_id: String,
+    span_id: String,
+    parent_span_id: Option<String>,
+    attributes: Vec<TelemetryAttribute>,
+    events: Vec<String>,
+}
+
+impl TelemetrySpan {
+    pub fn new(
+        name: impl Into<String>,
+        context: &TraceContext,
+        parent_span_id: Option<&str>,
+    ) -> Self {
+        Self {
+            schema_version: TELEMETRY_SCHEMA_VERSION,
+            name: name.into(),
+            trace_id: context.trace_id().to_owned(),
+            span_id: context.span_id().to_owned(),
+            parent_span_id: parent_span_id.map(ToOwned::to_owned),
+            attributes: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes.push(TelemetryAttribute::new(key, value));
+        self
+    }
+
+    pub fn with_event(mut self, event: impl Into<String>) -> Self {
+        self.events.push(event.into());
+        self
+    }
+
+    pub const fn schema_version(&self) -> &'static str {
+        self.schema_version
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    pub fn span_id(&self) -> &str {
+        &self.span_id
+    }
+
+    pub fn parent_span_id(&self) -> Option<&str> {
+        self.parent_span_id.as_deref()
+    }
+
+    pub fn attributes(&self) -> &[TelemetryAttribute] {
+        &self.attributes
+    }
+
+    pub fn events(&self) -> &[String] {
+        &self.events
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryLabel {
+    key: String,
+    value: String,
+}
+
+impl TelemetryLabel {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryMetric {
+    schema_version: &'static str,
+    name: String,
+    value: u64,
+    labels: Vec<TelemetryLabel>,
+}
+
+impl TelemetryMetric {
+    pub fn new(name: impl Into<String>, value: u64, labels: Vec<TelemetryLabel>) -> Self {
+        Self {
+            schema_version: TELEMETRY_SCHEMA_VERSION,
+            name: name.into(),
+            value,
+            labels,
+        }
+    }
+
+    pub const fn schema_version(&self) -> &'static str {
+        self.schema_version
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn value(&self) -> u64 {
+        self.value
+    }
+
+    pub fn labels(&self) -> &[TelemetryLabel] {
+        &self.labels
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryExporterFailure {
+    Unreachable,
+    Slow,
+    Error,
+}
+
+impl TelemetryExporterFailure {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Unreachable => "OTEL_EXPORTER_UNREACHABLE",
+            Self::Slow => "OTEL_EXPORTER_SLOW",
+            Self::Error => "OTEL_EXPORTER_ERROR",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryDiagnostic {
+    schema_version: &'static str,
+    code: String,
+    message: String,
+}
+
+impl TelemetryDiagnostic {
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            schema_version: TELEMETRY_SCHEMA_VERSION,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub const fn schema_version(&self) -> &'static str {
+        self.schema_version
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Debug, Default)]
+struct LocalTelemetryState {
+    spans: Vec<TelemetrySpan>,
+    metrics: Vec<TelemetryMetric>,
+    diagnostics: Vec<TelemetryDiagnostic>,
+    label_values: HashMap<String, HashSet<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LocalTelemetry {
+    inner: Arc<Mutex<LocalTelemetryState>>,
+}
+
+impl LocalTelemetry {
+    pub fn record_span(&self, span: TelemetrySpan) {
+        if span.name().starts_with("zornmesh.") {
+            self.inner
+                .lock()
+                .expect("local telemetry mutex not poisoned")
+                .spans
+                .push(span);
+        }
+    }
+
+    pub fn record_metric(&self, mut metric: TelemetryMetric) {
+        if !metric.name().starts_with("zornmesh.") {
+            return;
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("local telemetry mutex not poisoned");
+        let mut sanitized = Vec::with_capacity(metric.labels.len());
+        for mut label in metric.labels.drain(..) {
+            if is_forbidden_metric_label(&label.key) {
+                continue;
+            }
+            let values = inner.label_values.entry(label.key.clone()).or_default();
+            if values.contains(&label.value) || values.len() < TELEMETRY_CARDINALITY_LIMIT {
+                values.insert(label.value.clone());
+            } else {
+                label.value = TELEMETRY_OVERFLOW_LABEL.to_owned();
+            }
+            sanitized.push(label);
+        }
+        metric.labels = sanitized;
+        inner.metrics.push(metric);
+    }
+
+    pub fn record_exporter_failure(
+        &self,
+        failure: TelemetryExporterFailure,
+        message: impl Into<String>,
+    ) {
+        self.inner
+            .lock()
+            .expect("local telemetry mutex not poisoned")
+            .diagnostics
+            .push(TelemetryDiagnostic::new(failure.code(), message));
+    }
+
+    pub fn spans(&self) -> Vec<TelemetrySpan> {
+        self.inner
+            .lock()
+            .expect("local telemetry mutex not poisoned")
+            .spans
+            .clone()
+    }
+
+    pub fn metrics(&self) -> Vec<TelemetryMetric> {
+        self.inner
+            .lock()
+            .expect("local telemetry mutex not poisoned")
+            .metrics
+            .clone()
+    }
+
+    pub fn diagnostics(&self) -> Vec<TelemetryDiagnostic> {
+        self.inner
+            .lock()
+            .expect("local telemetry mutex not poisoned")
+            .diagnostics
+            .clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvelopeError {
     EmptySourceAgent,
     EmptySubject,
     InvalidSubject(SubjectValidationError),
+    InvalidTraceContext(TraceContextError),
     EmptyCorrelationId,
     EmptyPayloadContentType,
     PayloadTooLarge { actual: usize, limit: usize },
@@ -696,6 +1175,7 @@ impl EnvelopeError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::InvalidSubject(_) | Self::EmptySubject => "E_SUBJECT_VALIDATION",
+            Self::InvalidTraceContext(_) => "E_TRACE_CONTEXT_VALIDATION",
             Self::PayloadTooLarge { .. } => "E_PAYLOAD_LIMIT",
             _ => "E_ENVELOPE_VALIDATION",
         }
@@ -708,6 +1188,9 @@ impl fmt::Display for EnvelopeError {
             Self::EmptySourceAgent => f.write_str("envelope source agent must not be empty"),
             Self::EmptySubject => f.write_str("envelope subject must not be empty"),
             Self::InvalidSubject(error) => write!(f, "invalid envelope subject: {error}"),
+            Self::InvalidTraceContext(error) => {
+                write!(f, "invalid envelope trace context: {error}")
+            }
             Self::EmptyCorrelationId => f.write_str("envelope correlation ID must not be empty"),
             Self::EmptyPayloadContentType => {
                 f.write_str("envelope payload content type must not be empty")
@@ -726,6 +1209,7 @@ impl std::error::Error for EnvelopeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidSubject(error) => Some(error),
+            Self::InvalidTraceContext(error) => Some(error),
             _ => None,
         }
     }
@@ -737,6 +1221,74 @@ fn current_unix_ms() -> u64 {
         .unwrap_or_default()
         .as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn generated_hex_id(width: usize) -> String {
+    let sequence = NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed).max(1);
+    match width {
+        16 => format!("{sequence:016x}"),
+        32 => format!("{:016x}{sequence:016x}", current_unix_ms()),
+        _ => unreachable!("trace identifiers are 16 or 32 lowercase hex chars"),
+    }
+}
+
+fn validate_lower_hex(
+    field: &'static str,
+    value: &str,
+    expected_len: usize,
+) -> Result<(), TraceContextError> {
+    if value.len() != expected_len
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(TraceContextError::InvalidHexField { field });
+    }
+    Ok(())
+}
+
+fn normalize_tracestate(raw: Option<&str>) -> Result<Option<String>, TraceContextError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if raw.len() > MAX_TRACESTATE_BYTES {
+        return Err(TraceContextError::TracestateTooLong {
+            actual: raw.len(),
+            limit: MAX_TRACESTATE_BYTES,
+        });
+    }
+    if raw.chars().any(char::is_control) {
+        return Err(TraceContextError::MalformedTracestate);
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mut members = Vec::new();
+    for part in trimmed.split(',') {
+        let member = part.trim();
+        let (key, value) = member
+            .split_once('=')
+            .ok_or(TraceContextError::MalformedTracestate)?;
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() || key.contains(' ') {
+            return Err(TraceContextError::MalformedTracestate);
+        }
+        members.push(format!("{key}={value}"));
+    }
+    if members.len() > MAX_TRACESTATE_MEMBERS {
+        return Err(TraceContextError::TracestateTooManyMembers {
+            actual: members.len(),
+            limit: MAX_TRACESTATE_MEMBERS,
+        });
+    }
+    Ok(Some(members.join(",")))
+}
+
+fn is_forbidden_metric_label(key: &str) -> bool {
+    matches!(
+        key,
+        "correlation_id" | "trace_id" | "message_id" | "subject" | "payload" | "payload_fragment"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1056,10 +1608,7 @@ impl CapabilityDescriptor {
         &self.secret_fields
     }
 
-    pub fn safe_summary_pairs(
-        &self,
-        values: &[(&str, &str)],
-    ) -> Vec<(String, String)> {
+    pub fn safe_summary_pairs(&self, values: &[(&str, &str)]) -> Vec<(String, String)> {
         values
             .iter()
             .map(|(k, v)| {

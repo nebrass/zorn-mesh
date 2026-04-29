@@ -84,10 +84,7 @@ fn disconnect_one_session_keeps_agent_connected_when_another_session_remains() {
         broker.agent_presence_state(agent.canonical_stable_id()),
         AgentPresenceState::Connected
     );
-    assert_eq!(
-        broker.active_sessions(agent.canonical_stable_id()).len(),
-        1
-    );
+    assert_eq!(broker.active_sessions(agent.canonical_stable_id()).len(), 1);
     // Routing now selects the remaining session.
     let routing = broker
         .routing_session(agent.canonical_stable_id())
@@ -109,13 +106,12 @@ fn disconnecting_last_session_marks_agent_disconnected() {
         broker.agent_presence_state(agent.canonical_stable_id()),
         AgentPresenceState::Disconnected
     );
-    assert_eq!(
-        broker.active_sessions(agent.canonical_stable_id()).len(),
-        0
+    assert_eq!(broker.active_sessions(agent.canonical_stable_id()).len(), 0);
+    assert!(
+        broker
+            .routing_session(agent.canonical_stable_id())
+            .is_none()
     );
-    assert!(broker
-        .routing_session(agent.canonical_stable_id())
-        .is_none());
 }
 
 #[test]
@@ -125,10 +121,7 @@ fn disconnect_for_unknown_session_is_idempotent_no_op() {
     accept(&broker, agent.canonical_stable_id(), 1001);
 
     broker.record_session_disconnect(agent.canonical_stable_id(), "missing-session");
-    assert_eq!(
-        broker.active_sessions(agent.canonical_stable_id()).len(),
-        1
-    );
+    assert_eq!(broker.active_sessions(agent.canonical_stable_id()).len(), 1);
 }
 
 #[test]

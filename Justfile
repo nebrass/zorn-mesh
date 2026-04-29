@@ -17,3 +17,10 @@ docs: (_tool "cargo")
 
 conformance: (_tool "cargo")
     cargo xtask conformance
+
+release: (_tool "cargo")
+    cargo build --release -p zornmesh
+    @echo "Release binary at: target/release/zornmesh"
+
+docker: (_tool "docker")
+    docker build -t zornmesh:dev .

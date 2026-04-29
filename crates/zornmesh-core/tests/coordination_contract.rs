@@ -1,7 +1,8 @@
 use zornmesh_core::{
     COORDINATION_CONTRACT_VERSION, CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage,
     DELIVERY_STATE_TAXONOMY_VERSION, ENVELOPE_SCHEMA_VERSION, ERROR_CONTRACT_VERSION,
-    ErrorCategory, NackReasonCategory, ProductError,
+    ErrorCategory, NackReasonCategory, ProductError, TELEMETRY_OVERFLOW_LABEL,
+    TELEMETRY_SCHEMA_VERSION,
 };
 
 #[test]
@@ -13,13 +14,27 @@ fn fixture_pins_coordination_versions_and_taxonomy() {
         "version|envelope-schema|zornmesh.envelope.v1",
         "version|error-contract|zornmesh.error.v1",
         "version|delivery-state-taxonomy|zornmesh.delivery-state.v1",
+        "version|telemetry-schema|zornmesh.telemetry.v1",
+        "trace_context|rule|generate_missing",
+        "trace_context|rule|reject_malformed",
+        "telemetry|span|zornmesh.publish.route",
+        "telemetry|span|zornmesh.lease.nack",
+        "telemetry|metric|zornmesh.delivery.attempts",
+        "telemetry|label_forbidden|correlation_id",
+        "telemetry|label_forbidden|subject",
+        "telemetry|exporter_failure|OTEL_EXPORTER_SLOW",
     ] {
         assert!(fixture.contains(expected), "missing fixture row {expected}");
     }
     assert_eq!(COORDINATION_CONTRACT_VERSION, "zornmesh.coordination.v1");
     assert_eq!(ENVELOPE_SCHEMA_VERSION, "zornmesh.envelope.v1");
     assert_eq!(ERROR_CONTRACT_VERSION, "zornmesh.error.v1");
-    assert_eq!(DELIVERY_STATE_TAXONOMY_VERSION, "zornmesh.delivery-state.v1");
+    assert_eq!(
+        DELIVERY_STATE_TAXONOMY_VERSION,
+        "zornmesh.delivery-state.v1"
+    );
+    assert_eq!(TELEMETRY_SCHEMA_VERSION, "zornmesh.telemetry.v1");
+    assert_eq!(TELEMETRY_OVERFLOW_LABEL, "__overflow__");
 
     for (kind, stage, retryable, terminal) in [
         (
@@ -79,15 +94,8 @@ fn fixture_pins_coordination_versions_and_taxonomy() {
             terminal
         );
         assert!(fixture.contains(&row), "missing fixture row {row}");
-        let outcome = CoordinationOutcome::new(
-            kind,
-            stage,
-            "TEST",
-            "test outcome",
-            retryable,
-            terminal,
-            0,
-        );
+        let outcome =
+            CoordinationOutcome::new(kind, stage, "TEST", "test outcome", retryable, terminal, 0);
         assert_eq!(outcome.version(), COORDINATION_CONTRACT_VERSION);
         assert_eq!(outcome.kind(), kind);
         assert_eq!(outcome.stage(), stage);

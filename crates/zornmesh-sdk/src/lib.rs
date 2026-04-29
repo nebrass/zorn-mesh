@@ -217,7 +217,7 @@ impl Mesh {
                 if let Err(error) = write_client_frame(
                     &mut stream,
                     &ClientFrame::Publish {
-                        envelope: envelope.clone(),
+                        envelope: Box::new(envelope.clone()),
                     },
                 ) {
                     return SendResult::from_proto_error(error);
@@ -504,7 +504,9 @@ impl Subscription {
                 envelope,
                 attempt,
             })),
-            Ok(ServerFrame::DeliveryOutcome(result)) => Err(SdkError::from_delivery_outcome(result)),
+            Ok(ServerFrame::DeliveryOutcome(result)) => {
+                Err(SdkError::from_delivery_outcome(result))
+            }
             Ok(ServerFrame::SendResult(result)) => Err(SdkError::from_send_result(result)),
             Err(error)
                 if matches!(
@@ -615,6 +617,9 @@ impl From<DaemonError> for SdkError {
             zornmesh_daemon::DaemonErrorCode::ElevatedPrivilege => SdkErrorCode::ElevatedPrivilege,
             zornmesh_daemon::DaemonErrorCode::DaemonUnreachable
             | zornmesh_daemon::DaemonErrorCode::ExistingOwner => SdkErrorCode::DaemonUnreachable,
+            zornmesh_daemon::DaemonErrorCode::PersistenceUnavailable => {
+                SdkErrorCode::PersistenceUnavailable
+            }
             zornmesh_daemon::DaemonErrorCode::InvalidConfig => SdkErrorCode::InvalidConfig,
             zornmesh_daemon::DaemonErrorCode::Io => SdkErrorCode::Io,
         };

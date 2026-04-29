@@ -1,8 +1,6 @@
 use std::time::{Duration, SystemTime};
 
-use zornmesh_broker::{
-    Broker, FetchRequest, LeaseAckOutcome, LeaseErrorCode, LeaseRenewOutcome,
-};
+use zornmesh_broker::{Broker, FetchRequest, LeaseAckOutcome, LeaseErrorCode, LeaseRenewOutcome};
 use zornmesh_core::{CoordinationOutcomeKind, CoordinationStage, Envelope, NackReasonCategory};
 
 fn at(secs: u64) -> SystemTime {
@@ -230,12 +228,7 @@ fn renew_extends_lease_without_duplicating_delivery() {
     assert_eq!(broker.active_lease_count(), 1, "no duplication on renew");
 
     // renew on unknown lease fails
-    let bad = broker.renew_lease(
-        "missing",
-        "consumer.A",
-        Duration::from_secs(5),
-        at(16),
-    );
+    let bad = broker.renew_lease("missing", "consumer.A", Duration::from_secs(5), at(16));
     assert!(matches!(
         bad.as_ref().unwrap_err().code(),
         LeaseErrorCode::LeaseUnknown
@@ -292,7 +285,10 @@ fn fixture_pins_lease_error_codes_and_audit_kinds() {
         assert!(fixture.contains(row), "missing fixture row {row}");
     }
 
-    assert_eq!(LeaseErrorCode::FetchValidation.as_str(), "E_FETCH_VALIDATION");
+    assert_eq!(
+        LeaseErrorCode::FetchValidation.as_str(),
+        "E_FETCH_VALIDATION"
+    );
     assert_eq!(LeaseErrorCode::LeaseUnknown.as_str(), "E_LEASE_UNKNOWN");
     assert_eq!(LeaseErrorCode::LeaseNotOwned.as_str(), "E_LEASE_NOT_OWNED");
     assert_eq!(LeaseErrorCode::LeaseExpired.as_str(), "E_LEASE_EXPIRED");
@@ -301,4 +297,3 @@ fn fixture_pins_lease_error_codes_and_audit_kinds() {
         "E_LEASE_ALREADY_TERMINAL"
     );
 }
-

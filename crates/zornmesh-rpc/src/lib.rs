@@ -22,6 +22,7 @@ pub mod local {
             net::UnixStream,
         },
         path::{Path, PathBuf},
+        process::Command,
     };
 
     pub const ENV_SOCKET_PATH: &str = "ZORN_SOCKET_PATH";
@@ -83,12 +84,18 @@ pub mod local {
     impl std::error::Error for LocalError {}
 
     pub fn effective_uid() -> Result<u32, LocalError> {
-        let status = fs::read_to_string("/proc/self/status").map_err(|error| {
-            LocalError::new(
-                LocalErrorCode::Io,
-                format!("failed to inspect process credentials: {error}"),
-            )
-        })?;
+        let status = match fs::read_to_string("/proc/self/status") {
+            Ok(status) => status,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return effective_uid_from_id();
+            }
+            Err(error) => {
+                return Err(LocalError::new(
+                    LocalErrorCode::Io,
+                    format!("failed to inspect process credentials: {error}"),
+                ));
+            }
+        };
 
         for line in status.lines() {
             if let Some(rest) = line.strip_prefix("Uid:") {
@@ -115,6 +122,33 @@ pub mod local {
         ))
     }
 
+    fn effective_uid_from_id() -> Result<u32, LocalError> {
+        let output = Command::new("id").arg("-u").output().map_err(|error| {
+            LocalError::new(
+                LocalErrorCode::Io,
+                format!("failed to inspect process credentials with id -u: {error}"),
+            )
+        })?;
+        if !output.status.success() {
+            return Err(LocalError::new(
+                LocalErrorCode::Io,
+                "failed to inspect process credentials with id -u",
+            ));
+        }
+        let raw = String::from_utf8(output.stdout).map_err(|error| {
+            LocalError::new(
+                LocalErrorCode::Io,
+                format!("failed to decode process credentials from id -u: {error}"),
+            )
+        })?;
+        raw.trim().parse::<u32>().map_err(|error| {
+            LocalError::new(
+                LocalErrorCode::Io,
+                format!("failed to parse effective process credentials: {error}"),
+            )
+        })
+    }
+
     pub fn resolve_socket_path_from_env() -> Result<PathBuf, LocalError> {
         if let Some(path) = env::var_os(ENV_SOCKET_PATH) {
             let path = PathBuf::from(path);
@@ -137,6 +171,15 @@ pub mod local {
                 .join("zorn.sock"));
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            let base = env::var_os("TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"));
+            Ok(base.join("zorn-mesh.sock"))
+        }
+
+        #[cfg(not(target_os = "macos"))]
         Ok(PathBuf::from("/run/user")
             .join(effective_uid()?.to_string())
             .join("zorn-mesh")

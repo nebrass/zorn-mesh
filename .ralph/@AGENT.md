@@ -36,6 +36,9 @@ cargo xtask conformance
 cargo run -p zornmesh-cli -- --help
 cargo run -p zornmesh-cli -- daemon --help
 cd sdks/typescript && bun test
+cd apps/local-ui && bun test
+cd apps/local-ui && bun run test:quality
+cd apps/local-ui && bun run quality-evidence
 ```
 
 ## Key Learnings
@@ -48,6 +51,16 @@ cd sdks/typescript && bun test
 - Story 1.5 adds Bun TypeScript SDK parity: `connect()`, `publish()`, and `subscribe()` use the same local UDS frame contract, connect taxonomy, and first-message expectations as the Rust SDK.
 - Story 1.6 stabilizes CLI read contracts: read commands keep success on stdout, failures on stderr with product error codes, JSON under `zornmesh.cli.read.v1`, and streaming events as NDJSON under `zornmesh.cli.event.v1`.
 - Story 1.7 adds first-day operator basics: `zornmesh doctor` reports required diagnostic evidence with stable degraded/unavailable statuses, `daemon shutdown --non-interactive` reports documented outcomes, and `completion <bash|zsh|fish>` emits shell completions.
+- Story 3.7 adds `zornmesh stdio --as-agent <id>` for MCP-compatible hosts, with initialize sequencing, AgentCard registration, policy-aware tool mapping, redaction, and deterministic host-close cleanup.
+- Story 3.8 adds baseline MCP graceful degradation: `tools/list` exposes only unary JSON-compatible mesh invocation, while streaming, delivery ACK, and required trace-context semantics return structured `unsupported_capability` results with redacted params and remediation.
+- Story 4.1 adds the first evidence persistence boundary: accepted envelopes, audit hash links, trace/correlation indexes, recovery replay, corrupt/future-schema diagnostics, and daemon durable ACK-after-commit wiring.
+- Story 4.2 adds W3C tracecontext propagation and local `zornmesh.telemetry.v1` spans/metrics with cardinality-safe labels and bounded exporter diagnostics.
+- Story 4.3 adds durable dead-letter records to the evidence log with structured failure categories, redacted safe details, retry/timing metadata, filtered queries, replay recovery, and no-recipient daemon DLQ persistence before publish ACK.
+- Story 4.4 adds `zornmesh inspect <messages|dead-letters|audit|metadata>` with `--evidence`/`ZORN_EVIDENCE_PATH`, structured filters, redacted human/JSON output, and cursor pagination.
+- Story 4.5 adds `zornmesh trace <correlation_id>` with evidence-log reconstruction, explicit exceptional states and gaps, and optional `--span-tree` causality output.
+- Story 4.6 expands `zornmesh trace --span-tree` with deterministic parent/child ordering, stream chunk sequencing/state, stable branch labels, duplicate-edge detection, and partial invalid-edge diagnostics.
+- Story 6.8 adds the UI context recovery contract: reconnect/backfill preserves selection/filter/view state, emits disabled-action copy, marks partial windows and evidence gaps, and keeps events ordered by daemon sequence.
+- Story 6.9 adds the UI quality-readiness gate: `apps/local-ui/src/quality-gates.ts` emits stable accessibility, responsive, browser, offline-asset, and critical-journey evidence validated by Bun tests and `cargo xtask test`.
 
 ## Feature Development Quality Standards
 

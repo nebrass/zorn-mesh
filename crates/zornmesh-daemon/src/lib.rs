@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -18,13 +18,19 @@ use std::{
 };
 
 use zornmesh_broker::{Broker, BrokerError, BrokerErrorCode};
-use zornmesh_core::{CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome};
+use zornmesh_core::{
+    CoordinationOutcome, CoordinationOutcomeKind, CoordinationStage, DeliveryOutcome, Envelope,
+};
 use zornmesh_proto::{
     ClientFrame, DeliveryOutcomeFrame, FrameStatus, ProtoError, SendResultFrame, ServerFrame,
     read_client_frame, write_server_frame,
 };
 use zornmesh_rpc::local::{
     self, ENV_SHUTDOWN_BUDGET_MS, LocalError, LocalErrorCode, connect_trusted_socket,
+};
+use zornmesh_store::{
+    DeadLetterFailureCategory, EvidenceDeadLetterInput, EvidenceEnvelopeInput, EvidenceStore,
+    EvidenceStoreError, FileEvidenceStore,
 };
 
 pub const CRATE_BOUNDARY: &str = "zornmesh-daemon";
@@ -74,6 +80,7 @@ pub enum DaemonErrorCode {
     LocalTrustUnsafe,
     ElevatedPrivilege,
     DaemonUnreachable,
+    PersistenceUnavailable,
     InvalidConfig,
     Io,
 }
@@ -85,6 +92,7 @@ impl DaemonErrorCode {
             Self::LocalTrustUnsafe => "E_LOCAL_TRUST_UNSAFE",
             Self::ElevatedPrivilege => "E_ELEVATED_PRIVILEGE",
             Self::DaemonUnreachable => "E_DAEMON_UNREACHABLE",
+            Self::PersistenceUnavailable => "E_PERSISTENCE_UNAVAILABLE",
             Self::InvalidConfig => "E_INVALID_CONFIG",
             Self::Io => "E_DAEMON_IO",
         }
@@ -125,6 +133,13 @@ impl DaemonError {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    fn persistence_unavailable(error: EvidenceStoreError) -> Self {
+        Self::new(
+            DaemonErrorCode::PersistenceUnavailable,
+            format!("evidence store is unavailable: {error}"),
+        )
+    }
 }
 
 impl From<LocalError> for DaemonError {
@@ -147,6 +162,7 @@ pub struct DaemonConfig {
     shutdown_budget: Duration,
     allow_elevated_for_tests: bool,
     effective_uid_for_tests: Option<u32>,
+    evidence_store_path: Option<PathBuf>,
 }
 
 impl DaemonConfig {
@@ -167,6 +183,7 @@ impl DaemonConfig {
             shutdown_budget,
             allow_elevated_for_tests: false,
             effective_uid_for_tests: None,
+            evidence_store_path: None,
         })
     }
 
@@ -176,6 +193,7 @@ impl DaemonConfig {
             shutdown_budget: DEFAULT_SHUTDOWN_BUDGET,
             allow_elevated_for_tests: false,
             effective_uid_for_tests: None,
+            evidence_store_path: None,
         }
     }
 
@@ -200,6 +218,11 @@ impl DaemonConfig {
 
     pub fn with_effective_uid_for_tests(mut self, uid: u32) -> Self {
         self.effective_uid_for_tests = Some(uid);
+        self
+    }
+
+    pub fn with_evidence_store_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.evidence_store_path = Some(path.into());
         self
     }
 
@@ -228,6 +251,7 @@ pub struct DaemonRuntime {
     _lock_file: File,
     listener: Option<UnixListener>,
     broker: Broker,
+    evidence_store: Option<FileEvidenceStore>,
     state: DaemonState,
     readiness_line: String,
     shutdown_budget: Duration,
@@ -243,6 +267,12 @@ impl DaemonRuntime {
             ));
         }
 
+        let evidence_store = config
+            .evidence_store_path
+            .as_ref()
+            .map(FileEvidenceStore::open_evidence)
+            .transpose()
+            .map_err(DaemonError::persistence_unavailable)?;
         local::ensure_private_parent(&config.socket_path, uid)?;
         prepare_existing_socket(&config.socket_path, uid)?;
         let lock_path = lock_path_for(&config.socket_path);
@@ -278,6 +308,7 @@ impl DaemonRuntime {
             _lock_file: lock_file,
             listener: Some(listener),
             broker: Broker::new(),
+            evidence_store,
             state: DaemonState::Ready,
             shutdown_budget: config.shutdown_budget,
         })
@@ -302,7 +333,8 @@ impl DaemonRuntime {
         match listener.accept() {
             Ok((stream, _addr)) => {
                 let broker = self.broker.clone();
-                thread::spawn(move || handle_client(stream, broker));
+                let evidence_store = self.evidence_store.clone();
+                thread::spawn(move || handle_client(stream, broker, evidence_store));
                 Ok(true)
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
@@ -383,10 +415,16 @@ pub fn run_foreground(config: DaemonConfig) -> Result<ShutdownReport, DaemonErro
     Ok(report)
 }
 
-fn handle_client(mut stream: UnixStream, broker: Broker) {
+fn handle_client(
+    mut stream: UnixStream,
+    broker: Broker,
+    evidence_store: Option<FileEvidenceStore>,
+) {
     match read_client_frame(&mut stream) {
         Ok(ClientFrame::Subscribe { pattern }) => handle_subscribe(stream, broker, pattern),
-        Ok(ClientFrame::Publish { envelope }) => handle_publish(&mut stream, broker, envelope),
+        Ok(ClientFrame::Publish { envelope }) => {
+            handle_publish(&mut stream, broker, evidence_store.as_ref(), *envelope);
+        }
         Ok(ClientFrame::Ack { .. } | ClientFrame::Nack { .. }) => {
             let _ = write_result(
                 &mut stream,
@@ -446,9 +484,50 @@ fn handle_subscribe(mut stream: UnixStream, broker: Broker, pattern: String) {
     }
 }
 
-fn handle_publish(stream: &mut UnixStream, broker: Broker, envelope: zornmesh_core::Envelope) {
-    match broker.publish(envelope) {
+fn handle_publish(
+    stream: &mut UnixStream,
+    broker: Broker,
+    evidence_store: Option<&FileEvidenceStore>,
+    envelope: Envelope,
+) {
+    let durable_sequence = match evidence_store {
+        Some(store) => match persist_publish_evidence(store, &envelope) {
+            Ok(sequence) => Some(sequence),
+            Err(error) => {
+                let _ = write_result(
+                    stream,
+                    FrameStatus::Rejected,
+                    "E_PERSISTENCE_UNAVAILABLE",
+                    format!("accepted work was not durably committed: {error}"),
+                );
+                return;
+            }
+        },
+        None => None,
+    };
+
+    match broker.publish(envelope.clone()) {
         Ok(receipt) => {
+            if receipt.delivery_attempts() == 0
+                && let Some(store) = evidence_store
+                && let Err(error) = persist_no_recipient_dead_letter(store, &envelope)
+            {
+                let _ = write_result(
+                    stream,
+                    FrameStatus::Rejected,
+                    "E_PERSISTENCE_UNAVAILABLE",
+                    format!("accepted work was not durably dead-lettered: {error}"),
+                );
+                return;
+            }
+            let durable_outcome = durable_sequence
+                .map(|sequence| {
+                    CoordinationOutcome::durable_accepted(
+                        format!("evidence committed at daemon_sequence={sequence}"),
+                        receipt.delivery_attempts(),
+                    )
+                })
+                .unwrap_or_else(|| receipt.durable_outcome().clone());
             let _ = write_send_result(
                 stream,
                 FrameStatus::Accepted,
@@ -458,13 +537,49 @@ fn handle_publish(stream: &mut UnixStream, broker: Broker, envelope: zornmesh_co
                     receipt.delivery_attempts()
                 ),
                 receipt.transport_outcome().clone(),
-                Some(receipt.durable_outcome().clone()),
+                Some(durable_outcome),
             );
         }
         Err(error) => {
             let _ = write_broker_error(stream, &error);
         }
     }
+}
+
+fn persist_publish_evidence(
+    store: &FileEvidenceStore,
+    envelope: &Envelope,
+) -> Result<u64, EvidenceStoreError> {
+    let commit = store.persist_accepted_envelope(EvidenceEnvelopeInput::new(
+        envelope.clone(),
+        envelope.correlation_id(),
+        envelope.trace_id(),
+        "accepted",
+    )?)?;
+    Ok(commit.envelope().daemon_sequence())
+}
+
+fn persist_no_recipient_dead_letter(
+    store: &FileEvidenceStore,
+    envelope: &Envelope,
+) -> Result<(), EvidenceStoreError> {
+    store.persist_dead_letter(
+        EvidenceDeadLetterInput::new(
+            envelope.clone(),
+            envelope.correlation_id(),
+            envelope.trace_id(),
+            "dead_lettered",
+            DeadLetterFailureCategory::NoEligibleRecipient,
+            "no eligible recipient matched subject",
+        )?
+        .with_attempt_count(0)
+        .with_timing(
+            envelope.timestamp_unix_ms(),
+            envelope.timestamp_unix_ms(),
+            envelope.timestamp_unix_ms(),
+        ),
+    )?;
+    Ok(())
 }
 
 fn handle_subscription_control(stream: &mut UnixStream, broker: &Broker) -> bool {
@@ -476,15 +591,13 @@ fn handle_subscription_control(stream: &mut UnixStream, broker: &Broker) -> bool
             delivery_id,
             reason,
         }) => write_delivery_outcome(stream, broker.record_nack(delivery_id, reason)).is_ok(),
-        Ok(ClientFrame::Subscribe { .. } | ClientFrame::Publish { .. }) => {
-            write_result(
-                stream,
-                FrameStatus::ValidationFailed,
-                "E_PROTOCOL",
-                "subscription stream accepts only ACK or NACK control frames after registration",
-            )
-            .is_ok()
-        }
+        Ok(ClientFrame::Subscribe { .. } | ClientFrame::Publish { .. }) => write_result(
+            stream,
+            FrameStatus::ValidationFailed,
+            "E_PROTOCOL",
+            "subscription stream accepts only ACK or NACK control frames after registration",
+        )
+        .is_ok(),
         Err(error) if is_no_subscription_control(&error) => true,
         Err(error) if is_connect_probe_close(&error) => false,
         Err(error) => write_proto_error(stream, &error).is_ok(),

@@ -1,0 +1,1000 @@
+{
+  "schema": "zornmesh.local_ui.quality.v1",
+  "generated_by": "apps/local-ui/src/quality-gates.ts",
+  "critical_journeys": [
+    "roster_inspection",
+    "trace_timeline_navigation",
+    "trace_detail",
+    "focused_trace_reader",
+    "direct_send",
+    "broadcast_confirmation",
+    "outcome_review",
+    "reconnect_backfill",
+    "cli_command_copy"
+  ],
+  "required_tooling": [
+    {
+      "name": "accessibility_fixture_audit",
+      "area": "accessibility",
+      "available": true,
+      "evidence": "automated, keyboard, focus-order, screen-reader, reduced-motion, color-blindness, and no-color-only fixture assertions"
+    },
+    {
+      "name": "browser_fixture_matrix",
+      "area": "browser",
+      "available": true,
+      "evidence": "current stable Chromium, Firefox, and Safari/WebKit-compatible fixture scenarios"
+    },
+    {
+      "name": "responsive_fixture_matrix",
+      "area": "responsive",
+      "available": true,
+      "evidence": "mobile, tablet, desktop, and wide desktop pane fixtures"
+    },
+    {
+      "name": "offline_asset_manifest_check",
+      "area": "offline_asset",
+      "available": true,
+      "evidence": "local bundle contract forbids remote browser assets"
+    }
+  ],
+  "accessibility": [
+    {
+      "journey": "roster_inspection",
+      "component_state": "baseline",
+      "failure_locator": "roster_inspection:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "roster_inspection:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "roster_inspection:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "roster_inspection:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "roster_inspection:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "roster_inspection:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "roster_inspection:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "roster_inspection:baseline:no_color_only"
+        }
+      ]
+    },
+    {
+      "journey": "trace_timeline_navigation",
+      "component_state": "baseline",
+      "failure_locator": "trace_timeline_navigation:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "trace_timeline_navigation:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "trace_timeline_navigation:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "trace_timeline_navigation:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "trace_timeline_navigation:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "trace_timeline_navigation:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "trace_timeline_navigation:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "trace_timeline_navigation:baseline:no_color_only"
+        }
+      ]
+    },
+    {
+      "journey": "trace_detail",
+      "component_state": "baseline",
+      "failure_locator": "trace_detail:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "trace_detail:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "trace_detail:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "trace_detail:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "trace_detail:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "trace_detail:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "trace_detail:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "trace_detail:baseline:no_color_only"
+        }
+      ]
+    },
+    {
+      "journey": "focused_trace_reader",
+      "component_state": "baseline",
+      "failure_locator": "focused_trace_reader:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "focused_trace_reader:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "focused_trace_reader:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "focused_trace_reader:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "focused_trace_reader:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "focused_trace_reader:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "focused_trace_reader:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "focused_trace_reader:baseline:no_color_only"
+        }
+      ]
+    },
+    {
+      "journey": "direct_send",
+      "component_state": "baseline",
+      "failure_locator": "direct_send:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "direct_send:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "direct_send:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "direct_send:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "direct_send:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "direct_send:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "direct_send:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "direct_send:baseline:no_color_only"
+        }
+      ]
+    },
+    {
+      "journey": "broadcast_confirmation",
+      "component_state": "baseline",
+      "failure_locator": "broadcast_confirmation:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "broadcast_confirmation:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "broadcast_confirmation:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "broadcast_confirmation:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "broadcast_confirmation:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "broadcast_confirmation:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "broadcast_confirmation:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "broadcast_confirmation:baseline:no_color_only"
+        }
+      ]
+    },
+    {
+      "journey": "outcome_review",
+      "component_state": "baseline",
+      "failure_locator": "outcome_review:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "outcome_review:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "outcome_review:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "outcome_review:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "outcome_review:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "outcome_review:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "outcome_review:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "outcome_review:baseline:no_color_only"
+        }
+      ]
+    },
+    {
+      "journey": "reconnect_backfill",
+      "component_state": "baseline",
+      "failure_locator": "reconnect_backfill:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "reconnect_backfill:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "reconnect_backfill:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "reconnect_backfill:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "reconnect_backfill:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "reconnect_backfill:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "reconnect_backfill:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "reconnect_backfill:baseline:no_color_only"
+        }
+      ]
+    },
+    {
+      "journey": "cli_command_copy",
+      "component_state": "baseline",
+      "failure_locator": "cli_command_copy:baseline",
+      "checks": [
+        {
+          "kind": "automated",
+          "status": "passed",
+          "evidence": "cli_command_copy:baseline:automated"
+        },
+        {
+          "kind": "keyboard_only",
+          "status": "passed",
+          "evidence": "cli_command_copy:baseline:keyboard_only"
+        },
+        {
+          "kind": "focus_order",
+          "status": "passed",
+          "evidence": "cli_command_copy:baseline:focus_order"
+        },
+        {
+          "kind": "screen_reader_spot",
+          "status": "passed",
+          "evidence": "cli_command_copy:baseline:screen_reader_spot"
+        },
+        {
+          "kind": "reduced_motion",
+          "status": "passed",
+          "evidence": "cli_command_copy:baseline:reduced_motion"
+        },
+        {
+          "kind": "color_blindness",
+          "status": "passed",
+          "evidence": "cli_command_copy:baseline:color_blindness"
+        },
+        {
+          "kind": "no_color_only",
+          "status": "passed",
+          "evidence": "cli_command_copy:baseline:no_color_only"
+        }
+      ]
+    }
+  ],
+  "responsive": [
+    {
+      "breakpoint": "mobile",
+      "width_px": 390,
+      "panes": 1,
+      "layout": "one_pane",
+      "trace_event_order": [
+        1001,
+        1002,
+        1003,
+        1004
+      ],
+      "delivery_state_visible": true,
+      "failure_state_visible": true,
+      "selected_detail_stable": "evt-1003",
+      "hidden_states": []
+    },
+    {
+      "breakpoint": "tablet",
+      "width_px": 834,
+      "panes": 2,
+      "layout": "two_pane",
+      "trace_event_order": [
+        1001,
+        1002,
+        1003,
+        1004
+      ],
+      "delivery_state_visible": true,
+      "failure_state_visible": true,
+      "selected_detail_stable": "evt-1003",
+      "hidden_states": []
+    },
+    {
+      "breakpoint": "desktop",
+      "width_px": 1280,
+      "panes": 3,
+      "layout": "three_pane",
+      "trace_event_order": [
+        1001,
+        1002,
+        1003,
+        1004
+      ],
+      "delivery_state_visible": true,
+      "failure_state_visible": true,
+      "selected_detail_stable": "evt-1003",
+      "hidden_states": []
+    },
+    {
+      "breakpoint": "wide_desktop",
+      "width_px": 1728,
+      "panes": 3,
+      "layout": "three_pane",
+      "trace_event_order": [
+        1001,
+        1002,
+        1003,
+        1004
+      ],
+      "delivery_state_visible": true,
+      "failure_state_visible": true,
+      "selected_detail_stable": "evt-1003",
+      "hidden_states": []
+    }
+  ],
+  "technical_text": [
+    {
+      "field": "agent_id",
+      "sample": "agent.local.dev.01HZY5XRQ8W2P7R0Y63SAFETY-REVIEWER-WITH-A-VERY-LONG-ID",
+      "readable_at": [
+        "mobile",
+        "tablet",
+        "desktop",
+        "wide_desktop"
+      ],
+      "copyable": true,
+      "copy_label": "Copy Agent ID",
+      "accessible_label": "Agent ID",
+      "wrap_strategy": "wrap_anywhere_preserve_label",
+      "breaks_timeline_chronology": false,
+      "hides_controls_or_status": false
+    },
+    {
+      "field": "correlation_id",
+      "sample": "corr_01HZY5XRQ8W2P7R0Y63YJ7Z9DV6K6Z4Y2W1D0MESHLOCAL",
+      "readable_at": [
+        "mobile",
+        "tablet",
+        "desktop",
+        "wide_desktop"
+      ],
+      "copyable": true,
+      "copy_label": "Copy Correlation ID",
+      "accessible_label": "Correlation ID",
+      "wrap_strategy": "wrap_anywhere_preserve_label",
+      "breaks_timeline_chronology": false,
+      "hides_controls_or_status": false
+    },
+    {
+      "field": "subject",
+      "sample": "mesh.local.trace.audit.reconstructed.delivery.failure.dead_lettered",
+      "readable_at": [
+        "mobile",
+        "tablet",
+        "desktop",
+        "wide_desktop"
+      ],
+      "copyable": true,
+      "copy_label": "Copy Subject",
+      "accessible_label": "Subject",
+      "wrap_strategy": "wrap_anywhere_preserve_label",
+      "breaks_timeline_chronology": false,
+      "hides_controls_or_status": false
+    },
+    {
+      "field": "timestamp",
+      "sample": "2026-04-28T08:13:50.652+04:00",
+      "readable_at": [
+        "mobile",
+        "tablet",
+        "desktop",
+        "wide_desktop"
+      ],
+      "copyable": false,
+      "accessible_label": "Daemon timestamp",
+      "wrap_strategy": "wrap_anywhere_preserve_label",
+      "breaks_timeline_chronology": false,
+      "hides_controls_or_status": false
+    },
+    {
+      "field": "payload_summary",
+      "sample": "review_request bytes=16384 redacted_fields=2 truncated=false summary=long technical payload remains readable",
+      "readable_at": [
+        "mobile",
+        "tablet",
+        "desktop",
+        "wide_desktop"
+      ],
+      "copyable": false,
+      "accessible_label": "Payload summary",
+      "wrap_strategy": "wrap_anywhere_preserve_label",
+      "breaks_timeline_chronology": false,
+      "hides_controls_or_status": false
+    },
+    {
+      "field": "cli_command",
+      "sample": "zornmesh trace corr_01HZY5XRQ8W2P7R0Y63YJ7Z9DV6K6Z4Y2W1D0MESHLOCAL --span-tree --evidence ./evidence.sqlite",
+      "readable_at": [
+        "mobile",
+        "tablet",
+        "desktop",
+        "wide_desktop"
+      ],
+      "copyable": true,
+      "copy_label": "Copy CLI handoff command",
+      "accessible_label": "CLI handoff command",
+      "wrap_strategy": "wrap_anywhere_preserve_label",
+      "breaks_timeline_chronology": false,
+      "hides_controls_or_status": false
+    },
+    {
+      "field": "error_message",
+      "sample": "daemon unavailable: reconnect backoff active, last durable sequence=1004, inspect with zornmesh doctor",
+      "readable_at": [
+        "mobile",
+        "tablet",
+        "desktop",
+        "wide_desktop"
+      ],
+      "copyable": true,
+      "copy_label": "Copy Error message",
+      "accessible_label": "Error message",
+      "wrap_strategy": "wrap_anywhere_preserve_label",
+      "breaks_timeline_chronology": false,
+      "hides_controls_or_status": false
+    }
+  ],
+  "browser": [
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "complete_trace",
+      "status": "passed",
+      "evidence": "chromium:complete_trace:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "partial_trace",
+      "status": "passed",
+      "evidence": "chromium:partial_trace:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "missing_trace",
+      "status": "passed",
+      "evidence": "chromium:missing_trace:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "reconstructed_trace",
+      "status": "passed",
+      "evidence": "chromium:reconstructed_trace:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "live_trace",
+      "status": "passed",
+      "evidence": "chromium:live_trace:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "stale_agent",
+      "status": "passed",
+      "evidence": "chromium:stale_agent:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "disconnected_agent",
+      "status": "passed",
+      "evidence": "chromium:disconnected_agent:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "daemon_unavailable",
+      "status": "passed",
+      "evidence": "chromium:daemon_unavailable:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "session_expired",
+      "status": "passed",
+      "evidence": "chromium:session_expired:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "direct_send",
+      "status": "passed",
+      "evidence": "chromium:direct_send:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "broadcast_success",
+      "status": "passed",
+      "evidence": "chromium:broadcast_success:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "broadcast_partial_failure",
+      "status": "passed",
+      "evidence": "chromium:broadcast_partial_failure:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "validation_blocked_send",
+      "status": "passed",
+      "evidence": "chromium:validation_blocked_send:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "late_event_arrival",
+      "status": "passed",
+      "evidence": "chromium:late_event_arrival:fixture-backed"
+    },
+    {
+      "engine": "chromium",
+      "product": "Chromium",
+      "channel": "current_stable",
+      "scenario": "backfill",
+      "status": "passed",
+      "evidence": "chromium:backfill:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "complete_trace",
+      "status": "passed",
+      "evidence": "firefox:complete_trace:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "partial_trace",
+      "status": "passed",
+      "evidence": "firefox:partial_trace:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "missing_trace",
+      "status": "passed",
+      "evidence": "firefox:missing_trace:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "reconstructed_trace",
+      "status": "passed",
+      "evidence": "firefox:reconstructed_trace:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "live_trace",
+      "status": "passed",
+      "evidence": "firefox:live_trace:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "stale_agent",
+      "status": "passed",
+      "evidence": "firefox:stale_agent:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "disconnected_agent",
+      "status": "passed",
+      "evidence": "firefox:disconnected_agent:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "daemon_unavailable",
+      "status": "passed",
+      "evidence": "firefox:daemon_unavailable:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "session_expired",
+      "status": "passed",
+      "evidence": "firefox:session_expired:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "direct_send",
+      "status": "passed",
+      "evidence": "firefox:direct_send:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "broadcast_success",
+      "status": "passed",
+      "evidence": "firefox:broadcast_success:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "broadcast_partial_failure",
+      "status": "passed",
+      "evidence": "firefox:broadcast_partial_failure:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "validation_blocked_send",
+      "status": "passed",
+      "evidence": "firefox:validation_blocked_send:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "late_event_arrival",
+      "status": "passed",
+      "evidence": "firefox:late_event_arrival:fixture-backed"
+    },
+    {
+      "engine": "firefox",
+      "product": "Firefox",
+      "channel": "current_stable",
+      "scenario": "backfill",
+      "status": "passed",
+      "evidence": "firefox:backfill:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "complete_trace",
+      "status": "passed",
+      "evidence": "webkit_safari:complete_trace:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "partial_trace",
+      "status": "passed",
+      "evidence": "webkit_safari:partial_trace:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "missing_trace",
+      "status": "passed",
+      "evidence": "webkit_safari:missing_trace:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "reconstructed_trace",
+      "status": "passed",
+      "evidence": "webkit_safari:reconstructed_trace:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "live_trace",
+      "status": "passed",
+      "evidence": "webkit_safari:live_trace:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "stale_agent",
+      "status": "passed",
+      "evidence": "webkit_safari:stale_agent:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "disconnected_agent",
+      "status": "passed",
+      "evidence": "webkit_safari:disconnected_agent:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "daemon_unavailable",
+      "status": "passed",
+      "evidence": "webkit_safari:daemon_unavailable:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "session_expired",
+      "status": "passed",
+      "evidence": "webkit_safari:session_expired:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "direct_send",
+      "status": "passed",
+      "evidence": "webkit_safari:direct_send:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "broadcast_success",
+      "status": "passed",
+      "evidence": "webkit_safari:broadcast_success:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "broadcast_partial_failure",
+      "status": "passed",
+      "evidence": "webkit_safari:broadcast_partial_failure:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "validation_blocked_send",
+      "status": "passed",
+      "evidence": "webkit_safari:validation_blocked_send:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "late_event_arrival",
+      "status": "passed",
+      "evidence": "webkit_safari:late_event_arrival:fixture-backed"
+    },
+    {
+      "engine": "webkit_safari",
+      "product": "Safari/WebKit-compatible",
+      "channel": "current_stable",
+      "scenario": "backfill",
+      "status": "passed",
+      "evidence": "webkit_safari:backfill:fixture-backed"
+    }
+  ],
+  "browser_outcome_policy": {
+    "allowed_statuses": [
+      "passed",
+      "unsupported_state",
+      "defect"
+    ],
+    "explicit_non_pass_prefixes": [
+      "unsupported:",
+      "defect:"
+    ],
+    "silent_cross_browser_gaps_allowed": false
+  },
+  "results": [
+    {
+      "area": "accessibility",
+      "status": "passed",
+      "evidence": "fixtures/ui/quality-readiness.json#accessibility"
+    },
+    {
+      "area": "responsive",
+      "status": "passed",
+      "evidence": "fixtures/ui/quality-readiness.json#responsive"
+    },
+    {
+      "area": "browser",
+      "status": "passed",
+      "evidence": "fixtures/ui/quality-readiness.json#browser"
+    },
+    {
+      "area": "offline_asset",
+      "status": "passed",
+      "evidence": "apps/local-ui/package.json#zornmesh.no_remote_browser_assets"
+    },
+    {
+      "area": "critical_journey",
+      "status": "passed",
+      "evidence": "fixtures/ui/quality-readiness.json#critical_journeys"
+    }
+  ]
+}

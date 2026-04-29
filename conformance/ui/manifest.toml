@@ -1,0 +1,7 @@
+name = "local-ui"
+scope = "loopback local UI quality evidence and fixture conformance"
+
+[[checks]]
+id = "story-6-9-quality-readiness"
+command = "cd apps/local-ui && bun test src/quality-gates.test.ts"
+evidence = "fixtures/ui/quality-readiness.json"

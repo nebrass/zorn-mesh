@@ -1,9 +1,7 @@
 use std::sync::mpsc;
 
 use zornmesh_broker::Broker;
-use zornmesh_core::{
-    CoordinationOutcomeKind, CoordinationStage, Envelope, NackReasonCategory,
-};
+use zornmesh_core::{CoordinationOutcomeKind, CoordinationStage, Envelope, NackReasonCategory};
 
 #[test]
 fn publish_reports_transport_acceptance_separately_from_durability() {
@@ -12,21 +10,40 @@ fn publish_reports_transport_acceptance_separately_from_durability() {
     let _subscription = broker
         .subscribe("mesh.trace.created", tx)
         .expect("subscription registers");
-    let envelope = Envelope::new("agent.local/publisher", "mesh.trace.created", b"{}".to_vec())
-        .expect("valid envelope");
+    let envelope = Envelope::new(
+        "agent.local/publisher",
+        "mesh.trace.created",
+        b"{}".to_vec(),
+    )
+    .expect("valid envelope");
 
     let receipt = broker.publish(envelope).expect("publish is accepted");
 
     assert_eq!(receipt.delivery_attempts(), 1);
-    assert_eq!(receipt.transport_outcome().kind(), CoordinationOutcomeKind::Accepted);
-    assert_eq!(receipt.transport_outcome().stage(), CoordinationStage::Transport);
+    assert_eq!(
+        receipt.transport_outcome().kind(),
+        CoordinationOutcomeKind::Accepted
+    );
+    assert_eq!(
+        receipt.transport_outcome().stage(),
+        CoordinationStage::Transport
+    );
     assert_eq!(
         receipt.durable_outcome().kind(),
         CoordinationOutcomeKind::Failed
     );
-    assert_eq!(receipt.durable_outcome().stage(), CoordinationStage::Durable);
-    assert_eq!(receipt.durable_outcome().code(), "E_PERSISTENCE_UNAVAILABLE");
-    assert!(rx.try_recv().is_ok(), "transport acceptance still routes delivery");
+    assert_eq!(
+        receipt.durable_outcome().stage(),
+        CoordinationStage::Durable
+    );
+    assert_eq!(
+        receipt.durable_outcome().code(),
+        "E_PERSISTENCE_UNAVAILABLE"
+    );
+    assert!(
+        rx.try_recv().is_ok(),
+        "transport acceptance still routes delivery"
+    );
 }
 
 #[test]

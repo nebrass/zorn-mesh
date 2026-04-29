@@ -1,0 +1,36 @@
+{
+  "name": "@zornmesh/local-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bun-managed React app, locally bundled and offline-served by the daemon UI gateway on loopback only.",
+  "packageManager": "bun@1.1.0",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "build": "bun build src/main.tsx --outdir dist --target browser",
+    "test": "bun test",
+    "test:quality": "bun test src/quality-gates.test.ts",
+    "quality-evidence": "bun run src/quality-gates.ts",
+    "scope-check": "bun run src/scope.ts"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.5.0"
+  },
+  "zornmesh": {
+    "framework_pin": "Bun-managed React app, locally bundled and offline-served by the daemon UI gateway on loopback only",
+    "no_node_served_runtime": true,
+    "no_hosted_serving_model": true,
+    "no_nextjs_server_features": true,
+    "no_remote_browser_assets": true,
+    "supported_package_manager": "bun"
+  }
+}

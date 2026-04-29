@@ -1,26 +1,44 @@
 [package]
-name = "zornmesh-cli"
+name = "zornmesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Local-first agent mesh CLI and Model Context Protocol stdio bridge."
+readme = "../../README.md"
+keywords = ["mcp", "agent", "mesh", "local-first", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+serde_json = "1.0.149"
 zornmesh-broker = { path = "../zornmesh-broker" }
 zornmesh-core = { path = "../zornmesh-core" }
 zornmesh-daemon = { path = "../zornmesh-daemon" }
 zornmesh-rpc = { path = "../zornmesh-rpc" }
 zornmesh-sdk = { path = "../zornmesh-sdk" }
+zornmesh-store = { path = "../zornmesh-store" }
 
 [lib]
+name = "zornmesh_cli"
 path = "src/lib.rs"
 
 [[bin]]
 name = "zornmesh"
 path = "src/main.rs"
 
+# cargo-binstall reads this block to skip compilation and pull the prebuilt
+# binary published by .github/workflows/release.yml. The {name}/{version}/
+# {target} placeholders are substituted by binstall.
+[package.metadata.binstall]
+pkg-url = "{repo}/releases/download/v{version}/zornmesh-{target}.tar.gz"
+bin-dir = "zornmesh-{target}/zornmesh{binary-ext}"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{repo}/releases/download/v{version}/zornmesh-{target}.zip"
+pkg-fmt = "zip"
+
 [lints]
 workspace = true
-
-[dev-dependencies]
-serde_json = "1.0.149"

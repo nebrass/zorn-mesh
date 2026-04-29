@@ -134,7 +134,21 @@ fn publish_delivers_one_attempt_to_matching_subscribers_only() {
         .try_recv()
         .expect("matching subscriber receives");
     assert_eq!(delivery.attempt(), 1);
-    assert_eq!(delivery.envelope(), &envelope);
+    assert_eq!(delivery.envelope().source_agent(), envelope.source_agent());
+    assert_eq!(delivery.envelope().subject(), envelope.subject());
+    assert_eq!(
+        delivery.envelope().correlation_id(),
+        envelope.correlation_id()
+    );
+    assert_eq!(delivery.envelope().payload(), envelope.payload());
+    assert_eq!(
+        delivery.envelope().trace_context().trace_id(),
+        envelope.trace_context().trace_id()
+    );
+    assert_ne!(
+        delivery.envelope().trace_context().span_id(),
+        envelope.trace_context().span_id()
+    );
     assert!(
         nonmatching_rx.try_recv().is_err(),
         "non-matching subscriber receives nothing"

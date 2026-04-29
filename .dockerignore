@@ -1,0 +1,11 @@
+target
+.git
+.github
+.ralph
+_bmad
+_bmad-output
+docs
+Claude.pdf
+GeminiReport.pdf
+Perplexity.pdf
+**/node_modules
