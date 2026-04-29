@@ -20,6 +20,7 @@ Commands:
   redact    Apply append-only redaction proofs while preserving audit integrity
   airmf     Map evidence records to NIST AI RMF functions and categories
   ui        Launch the protected loopback local UI session
+  service   Manage the per-user daemon as a launchd or systemd service
   completion  Generate shell completions
   help     Print command help
 

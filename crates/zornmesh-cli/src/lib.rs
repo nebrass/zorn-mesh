@@ -7,9 +7,10 @@ use std::{
     os::unix::{
         fs::{FileTypeExt, MetadataExt, PermissionsExt},
         net::UnixStream,
+        process::CommandExt,
     },
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
@@ -62,7 +63,7 @@ const BASH_COMPLETION: &str = r#"_zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui service completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
@@ -98,7 +99,7 @@ const ZSH_COMPLETION: &str = r#"#compdef zornmesh
 
 _zornmesh() {
   local -a commands daemon_commands shells formats global_opts
-  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui completion help)
+  commands=(daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui service completion help)
   daemon_commands=(status shutdown help)
   shells=(bash zsh fish)
   formats=(human json ndjson)
@@ -118,7 +119,7 @@ _zornmesh() {
 
 _zornmesh "$@"
 "#;
-const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui completion help"
+const FISH_COMPLETION: &str = r#"complete -c zornmesh -f -a "daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui service completion help"
 complete -c zornmesh -n "__fish_seen_subcommand_from daemon" -f -a "status shutdown help"
 complete -c zornmesh -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
 complete -c zornmesh -l config -d "Read CLI defaults from a key=value config file" -r
@@ -522,6 +523,8 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "airmf" => run_airmf(rest, &invocation),
         [command] if command == "ui" => run_ui(&[], &invocation),
         [command, rest @ ..] if command == "ui" => run_ui(rest, &invocation),
+        [command] if command == "service" => run_service(&[], &invocation),
+        [command, rest @ ..] if command == "service" => run_service(rest, &invocation),
         [command, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh command '{command}'"),
@@ -1899,11 +1902,96 @@ fn stdio_agent_session(agent_id: &str, invocation: &Invocation) -> Result<(), Cl
     run_stdio_loop(stdin.lock(), stdout, &mut bridge).map_err(stdio_io_error)
 }
 
+/// Default budget for the autospawned daemon to publish its readiness line.
+/// Override with `ZORN_AUTOSPAWN_TIMEOUT_MS`.
+const DEFAULT_AUTOSPAWN_TIMEOUT_MS: u64 = 5_000;
+const ENV_AUTOSPAWN_TIMEOUT: &str = "ZORN_AUTOSPAWN_TIMEOUT_MS";
+const ENV_NO_AUTOSPAWN: &str = "ZORN_NO_AUTOSPAWN";
+
 fn connect_stdio_daemon(socket_path: &Path) -> Result<(u32, UnixStream), StdioBridgeError> {
     let uid = zornmesh_rpc::local::effective_uid().map_err(stdio_daemon_error_from_local)?;
-    let stream = zornmesh_rpc::local::connect_trusted_socket(socket_path, uid)
-        .map_err(stdio_daemon_error_from_local)?;
-    Ok((uid, stream))
+
+    match zornmesh_rpc::local::connect_trusted_socket(socket_path, uid) {
+        Ok(stream) => return Ok((uid, stream)),
+        Err(error)
+            if error.code() == zornmesh_rpc::local::LocalErrorCode::DaemonUnreachable =>
+        {
+            if autospawn_disabled() {
+                return Err(stdio_daemon_error_from_local(error));
+            }
+        }
+        Err(error) => return Err(stdio_daemon_error_from_local(error)),
+    }
+
+    spawn_daemon_subprocess(socket_path)?;
+    wait_for_daemon_socket(socket_path, uid, autospawn_timeout())
+}
+
+fn autospawn_disabled() -> bool {
+    std::env::var(ENV_NO_AUTOSPAWN)
+        .map(|value| {
+            matches!(
+                value.trim(),
+                "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "Yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn autospawn_timeout() -> Duration {
+    let millis = std::env::var(ENV_AUTOSPAWN_TIMEOUT)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_AUTOSPAWN_TIMEOUT_MS);
+    Duration::from_millis(millis)
+}
+
+fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), StdioBridgeError> {
+    let exe = std::env::current_exe().map_err(|error| {
+        StdioBridgeError::new(
+            StdioBridgeErrorCode::DaemonUnavailable,
+            format!("cannot resolve zornmesh executable for autospawn: {error}"),
+        )
+    })?;
+
+    // process_group(0) detaches the daemon from the bridge's process group so
+    // the daemon survives when the MCP host terminates the stdio process.
+    let mut command = Command::new(exe);
+    command
+        .arg("daemon")
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+
+    command.spawn().map(|_child| ()).map_err(|error| {
+        StdioBridgeError::new(
+            StdioBridgeErrorCode::DaemonUnavailable,
+            format!("autospawn failed to launch zornmesh daemon: {error}"),
+        )
+    })
+}
+
+fn wait_for_daemon_socket(
+    socket_path: &Path,
+    uid: u32,
+    timeout: Duration,
+) -> Result<(u32, UnixStream), StdioBridgeError> {
+    let deadline = Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(50);
+    loop {
+        match zornmesh_rpc::local::connect_trusted_socket(socket_path, uid) {
+            Ok(stream) => return Ok((uid, stream)),
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(stdio_daemon_readiness_timeout(error, timeout));
+                }
+            }
+        }
+        thread::sleep(poll_interval);
+    }
 }
 
 fn stdio_daemon_error_from_local(error: zornmesh_rpc::local::LocalError) -> StdioBridgeError {
@@ -1913,12 +2001,283 @@ fn stdio_daemon_error_from_local(error: zornmesh_rpc::local::LocalError) -> Stdi
     )
 }
 
+fn stdio_daemon_readiness_timeout(
+    error: zornmesh_rpc::local::LocalError,
+    timeout: Duration,
+) -> StdioBridgeError {
+    StdioBridgeError::new(
+        StdioBridgeErrorCode::DaemonUnavailable,
+        format!(
+            "autospawned daemon did not become ready within {}ms ({}); set ZORN_NO_AUTOSPAWN=1 and start `zornmesh daemon` manually, or run `zornmesh service install`",
+            timeout.as_millis(),
+            error.code().as_str()
+        ),
+    )
+}
+
 fn stdio_io_error(error: io::Error) -> CliError {
     CliError::new(
         "E_DAEMON_IO",
         format!("stdio bridge I/O failed: {error}"),
         ExitKind::Io,
     )
+}
+
+pub const SERVICE_HELP: &str = "zornmesh service\nManage the per-user zornmesh daemon as a supervised background service.\n\nUsage: zornmesh service <install|uninstall|status>\n\nSubcommands:\n      install     Write the launchd plist (macOS) or systemd user unit (Linux)\n      uninstall   Remove the previously installed unit file\n      status      Report install state and daemon reachability\n  -h, --help     Print help\n\nThe install subcommand writes only the unit file. It prints the exact\nactivation command (launchctl bootstrap or systemctl --user enable) so\noperators can audit the change before it takes effect. Running as root\nis refused; the unit is per-user and points at the current binary.\n";
+
+const SERVICE_LABEL: &str = "dev.zornmesh.daemon";
+
+fn run_service(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    match args {
+        [] => print_service_help(invocation.output),
+        [flag] if is_help(flag) => print_service_help(invocation.output),
+        [sub] if sub == "install" => service_install(invocation),
+        [sub] if sub == "uninstall" => service_uninstall(invocation),
+        [sub] if sub == "status" => service_status(invocation),
+        [sub, ..] => Err(CliError::new(
+            "E_UNSUPPORTED_COMMAND",
+            format!("unsupported zornmesh service subcommand '{sub}'"),
+            ExitKind::UserError,
+        )),
+    }
+}
+
+fn print_service_help(output: OutputFormat) -> Result<(), CliError> {
+    print_help("service help", SERVICE_HELP, output)
+}
+
+fn service_refuse_root() -> Result<(), CliError> {
+    if zornmesh_rpc::local::effective_uid()
+        .map(|uid| uid == 0)
+        .unwrap_or(false)
+    {
+        return Err(CliError::new(
+            "E_ELEVATED_PRIVILEGE",
+            "zornmesh service must be installed as a regular user, not root",
+            ExitKind::PermissionDenied,
+        ));
+    }
+    Ok(())
+}
+
+fn service_unit_path() -> Result<PathBuf, CliError> {
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            "HOME is unset; cannot resolve per-user service unit path",
+            ExitKind::Validation,
+        )
+    })?;
+    let home = PathBuf::from(home);
+    if cfg!(target_os = "macos") {
+        Ok(home
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{SERVICE_LABEL}.plist")))
+    } else if cfg!(target_os = "linux") {
+        Ok(home
+            .join(".config")
+            .join("systemd")
+            .join("user")
+            .join("zornmesh.service"))
+    } else {
+        Err(CliError::new(
+            "E_UNSUPPORTED_PLATFORM",
+            "zornmesh service is only supported on macOS and Linux",
+            ExitKind::UserError,
+        ))
+    }
+}
+
+fn render_service_unit(exe: &Path, socket_path: &Path) -> String {
+    if cfg!(target_os = "macos") {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>daemon</string>
+        <string>--socket</string>
+        <string>{socket}</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ProcessType</key><string>Background</string>
+    <key>StandardOutPath</key><string>/tmp/{label}.out.log</string>
+    <key>StandardErrorPath</key><string>/tmp/{label}.err.log</string>
+</dict>
+</plist>
+"#,
+            label = SERVICE_LABEL,
+            exe = exe.display(),
+            socket = socket_path.display()
+        )
+    } else {
+        format!(
+            "[Unit]
+Description=zornmesh local-first agent mesh daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart={exe} daemon --socket {socket}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+",
+            exe = exe.display(),
+            socket = socket_path.display()
+        )
+    }
+}
+
+fn service_activation_hint(unit_path: &Path) -> String {
+    if cfg!(target_os = "macos") {
+        format!(
+            "next: launchctl bootstrap gui/$(id -u) {}",
+            unit_path.display()
+        )
+    } else {
+        "next: systemctl --user daemon-reload && systemctl --user enable --now zornmesh.service"
+            .to_owned()
+    }
+}
+
+fn service_deactivation_hint(unit_path: &Path) -> String {
+    if cfg!(target_os = "macos") {
+        format!(
+            "next: launchctl bootout gui/$(id -u) {}",
+            unit_path.display()
+        )
+    } else {
+        "next: systemctl --user disable --now zornmesh.service".to_owned()
+    }
+}
+
+fn service_install(invocation: &Invocation) -> Result<(), CliError> {
+    service_refuse_root()?;
+    let unit_path = service_unit_path()?;
+    let exe = std::env::current_exe().map_err(|error| {
+        CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("cannot resolve zornmesh executable: {error}"),
+            ExitKind::Validation,
+        )
+    })?;
+    let socket_path = &invocation.config.socket_path;
+    let unit = render_service_unit(&exe, socket_path);
+
+    if let Some(parent) = unit_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            CliError::new(
+                "E_DAEMON_IO",
+                format!("cannot create {}: {error}", parent.display()),
+                ExitKind::Io,
+            )
+        })?;
+    }
+
+    let already_present = match fs::read_to_string(&unit_path) {
+        Ok(existing) if existing == unit => true,
+        Ok(_) | Err(_) => false,
+    };
+
+    if !already_present {
+        fs::write(&unit_path, &unit).map_err(|error| {
+            CliError::new(
+                "E_DAEMON_IO",
+                format!("cannot write {}: {error}", unit_path.display()),
+                ExitKind::Io,
+            )
+        })?;
+    }
+
+    let action = if already_present {
+        "unchanged"
+    } else {
+        "installed"
+    };
+    let hint = service_activation_hint(&unit_path);
+    match invocation.output {
+        OutputFormat::Human => {
+            println!("zornmesh service {action} at {}", unit_path.display());
+            println!("{hint}");
+        }
+        OutputFormat::Json | OutputFormat::Ndjson => {
+            println!(
+                r#"{{"schema":"zornmesh.cli.service.v1","action":"{action}","unit_path":{unit},"hint":{hint}}}"#,
+                unit = json_string(&unit_path.display().to_string()),
+                hint = json_string(&hint)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn service_uninstall(invocation: &Invocation) -> Result<(), CliError> {
+    service_refuse_root()?;
+    let unit_path = service_unit_path()?;
+    let existed = unit_path.exists();
+    if existed {
+        fs::remove_file(&unit_path).map_err(|error| {
+            CliError::new(
+                "E_DAEMON_IO",
+                format!("cannot remove {}: {error}", unit_path.display()),
+                ExitKind::Io,
+            )
+        })?;
+    }
+    let action = if existed { "removed" } else { "absent" };
+    let hint = service_deactivation_hint(&unit_path);
+    match invocation.output {
+        OutputFormat::Human => {
+            println!("zornmesh service {action} at {}", unit_path.display());
+            if existed {
+                println!("{hint}");
+            }
+        }
+        OutputFormat::Json | OutputFormat::Ndjson => {
+            println!(
+                r#"{{"schema":"zornmesh.cli.service.v1","action":"{action}","unit_path":{unit},"hint":{hint}}}"#,
+                unit = json_string(&unit_path.display().to_string()),
+                hint = json_string(&hint)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn service_status(invocation: &Invocation) -> Result<(), CliError> {
+    let unit_path = service_unit_path()?;
+    let installed = unit_path.exists();
+    let socket_path = &invocation.config.socket_path;
+    let reachable = zornmesh_rpc::local::effective_uid()
+        .ok()
+        .map(|uid| zornmesh_rpc::local::connect_trusted_socket(socket_path, uid).is_ok())
+        .unwrap_or(false);
+
+    match invocation.output {
+        OutputFormat::Human => {
+            println!(
+                "zornmesh service: installed={installed} reachable={reachable} unit={}",
+                unit_path.display()
+            );
+        }
+        OutputFormat::Json | OutputFormat::Ndjson => {
+            println!(
+                r#"{{"schema":"zornmesh.cli.service.v1","installed":{installed},"reachable":{reachable},"unit_path":{unit},"socket_path":{socket}}}"#,
+                unit = json_string(&unit_path.display().to_string()),
+                socket = json_string(&socket_path.display().to_string())
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run_stdio_loop<R, W>(reader: R, mut writer: W, bridge: &mut StdioBridge) -> io::Result<()>

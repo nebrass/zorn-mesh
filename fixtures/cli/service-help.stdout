@@ -1,0 +1,15 @@
+zornmesh service
+Manage the per-user zornmesh daemon as a supervised background service.
+
+Usage: zornmesh service <install|uninstall|status>
+
+Subcommands:
+      install     Write the launchd plist (macOS) or systemd user unit (Linux)
+      uninstall   Remove the previously installed unit file
+      status      Report install state and daemon reachability
+  -h, --help     Print help
+
+The install subcommand writes only the unit file. It prints the exact
+activation command (launchctl bootstrap or systemctl --user enable) so
+operators can audit the change before it takes effect. Running as root
+is refused; the unit is per-user and points at the current binary.
