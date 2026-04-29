@@ -4,9 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Local Unix-domain socket RPC layer for the zornmesh local-first agent mesh."
+readme = "../../README.md"
+keywords = ["mcp", "agent", "mesh", "rpc", "unix-socket"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-zornmesh-proto = { path = "../zornmesh-proto" }
+zornmesh-proto = { path = "../zornmesh-proto", version = "0.1.0" }
 
 [lib]
 path = "src/lib.rs"
