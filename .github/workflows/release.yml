@@ -45,9 +45,9 @@ jobs:
             os: ubuntu-22.04
             archive: tar.gz
             cross: true
-          - target: x86_64-pc-windows-msvc
-            os: windows-2022
-            archive: zip
+          # Windows is intentionally excluded — the CLI uses std::os::unix::*
+          # (Unix-domain sockets, file mode bits) without a Windows analogue
+          # in v0.1. Add a target back here when the platform abstraction lands.
     steps:
       - uses: actions/checkout@v4
 

@@ -30,15 +30,12 @@ path = "src/main.rs"
 
 # cargo-binstall reads this block to skip compilation and pull the prebuilt
 # binary published by .github/workflows/release.yml. The {name}/{version}/
-# {target} placeholders are substituted by binstall.
+# {target} placeholders are substituted by binstall. v0.1 is Unix-only; no
+# Windows override is needed because no Windows artifact is published.
 [package.metadata.binstall]
 pkg-url = "{repo}/releases/download/v{version}/zornmesh-{target}.tar.gz"
 bin-dir = "zornmesh-{target}/zornmesh{binary-ext}"
 pkg-fmt = "tgz"
-
-[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{repo}/releases/download/v{version}/zornmesh-{target}.zip"
-pkg-fmt = "zip"
 
 [lints]
 workspace = true
