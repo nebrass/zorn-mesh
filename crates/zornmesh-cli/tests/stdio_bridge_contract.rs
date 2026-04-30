@@ -1,9 +1,9 @@
-use zornmesh_broker::{Broker, PeerCredentials, SocketTrustPolicy};
+use zornmesh_cli::broker::{Broker, PeerCredentials, SocketTrustPolicy};
 use zornmesh_cli::{
     BridgeMessage, BridgeResponse, BridgeState, MCP_BRIDGE_PROTOCOL_VERSION, StdioBridge,
     StdioBridgeError, StdioBridgeErrorCode,
 };
-use zornmesh_core::REDACTION_MARKER;
+use zornmesh_cli::core::REDACTION_MARKER;
 
 const OWNER_UID: u32 = 1000;
 const OWNER_GID: u32 = 1000;

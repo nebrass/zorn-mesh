@@ -1,5 +1,13 @@
 #![doc = "Command skeleton for the public zornmesh CLI."]
 
+pub mod core;
+pub mod proto;
+pub mod store;
+pub mod rpc;
+pub mod broker;
+pub mod daemon;
+pub mod sdk;
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
@@ -16,8 +24,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zornmesh_broker::SubjectPattern;
-use zornmesh_store::{
+use crate::broker::SubjectPattern;
+use crate::store::{
     DeadLetterFailureCategory, DeadLetterQuery, EvidenceAuditEntry, EvidenceEnvelopeRecord,
     EvidenceQuery, EvidenceStateTransitionInput, EvidenceStore, EvidenceStoreErrorCode,
     FileEvidenceStore, RetentionPolicy, RetentionReport,
@@ -381,7 +389,7 @@ fn resolve_effective_config(
     cli_socket_path: Option<PathBuf>,
 ) -> Result<EffectiveConfig, CliError> {
     let mut socket_path =
-        zornmesh_rpc::local::default_socket_path().map_err(cli_error_from_local)?;
+        crate::rpc::local::default_socket_path().map_err(cli_error_from_local)?;
     let mut socket_source = ValueSource::Default;
 
     if let Some(path) = config_path
@@ -391,7 +399,7 @@ fn resolve_effective_config(
         socket_source = ValueSource::Config;
     }
 
-    if let Some(env_socket) = std::env::var_os(zornmesh_rpc::local::ENV_SOCKET_PATH) {
+    if let Some(env_socket) = std::env::var_os(crate::rpc::local::ENV_SOCKET_PATH) {
         if env_socket.is_empty() {
             return Err(CliError::new(
                 "E_INVALID_CONFIG",
@@ -461,14 +469,14 @@ fn read_config_socket_path(path: &Path) -> Result<Option<PathBuf>, CliError> {
     Ok(None)
 }
 
-fn cli_error_from_local(error: zornmesh_rpc::local::LocalError) -> CliError {
+fn cli_error_from_local(error: crate::rpc::local::LocalError) -> CliError {
     let kind = match error.code() {
-        zornmesh_rpc::local::LocalErrorCode::ExistingOwner => ExitKind::TemporaryUnavailable,
-        zornmesh_rpc::local::LocalErrorCode::LocalTrustUnsafe
-        | zornmesh_rpc::local::LocalErrorCode::ElevatedPrivilege => ExitKind::PermissionDenied,
-        zornmesh_rpc::local::LocalErrorCode::DaemonUnreachable => ExitKind::DaemonUnreachable,
-        zornmesh_rpc::local::LocalErrorCode::InvalidConfig => ExitKind::UserError,
-        zornmesh_rpc::local::LocalErrorCode::Io => ExitKind::Io,
+        crate::rpc::local::LocalErrorCode::ExistingOwner => ExitKind::TemporaryUnavailable,
+        crate::rpc::local::LocalErrorCode::LocalTrustUnsafe
+        | crate::rpc::local::LocalErrorCode::ElevatedPrivilege => ExitKind::PermissionDenied,
+        crate::rpc::local::LocalErrorCode::DaemonUnreachable => ExitKind::DaemonUnreachable,
+        crate::rpc::local::LocalErrorCode::InvalidConfig => ExitKind::UserError,
+        crate::rpc::local::LocalErrorCode::Io => ExitKind::Io,
     };
     CliError::new(error.code().as_str(), error.message(), kind)
 }
@@ -577,13 +585,13 @@ fn run_daemon(args: &[String], invocation: &Invocation) -> Result<(), CliError> 
                     ExitKind::UserError,
                 ));
             }
-            let config = zornmesh_daemon::DaemonConfig::for_socket_path(
+            let config = crate::daemon::DaemonConfig::for_socket_path(
                 invocation.config.socket_path.clone(),
             );
-            match zornmesh_daemon::run_foreground(config) {
+            match crate::daemon::run_foreground(config) {
                 Ok(report) => match report.outcome {
-                    zornmesh_daemon::ShutdownOutcome::Clean => Ok(()),
-                    zornmesh_daemon::ShutdownOutcome::BudgetExceeded => Err(CliError::new(
+                    crate::daemon::ShutdownOutcome::Clean => Ok(()),
+                    crate::daemon::ShutdownOutcome::BudgetExceeded => Err(CliError::new(
                         "E_DAEMON_UNAVAILABLE",
                         "daemon shutdown budget exceeded",
                         ExitKind::TemporaryUnavailable,
@@ -832,7 +840,7 @@ fn print_shutdown_report(report: &ShutdownCliReport, output: OutputFormat) -> Re
 }
 
 fn configured_shutdown_budget_ms() -> Result<u64, CliError> {
-    match std::env::var(zornmesh_rpc::local::ENV_SHUTDOWN_BUDGET_MS) {
+    match std::env::var(crate::rpc::local::ENV_SHUTDOWN_BUDGET_MS) {
         Ok(raw) => {
             let millis = raw.parse::<u64>().map_err(|error| {
                 CliError::new(
@@ -1367,7 +1375,7 @@ fn inspect_collection(
         records.push(serde_json::json!({
             "kind": "schema",
             "status": "available",
-            "schema_version": zornmesh_store::EVIDENCE_STORE_SCHEMA_VERSION,
+            "schema_version": crate::store::EVIDENCE_STORE_SCHEMA_VERSION,
         }));
         records.push(serde_json::json!({
             "kind": "release_integrity",
@@ -1700,7 +1708,7 @@ fn inspect_metadata_json(
         "evidence_store": {
             "status": status,
             "path": path.map(|path| path.display().to_string()),
-            "schema_version": store.map(|_| zornmesh_store::EVIDENCE_STORE_SCHEMA_VERSION),
+            "schema_version": store.map(|_| crate::store::EVIDENCE_STORE_SCHEMA_VERSION),
             "indexes": store.map(EvidenceStore::index_names).unwrap_or_default(),
             "reason": reason,
         },
@@ -1894,9 +1902,9 @@ fn stdio_agent_session(agent_id: &str, invocation: &Invocation) -> Result<(), Cl
         }
     };
 
-    let broker = zornmesh_broker::Broker::new();
-    let credentials = zornmesh_broker::PeerCredentials::new(uid, uid, std::process::id());
-    let policy = zornmesh_broker::SocketTrustPolicy::new(uid, uid, 0o600);
+    let broker = crate::broker::Broker::new();
+    let credentials = crate::broker::PeerCredentials::new(uid, uid, std::process::id());
+    let policy = crate::broker::SocketTrustPolicy::new(uid, uid, 0o600);
     let mut bridge = StdioBridge::new(broker, agent_id, "MCP Host", credentials, policy);
     let stdin = io::stdin();
     run_stdio_loop(stdin.lock(), stdout, &mut bridge).map_err(stdio_io_error)
@@ -1909,12 +1917,12 @@ const ENV_AUTOSPAWN_TIMEOUT: &str = "ZORN_AUTOSPAWN_TIMEOUT_MS";
 const ENV_NO_AUTOSPAWN: &str = "ZORN_NO_AUTOSPAWN";
 
 fn connect_stdio_daemon(socket_path: &Path) -> Result<(u32, UnixStream), StdioBridgeError> {
-    let uid = zornmesh_rpc::local::effective_uid().map_err(stdio_daemon_error_from_local)?;
+    let uid = crate::rpc::local::effective_uid().map_err(stdio_daemon_error_from_local)?;
 
-    match zornmesh_rpc::local::connect_trusted_socket(socket_path, uid) {
+    match crate::rpc::local::connect_trusted_socket(socket_path, uid) {
         Ok(stream) => return Ok((uid, stream)),
         Err(error)
-            if error.code() == zornmesh_rpc::local::LocalErrorCode::DaemonUnreachable =>
+            if error.code() == crate::rpc::local::LocalErrorCode::DaemonUnreachable =>
         {
             if autospawn_disabled() {
                 return Err(stdio_daemon_error_from_local(error));
@@ -1982,7 +1990,7 @@ fn wait_for_daemon_socket(
     let deadline = Instant::now() + timeout;
     let poll_interval = Duration::from_millis(50);
     loop {
-        match zornmesh_rpc::local::connect_trusted_socket(socket_path, uid) {
+        match crate::rpc::local::connect_trusted_socket(socket_path, uid) {
             Ok(stream) => return Ok((uid, stream)),
             Err(error) => {
                 if Instant::now() >= deadline {
@@ -1994,7 +2002,7 @@ fn wait_for_daemon_socket(
     }
 }
 
-fn stdio_daemon_error_from_local(error: zornmesh_rpc::local::LocalError) -> StdioBridgeError {
+fn stdio_daemon_error_from_local(error: crate::rpc::local::LocalError) -> StdioBridgeError {
     StdioBridgeError::new(
         StdioBridgeErrorCode::DaemonUnavailable,
         format!("daemon connection failed with {}", error.code().as_str()),
@@ -2002,7 +2010,7 @@ fn stdio_daemon_error_from_local(error: zornmesh_rpc::local::LocalError) -> Stdi
 }
 
 fn stdio_daemon_readiness_timeout(
-    error: zornmesh_rpc::local::LocalError,
+    error: crate::rpc::local::LocalError,
     timeout: Duration,
 ) -> StdioBridgeError {
     StdioBridgeError::new(
@@ -2047,7 +2055,7 @@ fn print_service_help(output: OutputFormat) -> Result<(), CliError> {
 }
 
 fn service_refuse_root() -> Result<(), CliError> {
-    if zornmesh_rpc::local::effective_uid()
+    if crate::rpc::local::effective_uid()
         .map(|uid| uid == 0)
         .unwrap_or(false)
     {
@@ -2257,9 +2265,9 @@ fn service_status(invocation: &Invocation) -> Result<(), CliError> {
     let unit_path = service_unit_path()?;
     let installed = unit_path.exists();
     let socket_path = &invocation.config.socket_path;
-    let reachable = zornmesh_rpc::local::effective_uid()
+    let reachable = crate::rpc::local::effective_uid()
         .ok()
-        .map(|uid| zornmesh_rpc::local::connect_trusted_socket(socket_path, uid).is_ok())
+        .map(|uid| crate::rpc::local::connect_trusted_socket(socket_path, uid).is_ok())
         .unwrap_or(false);
 
     match invocation.output {
@@ -2505,7 +2513,7 @@ fn print_doctor_help(output: OutputFormat) -> Result<(), CliError> {
 }
 
 fn inspect_local_daemon(socket_path: &Path) -> Result<DaemonInspection, CliError> {
-    let current_uid = zornmesh_rpc::local::effective_uid().map_err(cli_error_from_local)?;
+    let current_uid = crate::rpc::local::effective_uid().map_err(cli_error_from_local)?;
     let start_remediation = format!(
         "start the daemon with `zornmesh daemon --socket {}`",
         socket_path.display()
@@ -4079,7 +4087,7 @@ fn evidence_export(options: EvidenceExportOptions, output: OutputFormat) -> Resu
         .collect();
     envelopes.sort_by_key(EvidenceEnvelopeRecord::daemon_sequence);
 
-    let mut dead_letters: Vec<zornmesh_store::EvidenceDeadLetterRecord> = store
+    let mut dead_letters: Vec<crate::store::EvidenceDeadLetterRecord> = store
         .query_dead_letters(DeadLetterQuery::new())
         .into_iter()
         .filter(|record| {
@@ -4292,7 +4300,7 @@ fn envelope_export_json(record: &EvidenceEnvelopeRecord) -> serde_json::Value {
 }
 
 fn dead_letter_export_json(
-    record: &zornmesh_store::EvidenceDeadLetterRecord,
+    record: &crate::store::EvidenceDeadLetterRecord,
 ) -> serde_json::Value {
     serde_json::json!({
         "kind": "dead_letter",
@@ -4634,7 +4642,7 @@ fn classify_envelope(
     }
 }
 
-fn classify_dead_letter(record: &zornmesh_store::EvidenceDeadLetterRecord) -> ComplianceAssessment {
+fn classify_dead_letter(record: &crate::store::EvidenceDeadLetterRecord) -> ComplianceAssessment {
     let mut missing: Vec<&'static str> = Vec::new();
     if !check_field(record.source_agent()) {
         missing.push("source_agent");
@@ -4745,7 +4753,7 @@ fn envelope_compliance_json(
 }
 
 fn dead_letter_compliance_json(
-    record: &zornmesh_store::EvidenceDeadLetterRecord,
+    record: &crate::store::EvidenceDeadLetterRecord,
     assessment: &ComplianceAssessment,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -6715,15 +6723,15 @@ fn ndjson_not_supported(command: &str) -> CliError {
     )
 }
 
-fn cli_error_from_daemon(error: zornmesh_daemon::DaemonError) -> CliError {
+fn cli_error_from_daemon(error: crate::daemon::DaemonError) -> CliError {
     let kind = match error.code() {
-        zornmesh_daemon::DaemonErrorCode::ExistingOwner => ExitKind::TemporaryUnavailable,
-        zornmesh_daemon::DaemonErrorCode::LocalTrustUnsafe
-        | zornmesh_daemon::DaemonErrorCode::ElevatedPrivilege => ExitKind::PermissionDenied,
-        zornmesh_daemon::DaemonErrorCode::DaemonUnreachable => ExitKind::DaemonUnreachable,
-        zornmesh_daemon::DaemonErrorCode::PersistenceUnavailable => ExitKind::TemporaryUnavailable,
-        zornmesh_daemon::DaemonErrorCode::InvalidConfig => ExitKind::UserError,
-        zornmesh_daemon::DaemonErrorCode::Io => ExitKind::Io,
+        crate::daemon::DaemonErrorCode::ExistingOwner => ExitKind::TemporaryUnavailable,
+        crate::daemon::DaemonErrorCode::LocalTrustUnsafe
+        | crate::daemon::DaemonErrorCode::ElevatedPrivilege => ExitKind::PermissionDenied,
+        crate::daemon::DaemonErrorCode::DaemonUnreachable => ExitKind::DaemonUnreachable,
+        crate::daemon::DaemonErrorCode::PersistenceUnavailable => ExitKind::TemporaryUnavailable,
+        crate::daemon::DaemonErrorCode::InvalidConfig => ExitKind::UserError,
+        crate::daemon::DaemonErrorCode::Io => ExitKind::Io,
     };
     CliError::new(error.code().as_str(), error.message(), kind)
 }
@@ -6923,21 +6931,21 @@ impl StdioBridgeError {
 
 #[derive(Debug, Clone)]
 pub struct StdioBridge {
-    broker: zornmesh_broker::Broker,
+    broker: crate::broker::Broker,
     agent_id: String,
     display_name: String,
-    credentials: zornmesh_broker::PeerCredentials,
-    trust_policy: zornmesh_broker::SocketTrustPolicy,
+    credentials: crate::broker::PeerCredentials,
+    trust_policy: crate::broker::SocketTrustPolicy,
     state: BridgeState,
 }
 
 impl StdioBridge {
     pub fn new(
-        broker: zornmesh_broker::Broker,
+        broker: crate::broker::Broker,
         agent_id: impl Into<String>,
         display_name: impl Into<String>,
-        credentials: zornmesh_broker::PeerCredentials,
-        trust_policy: zornmesh_broker::SocketTrustPolicy,
+        credentials: crate::broker::PeerCredentials,
+        trust_policy: crate::broker::SocketTrustPolicy,
     ) -> Self {
         Self {
             broker,
@@ -7027,8 +7035,8 @@ impl StdioBridge {
     }
 
     fn register_identity_and_session(&self) -> Result<(String, String), StdioBridgeError> {
-        let card = zornmesh_core::AgentCard::from_input(zornmesh_core::AgentCardInput {
-            profile_version: zornmesh_core::AGENT_CARD_PROFILE_VERSION.to_owned(),
+        let card = crate::core::AgentCard::from_input(crate::core::AgentCardInput {
+            profile_version: crate::core::AGENT_CARD_PROFILE_VERSION.to_owned(),
             stable_id: self.agent_id.clone(),
             display_name: self.display_name.clone(),
             transport: "unix".to_owned(),
@@ -7050,9 +7058,9 @@ impl StdioBridge {
                 format!("AgentCard registration failed: {error}"),
             )
         })? {
-            zornmesh_broker::AgentRegistrationOutcome::Registered { canonical }
-            | zornmesh_broker::AgentRegistrationOutcome::Compatible { canonical } => canonical,
-            zornmesh_broker::AgentRegistrationOutcome::Conflict { .. } => {
+            crate::broker::AgentRegistrationOutcome::Registered { canonical }
+            | crate::broker::AgentRegistrationOutcome::Compatible { canonical } => canonical,
+            crate::broker::AgentRegistrationOutcome::Conflict { .. } => {
                 return Err(StdioBridgeError::new(
                     StdioBridgeErrorCode::RegistrationFailed,
                     "AgentCard conflicts with an existing mesh identity",
@@ -7067,8 +7075,8 @@ impl StdioBridge {
             self.trust_policy,
             self.trust_policy.expected_mode(),
         ) {
-            Ok(zornmesh_broker::ConnectionAcceptanceOutcome::Accepted { .. }) => {}
-            Ok(zornmesh_broker::ConnectionAcceptanceOutcome::Rejected { code, remediation }) => {
+            Ok(crate::broker::ConnectionAcceptanceOutcome::Accepted { .. }) => {}
+            Ok(crate::broker::ConnectionAcceptanceOutcome::Rejected { code, remediation }) => {
                 return Err(StdioBridgeError::new(
                     StdioBridgeErrorCode::SocketPermissionDenied,
                     format!("{}: {remediation}", code.as_str()),
@@ -7104,14 +7112,14 @@ impl StdioBridge {
         ]
         .into_iter()
         .map(|(capability_id, summary)| {
-            zornmesh_core::CapabilityDescriptor::builder(
+            crate::core::CapabilityDescriptor::builder(
                 capability_id,
                 "v1",
-                zornmesh_core::CapabilityDirection::Both,
+                crate::core::CapabilityDirection::Both,
             )
             .with_summary(summary)
             .with_schema_ref(
-                zornmesh_core::CapabilitySchemaDialect::JsonSchema,
+                crate::core::CapabilitySchemaDialect::JsonSchema,
                 format!("{capability_id}.v1.schema"),
             )
             .build()
@@ -7172,7 +7180,7 @@ impl StdioBridge {
             && let Some(capability_id) = capability_id.as_deref()
         {
             let version = capability_version.as_deref().unwrap_or("v1");
-            if let zornmesh_broker::AuthorizationDecision::Denied { reason } = self
+            if let crate::broker::AuthorizationDecision::Denied { reason } = self
                 .broker
                 .authorize_invocation(agent_id, capability_id, version)
             {
@@ -7381,7 +7389,7 @@ fn redact_value(value: &mut serde_json::Value) {
         serde_json::Value::Object(map) => {
             for (key, value) in map {
                 if is_secret_field(key) {
-                    *value = serde_json::Value::String(zornmesh_core::REDACTION_MARKER.to_owned());
+                    *value = serde_json::Value::String(crate::core::REDACTION_MARKER.to_owned());
                 } else {
                     redact_value(value);
                 }

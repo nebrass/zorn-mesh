@@ -7,8 +7,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use zornmesh_core::Envelope;
-use zornmesh_store::{
+use zornmesh_cli::core::Envelope;
+use zornmesh_cli::store::{
     DeadLetterFailureCategory, EvidenceDeadLetterInput, EvidenceEnvelopeInput,
     EvidenceStateTransitionInput, EvidenceStore, FileEvidenceStore,
 };
@@ -868,7 +868,7 @@ fn inspect_messages_json_filters_redacts_and_paginates() {
     assert_eq!(data["pagination"]["next_cursor"], "1");
     assert_eq!(
         data["metadata"]["evidence_store"]["schema_version"],
-        zornmesh_store::EVIDENCE_STORE_SCHEMA_VERSION
+        zornmesh_cli::store::EVIDENCE_STORE_SCHEMA_VERSION
     );
     assert_eq!(
         data["metadata"]["runtime"]["status"],

@@ -13,12 +13,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 serde_json = "1.0.149"
-zornmesh-broker = { path = "../zornmesh-broker", version = "0.1.0" }
-zornmesh-core = { path = "../zornmesh-core", version = "0.1.0" }
-zornmesh-daemon = { path = "../zornmesh-daemon", version = "0.1.0" }
-zornmesh-rpc = { path = "../zornmesh-rpc", version = "0.1.0" }
-zornmesh-sdk = { path = "../zornmesh-sdk", version = "0.1.0" }
-zornmesh-store = { path = "../zornmesh-store", version = "0.1.0" }
+signal-hook = "0.3"
 
 [lib]
 name = "zornmesh_cli"
