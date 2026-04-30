@@ -57,7 +57,16 @@ const READ_SCHEMA_VERSION: &str = "zornmesh.cli.read.v1";
 const EVENT_SCHEMA_VERSION: &str = "zornmesh.cli.event.v1";
 const DOCTOR_SCHEMA_VERSION: &str = "zornmesh.cli.doctor.v1";
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const MCP_BRIDGE_PROTOCOL_VERSION: &str = "2025-03-26";
+/// MCP protocol versions this bridge accepts in `initialize`. The first entry
+/// is the canonical / preferred version; additional entries support older or
+/// newer clients negotiating the same wire shape. Add new versions to the
+/// front as MCP hosts (Claude Code, Cursor, Windsurf, …) roll forward.
+pub const MCP_BRIDGE_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26"];
+
+/// Preferred protocol version for any caller that needs one canonical value
+/// (tests, fixtures). Always equal to `MCP_BRIDGE_PROTOCOL_VERSIONS[0]`.
+pub const MCP_BRIDGE_PROTOCOL_VERSION: &str = MCP_BRIDGE_PROTOCOL_VERSIONS[0];
 const DEFAULT_SHUTDOWN_BUDGET_MS: u64 = 10_000;
 const MAX_SHUTDOWN_BUDGET_MS: u64 = 60_000;
 const DEFAULT_INSPECT_LIMIT: usize = 50;
@@ -7015,7 +7024,7 @@ impl StdioBridge {
                 "MCP initialize requires protocolVersion",
             ));
         }
-        if protocol_version != MCP_BRIDGE_PROTOCOL_VERSION {
+        if !MCP_BRIDGE_PROTOCOL_VERSIONS.contains(&protocol_version.as_str()) {
             return BridgeResponse::Error(StdioBridgeError::new(
                 StdioBridgeErrorCode::UnsupportedProtocolVersion,
                 format!("unsupported MCP protocolVersion '{protocol_version}'"),
