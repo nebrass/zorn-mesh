@@ -10,6 +10,7 @@
 //! - `debate.<id>.critique.<agent>` — workers publish responses; orchestrator subscribes.
 //! - `debate.<id>.consensus` — orchestrator publishes the synthesized result.
 
+pub mod cli_runner;
 pub mod envelopes;
 pub mod orchestrator;
 pub mod platforms;

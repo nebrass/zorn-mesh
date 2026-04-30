@@ -1,4 +1,4 @@
-zornmesh 0.2.0
+zornmesh 0.2.1
 Local-first agent mesh coordination.
 
 Usage: zornmesh [OPTIONS] <COMMAND>
