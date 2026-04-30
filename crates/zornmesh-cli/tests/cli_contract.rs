@@ -1507,7 +1507,7 @@ fn read_commands_emit_stable_human_stdout() {
         (
             vec!["doctor", "--socket", TEST_SOCKET],
             format!(
-                "zornmesh doctor\nstatus: degraded\ndaemon: unreachable\nversion: 0.1.3\nsocket: {TEST_SOCKET}\nsocket_source: cli\nsocket_ownership: unavailable\nsocket_permissions: unavailable\nschema: available (zornmesh.cli.doctor.v1)\notel: unavailable\nsignature: unverifiable\nsbom: unavailable\ntrust: degraded\nshutdown: unavailable\nremediation: start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\n"
+                "zornmesh doctor\nstatus: degraded\ndaemon: unreachable\nversion: 0.2.0\nsocket: {TEST_SOCKET}\nsocket_source: cli\nsocket_ownership: unavailable\nsocket_permissions: unavailable\nschema: available (zornmesh.cli.doctor.v1)\notel: unavailable\nsignature: unverifiable\nsbom: unavailable\ntrust: degraded\nshutdown: unavailable\nremediation: start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\n"
             ),
         ),
     ];
@@ -1538,7 +1538,7 @@ fn json_read_commands_emit_only_stable_json_stdout() {
         (
             vec!["doctor", "--socket", TEST_SOCKET, "--output", "json"],
             format!(
-                "{{\"schema_version\":\"zornmesh.cli.read.v1\",\"command\":\"doctor\",\"status\":\"ok\",\"data\":{{\"health\":\"degraded\",\"diagnostics_schema\":\"zornmesh.cli.doctor.v1\",\"daemon\":{{\"status\":\"unreachable\",\"version\":\"0.1.3\",\"socket_path\":\"{TEST_SOCKET}\",\"socket_source\":\"cli\",\"remediation\":\"start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\"}},\"socket\":{{\"ownership\":\"unavailable\",\"permissions\":\"unavailable\"}},\"schema\":{{\"status\":\"available\",\"version\":\"zornmesh.cli.doctor.v1\"}},\"otel\":{{\"status\":\"unavailable\",\"endpoint\":\"unconfigured\"}},\"signature\":{{\"status\":\"unverifiable\",\"identity\":\"unavailable\"}},\"sbom\":{{\"status\":\"unavailable\",\"identity\":\"unavailable\"}},\"trust\":{{\"status\":\"degraded\",\"posture\":\"daemon-unreachable\"}},\"shutdown\":{{\"status\":\"unavailable\",\"in_flight_work\":\"unavailable\"}}}},\"warnings\":[{{\"code\":\"W_DAEMON_UNREACHABLE\",\"message\":\"daemon is unreachable; start the daemon or choose another socket\"}},{{\"code\":\"W_OTEL_UNAVAILABLE\",\"message\":\"OTel reachability evidence is not configured for this build\"}},{{\"code\":\"W_SIGNATURE_UNVERIFIABLE\",\"message\":\"build signature evidence is unavailable for this build\"}},{{\"code\":\"W_SBOM_UNAVAILABLE\",\"message\":\"SBOM identity evidence is unavailable for this build\"}}]}}\n"
+                "{{\"schema_version\":\"zornmesh.cli.read.v1\",\"command\":\"doctor\",\"status\":\"ok\",\"data\":{{\"health\":\"degraded\",\"diagnostics_schema\":\"zornmesh.cli.doctor.v1\",\"daemon\":{{\"status\":\"unreachable\",\"version\":\"0.2.0\",\"socket_path\":\"{TEST_SOCKET}\",\"socket_source\":\"cli\",\"remediation\":\"start the daemon with `zornmesh daemon --socket {TEST_SOCKET}`\"}},\"socket\":{{\"ownership\":\"unavailable\",\"permissions\":\"unavailable\"}},\"schema\":{{\"status\":\"available\",\"version\":\"zornmesh.cli.doctor.v1\"}},\"otel\":{{\"status\":\"unavailable\",\"endpoint\":\"unconfigured\"}},\"signature\":{{\"status\":\"unverifiable\",\"identity\":\"unavailable\"}},\"sbom\":{{\"status\":\"unavailable\",\"identity\":\"unavailable\"}},\"trust\":{{\"status\":\"degraded\",\"posture\":\"daemon-unreachable\"}},\"shutdown\":{{\"status\":\"unavailable\",\"in_flight_work\":\"unavailable\"}}}},\"warnings\":[{{\"code\":\"W_DAEMON_UNREACHABLE\",\"message\":\"daemon is unreachable; start the daemon or choose another socket\"}},{{\"code\":\"W_OTEL_UNAVAILABLE\",\"message\":\"OTel reachability evidence is not configured for this build\"}},{{\"code\":\"W_SIGNATURE_UNVERIFIABLE\",\"message\":\"build signature evidence is unavailable for this build\"}},{{\"code\":\"W_SBOM_UNAVAILABLE\",\"message\":\"SBOM identity evidence is unavailable for this build\"}}]}}\n"
             ),
         ),
     ];
@@ -1590,7 +1590,7 @@ fn doctor_healthy_json_reports_required_diagnostic_categories() {
     assert_eq!(data["health"], "degraded");
     assert_eq!(data["diagnostics_schema"], "zornmesh.cli.doctor.v1");
     assert_eq!(data["daemon"]["status"], "ready");
-    assert_eq!(data["daemon"]["version"], "0.1.3");
+    assert_eq!(data["daemon"]["version"], "0.2.0");
     assert_eq!(data["daemon"]["socket_path"], socket);
     assert_eq!(data["socket"]["ownership"], "current-user");
     assert_eq!(data["socket"]["permissions"], "private");
@@ -3286,7 +3286,7 @@ fn temp_release_manifest(name: &str, body: &str) -> PathBuf {
 
 const VERIFIED_RELEASE_MANIFEST: &str = r#"{
   "schema_version": "zornmesh.release.v1",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "artifact": {"path": "/opt/zornmesh/bin/zornmesh", "digest": "sha256:abc"},
   "signature": {
     "path": "/opt/zornmesh/bin/zornmesh.sig",
