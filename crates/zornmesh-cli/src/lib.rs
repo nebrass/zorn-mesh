@@ -543,8 +543,6 @@ fn dispatch(invocation: Invocation) -> Result<(), CliError> {
         [command, rest @ ..] if command == "ui" => run_ui(rest, &invocation),
         [command] if command == "service" => run_service(&[], &invocation),
         [command, rest @ ..] if command == "service" => run_service(rest, &invocation),
-        [command] if command == "worker" => run_worker(&[], &invocation),
-        [command, rest @ ..] if command == "worker" => run_worker(rest, &invocation),
         [command] if command == "debate" => run_debate(&[], &invocation),
         [command, rest @ ..] if command == "debate" => run_debate(rest, &invocation),
         [command, ..] => Err(CliError::new(
@@ -2302,95 +2300,14 @@ fn service_status(invocation: &Invocation) -> Result<(), CliError> {
     Ok(())
 }
 
-pub const WORKER_HELP: &str = "zornmesh worker\nRun a long-lived worker daemon that subscribes to debate plans and drives an underlying coding-agent CLI.\n\nUsage: zornmesh worker --platform <claude|copilot|gemini|opencode> [OPTIONS]\n\nOptions:\n      --platform <NAME>            Coding-agent CLI to drive (required)\n      --invocation-timeout <MS>   Per-call subprocess deadline (default 120000)\n  -h, --help                      Print help\n\nThe worker connects to the local broker, subscribes to `debate.>.plan`, and\non each delivery shells out to the platform's non-interactive mode\n(`claude --print`, `copilot -p`, `gemini --print`, `opencode run`). The\nresulting critique is published to `debate.<id>.critique.<platform>` for the\norchestrator to aggregate.\n\nWorkers are per-platform. Run one per coding-agent CLI you want to\nparticipate in debates. Each worker registers as `agent.worker.<platform>`\nin the mesh audit trail.\n";
-
-pub const DEBATE_HELP: &str = "zornmesh debate\nDrive multi-agent debates over the local mesh.\n\nUsage: zornmesh debate run <PLAN> [OPTIONS]\n       zornmesh debate run --plan-stdin [OPTIONS]\n\nOptions for `run`:\n      --plan-stdin              Read the plan from stdin instead of an arg\n      --repo <PATH>             Repo path workers should cwd into when invoking\n      --timeout <SECS>          Total wall-clock budget (default 30)\n      --quorum <N>              Minimum critiques before early-completion (default 1)\n      --as-agent <ID>           Originator identity (default agent.driver.cli)\n      --output <FORMAT>         Select human or json output\n  -h, --help                    Print help\n\nThe debate command publishes a plan envelope to `debate.<id>.plan`, blocks\nuntil the quorum is met or the timeout fires, then emits a synthesized\nconsensus that explicitly preserves dissent. Worker daemons (run with\n`zornmesh worker --platform <name>`) must already be subscribed for any\ncritiques to arrive.\n";
-
-fn run_worker(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
-    match args {
-        [] => print_help("worker", WORKER_HELP, invocation.output),
-        [flag] if is_help(flag) => print_help("worker", WORKER_HELP, invocation.output),
-        rest => worker_listen(rest, invocation),
-    }
-}
-
-fn worker_listen(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
-    let mut platform: Option<crate::debate::Platform> = None;
-    let mut invocation_timeout_ms: u64 = 120_000;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--platform" => {
-                let value = iter.next().ok_or_else(|| {
-                    CliError::new(
-                        "E_VALIDATION_FAILED",
-                        "worker --platform requires a value",
-                        ExitKind::Validation,
-                    )
-                })?;
-                platform = Some(crate::debate::Platform::parse(value).ok_or_else(|| {
-                    CliError::new(
-                        "E_VALIDATION_FAILED",
-                        format!(
-                            "unknown worker platform '{value}'; expected claude|copilot|gemini|opencode"
-                        ),
-                        ExitKind::Validation,
-                    )
-                })?);
-            }
-            "--invocation-timeout" => {
-                let value = iter.next().ok_or_else(|| {
-                    CliError::new(
-                        "E_VALIDATION_FAILED",
-                        "worker --invocation-timeout requires a millisecond value",
-                        ExitKind::Validation,
-                    )
-                })?;
-                invocation_timeout_ms = value.parse::<u64>().map_err(|_| {
-                    CliError::new(
-                        "E_VALIDATION_FAILED",
-                        format!("worker --invocation-timeout: '{value}' is not a u64"),
-                        ExitKind::Validation,
-                    )
-                })?;
-            }
-            other => {
-                return Err(CliError::new(
-                    "E_UNSUPPORTED_COMMAND",
-                    format!("unsupported zornmesh worker argument '{other}'"),
-                    ExitKind::UserError,
-                ));
-            }
-        }
-    }
-    let platform = platform.ok_or_else(|| {
-        CliError::new(
-            "E_VALIDATION_FAILED",
-            "worker requires --platform <claude|copilot|gemini|opencode>",
-            ExitKind::Validation,
-        )
-    })?;
-
-    let _ = invocation; // workers don't need the CLI invocation's parsed config
-    crate::debate::cli_runner::run_worker_via_daemon(
-        platform,
-        Duration::from_millis(invocation_timeout_ms),
-        None,
-    )
-    .map_err(|err| {
-        CliError::new(
-            error_code_to_static(err.code()),
-            err.message(),
-            ExitKind::Io,
-        )
-    })
-}
+pub const DEBATE_HELP: &str = "zornmesh debate\nMulti-agent debate over a coding plan. Spawns each requested platform CLI in non-interactive mode in parallel and aggregates the responses.\n\nUsage: zornmesh debate run <PLAN> [OPTIONS]\n       zornmesh debate run --plan-stdin [OPTIONS]\n       zornmesh debate replay <DEBATE_ID>\n\nOptions for `run`:\n      --plan-stdin              Read the plan from stdin instead of an arg\n      --repo <PATH>             Set cwd for spawned platform CLIs\n      --platforms <LIST>        Comma-separated subset of claude,copilot,gemini,opencode (default all)\n      --timeout <SECS>          Per-platform wall-clock budget (default 60)\n      --max-bytes <N>           Per-platform stdout cap (default 262144)\n      --as-agent <ID>           Originator identity (default agent.driver.cli)\n      --output <FORMAT>         Select human or json output\n  -h, --help                    Print help\n\n`debate run` blocks until every platform has either responded, timed out, or\nbeen marked CLI-missing. Each platform's outcome carries a stable `status`\n(success, empty_response, non_zero_exit, timeout, cli_missing, spawn_failed)\nso partial results are useful even when some platforms fail. A JSONL audit\nlog of every event is written to `$XDG_STATE_HOME/zornmesh/debates/<id>.jsonl`\n(or `~/.local/state/zornmesh/debates/<id>.jsonl`).\n\n`debate replay <id>` re-emits the JSONL audit for a previous run.\n";
 
 fn run_debate(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
     match args {
         [] => print_help("debate", DEBATE_HELP, invocation.output),
         [flag] if is_help(flag) => print_help("debate", DEBATE_HELP, invocation.output),
         [sub, rest @ ..] if sub == "run" => debate_run(rest, invocation),
+        [sub, rest @ ..] if sub == "replay" => debate_replay(rest, invocation),
         [sub, ..] => Err(CliError::new(
             "E_UNSUPPORTED_COMMAND",
             format!("unsupported zornmesh debate subcommand '{sub}'"),
@@ -2403,8 +2320,9 @@ fn debate_run(args: &[String], invocation: &Invocation) -> Result<(), CliError> 
     let mut plan: Option<String> = None;
     let mut plan_stdin = false;
     let mut repo: Option<String> = None;
-    let mut timeout_secs: u64 = 30;
-    let mut quorum: u32 = 1;
+    let mut platforms: Vec<crate::debate::Platform> = Vec::new();
+    let mut timeout_secs: u64 = 60;
+    let mut max_bytes: usize = crate::debate::DEFAULT_MAX_OUTPUT_BYTES;
     let mut originator: String = "agent.driver.cli".to_owned();
 
     let mut iter = args.iter();
@@ -2412,26 +2330,29 @@ fn debate_run(args: &[String], invocation: &Invocation) -> Result<(), CliError> 
         match arg.as_str() {
             "--plan-stdin" => plan_stdin = true,
             "--repo" => {
-                repo = Some(
-                    iter.next()
-                        .ok_or_else(|| {
-                            CliError::new(
-                                "E_VALIDATION_FAILED",
-                                "debate run --repo requires a value",
-                                ExitKind::Validation,
-                            )
-                        })?
-                        .to_owned(),
-                );
+                repo = Some(arg_value(&mut iter, "debate run --repo")?);
+            }
+            "--platforms" => {
+                let value = arg_value(&mut iter, "debate run --platforms")?;
+                for token in value.split(',') {
+                    let token = token.trim();
+                    if token.is_empty() {
+                        continue;
+                    }
+                    let platform = crate::debate::Platform::parse(token).ok_or_else(|| {
+                        CliError::new(
+                            "E_VALIDATION_FAILED",
+                            format!("debate run --platforms: unknown platform '{token}'"),
+                            ExitKind::Validation,
+                        )
+                    })?;
+                    if !platforms.contains(&platform) {
+                        platforms.push(platform);
+                    }
+                }
             }
             "--timeout" => {
-                let value = iter.next().ok_or_else(|| {
-                    CliError::new(
-                        "E_VALIDATION_FAILED",
-                        "debate run --timeout requires a value",
-                        ExitKind::Validation,
-                    )
-                })?;
+                let value = arg_value(&mut iter, "debate run --timeout")?;
                 timeout_secs = value.parse::<u64>().map_err(|_| {
                     CliError::new(
                         "E_VALIDATION_FAILED",
@@ -2440,33 +2361,18 @@ fn debate_run(args: &[String], invocation: &Invocation) -> Result<(), CliError> 
                     )
                 })?;
             }
-            "--quorum" => {
-                let value = iter.next().ok_or_else(|| {
+            "--max-bytes" => {
+                let value = arg_value(&mut iter, "debate run --max-bytes")?;
+                max_bytes = value.parse::<usize>().map_err(|_| {
                     CliError::new(
                         "E_VALIDATION_FAILED",
-                        "debate run --quorum requires a value",
-                        ExitKind::Validation,
-                    )
-                })?;
-                quorum = value.parse::<u32>().map_err(|_| {
-                    CliError::new(
-                        "E_VALIDATION_FAILED",
-                        format!("debate run --quorum: '{value}' is not a u32"),
+                        format!("debate run --max-bytes: '{value}' is not a usize"),
                         ExitKind::Validation,
                     )
                 })?;
             }
             "--as-agent" => {
-                originator = iter
-                    .next()
-                    .ok_or_else(|| {
-                        CliError::new(
-                            "E_VALIDATION_FAILED",
-                            "debate run --as-agent requires a value",
-                            ExitKind::Validation,
-                        )
-                    })?
-                    .to_owned();
+                originator = arg_value(&mut iter, "debate run --as-agent")?;
             }
             other if !other.starts_with("--") && plan.is_none() => {
                 plan = Some(other.to_owned());
@@ -2502,52 +2408,115 @@ fn debate_run(args: &[String], invocation: &Invocation) -> Result<(), CliError> 
         })?
     };
 
-    // The driver-side CLI talks to the *real* per-user daemon over the SDK so
-    // that workers in other terminals see the same broker state. The
-    // in-process orchestrator at `crate::debate::DebateOrchestrator` stays
-    // available for unit tests and embedders.
-    let options = crate::debate::DebateOptions::new(originator, plan)
-        .with_timeout(Duration::from_secs(timeout_secs))
-        .with_quorum(quorum.max(1));
-    let options = if let Some(r) = repo {
-        options.with_repo(r)
-    } else {
-        options
-    };
+    if platforms.is_empty() {
+        platforms = crate::debate::Platform::all().to_vec();
+    }
 
-    let outcome = crate::debate::cli_runner::run_debate_via_daemon(options).map_err(|err| {
+    let mut options = crate::debate::DebateRunOptions::new(plan)
+        .with_originator(originator)
+        .with_platforms(platforms)
+        .with_per_platform_timeout(Duration::from_secs(timeout_secs))
+        .with_max_output_bytes(max_bytes);
+    if let Some(r) = repo {
+        options = options.with_repo(r);
+    }
+
+    let outcome = crate::debate::run_debate(options).map_err(|err| {
         CliError::new(
             error_code_to_static(err.code()),
             err.message(),
-            ExitKind::DaemonUnreachable,
+            ExitKind::Validation,
         )
     })?;
 
     match invocation.output {
         OutputFormat::Human => {
             println!("debate_id: {}", outcome.debate_id);
-            println!("participants: {}", outcome.consensus.participants.len());
+            println!(
+                "platforms: {}/{} succeeded",
+                outcome.success_count(),
+                outcome.results.len(),
+            );
+            if let Some(path) = &outcome.audit_path {
+                println!("audit: {}", path.display());
+            }
             println!("---");
-            println!("{}", outcome.consensus.consensus);
+            print!("{}", outcome.human_consensus());
         }
         OutputFormat::Json | OutputFormat::Ndjson => {
-            let critiques: Vec<serde_json::Value> = outcome
-                .critiques
+            let results: Vec<serde_json::Value> = outcome
+                .results
                 .iter()
-                .map(crate::debate::CritiqueEnvelope::to_json)
+                .map(|r| {
+                    serde_json::json!({
+                        "platform": r.platform.name(),
+                        "status": r.status.as_str(),
+                        "content": r.content,
+                        "stderr_excerpt": r.stderr_excerpt,
+                        "duration_ms": r.duration_ms,
+                        "exit_code": r.exit_code,
+                        "truncated": r.truncated,
+                        "bytes_read": r.bytes_read,
+                    })
+                })
                 .collect();
             println!(
                 "{}",
                 serde_json::json!({
                     "schema_version": crate::debate::DEBATE_SCHEMA_VERSION,
                     "debate_id": outcome.debate_id,
-                    "consensus": outcome.consensus.to_json(),
-                    "critiques": critiques,
+                    "originator": outcome.originator,
+                    "plan": outcome.plan,
+                    "repo": outcome.repo,
+                    "started_unix_ms": outcome.started_unix_ms,
+                    "finished_unix_ms": outcome.finished_unix_ms,
+                    "audit_path": outcome.audit_path.as_ref().map(|p| p.display().to_string()),
+                    "results": results,
                 })
             );
         }
     }
     Ok(())
+}
+
+fn debate_replay(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
+    let id = match args {
+        [id] if !id.starts_with("--") => id.clone(),
+        [flag] if is_help(flag) => {
+            return print_help("debate replay", DEBATE_HELP, invocation.output);
+        }
+        _ => {
+            return Err(CliError::new(
+                "E_VALIDATION_FAILED",
+                "debate replay requires a single <DEBATE_ID> argument",
+                ExitKind::Validation,
+            ));
+        }
+    };
+    let records = crate::debate::read_audit(&id).map_err(|err| {
+        CliError::new(
+            "E_NOT_FOUND",
+            format!("audit log for debate '{id}' not found: {err}"),
+            ExitKind::NotFound,
+        )
+    })?;
+    for record in records {
+        println!("{record}");
+    }
+    Ok(())
+}
+
+fn arg_value<'a>(
+    iter: &mut std::slice::Iter<'a, String>,
+    label: &'static str,
+) -> Result<String, CliError> {
+    iter.next()
+        .map(|s| s.to_owned())
+        .ok_or_else(|| CliError::new(
+            "E_VALIDATION_FAILED",
+            format!("{label} requires a value"),
+            ExitKind::Validation,
+        ))
 }
 
 /// Map a runtime-known error code (a borrowed &str) to a static lifetime so
@@ -2557,8 +2526,7 @@ fn debate_run(args: &[String], invocation: &Invocation) -> Result<(), CliError> 
 fn error_code_to_static(code: &str) -> &'static str {
     match code {
         "E_DEBATE_INVALID_PLAN" => "E_DEBATE_INVALID_PLAN",
-        "E_DEBATE_BROKER_FAILURE" => "E_DEBATE_BROKER_FAILURE",
-        "E_DEBATE_PUBLISH_FAILURE" => "E_DEBATE_PUBLISH_FAILURE",
+        "E_DEBATE_AUDIT_FAILED" => "E_DEBATE_AUDIT_FAILED",
         _ => "E_DEBATE_UNKNOWN",
     }
 }

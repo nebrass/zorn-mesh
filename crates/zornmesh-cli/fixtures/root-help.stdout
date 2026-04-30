@@ -1,4 +1,4 @@
-zornmesh 0.2.1
+zornmesh 0.3.0
 Local-first agent mesh coordination.
 
 Usage: zornmesh [OPTIONS] <COMMAND>
@@ -21,6 +21,7 @@ Commands:
   airmf     Map evidence records to NIST AI RMF functions and categories
   ui        Launch the protected loopback local UI session
   service   Manage the per-user daemon as a launchd or systemd service
+  debate    Multi-agent debate over a coding plan across local CLIs
   completion  Generate shell completions
   help     Print command help
 

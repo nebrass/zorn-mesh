@@ -1,337 +1,287 @@
-//! Contract tests for the v0.2 debate substrate.
+//! v0.3 contract tests for the parallel-spawn debate engine.
 //!
-//! Covers:
-//! - subject taxonomy is stable (golden strings the v0.3+ code MUST not change)
-//! - envelope encode/decode round-trips
-//! - orchestrator end-to-end with a synthetic worker thread that publishes a
-//!   critique envelope (no platform CLI needed)
-//! - quorum + timeout boundary behavior
-//! - dissent-point preservation in the synthesized consensus
+//! Strategy: write fake CLI shell scripts named `claude`, `copilot`,
+//! `gemini`, `opencode` into a tempdir and pass the dir as
+//! `program_dir_override` (no PATH mutation; the workspace forbids
+//! `unsafe`). Audit log goes to a tempdir via `audit_dir_override`.
+//! All tests are env-clean and parallel-safe.
 
-use std::{
-    sync::mpsc::channel,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{fs, path::PathBuf, time::Duration};
 
-use zornmesh_cli::broker::{Broker, DeliveryAttempt, PeerCredentials, SocketTrustPolicy};
-use zornmesh_cli::core::Envelope;
 use zornmesh_cli::debate::{
-    ConsensusEnvelope, CritiqueEnvelope, DEBATE_SCHEMA_VERSION, DebateOptions, DebateOrchestrator,
-    DissentRecord, EnvelopeDecodeError, PlanEnvelope, WORKER_PLAN_SUBSCRIPTION, subject_consensus,
-    subject_critique, subject_critique_pattern, subject_plan,
+    DEBATE_SCHEMA_VERSION, DebateRunOptions, Platform, Status, run_debate,
 };
 
-/// Pinned by golden taxonomy contract: any change to these strings is a
-/// wire-format break, must bump v0.3 schema_version.
 #[test]
-fn subject_taxonomy_is_pinned() {
-    assert_eq!(subject_plan("X"), "debate.X.plan");
-    assert_eq!(subject_critique("X", "claude"), "debate.X.critique.claude");
-    assert_eq!(subject_critique_pattern("X"), "debate.X.critique.>");
-    assert_eq!(subject_consensus("X"), "debate.X.consensus");
-    assert_eq!(WORKER_PLAN_SUBSCRIPTION, "debate.*.plan");
-    assert_eq!(DEBATE_SCHEMA_VERSION, "zornmesh.debate.v1");
+fn run_debate_aggregates_per_platform_results() {
+    let env = TestEnv::new("aggregates");
+    env.write_fake("claude", r#"#!/usr/bin/env bash
+read -r -d '' input || true
+printf '%s' "claude critique: looks plausible"
+"#);
+    env.write_fake("copilot", r#"#!/usr/bin/env bash
+read -r -d '' input || true
+printf '%s' "copilot critique: missing tests"
+"#);
+    env.write_fake("gemini", r#"#!/usr/bin/env bash
+read -r -d '' input || true
+printf '%s' "gemini critique: race condition risk"
+"#);
+    env.write_fake("opencode", r#"#!/usr/bin/env bash
+read -r -d '' input || true
+printf '%s' "opencode critique: shipping ready"
+"#);
+
+    let outcome = run_debate(env.options("Refactor the payment module"))
+        .expect("debate runs");
+
+    assert_eq!(outcome.results.len(), 4);
+    assert_eq!(outcome.success_count(), 4);
+    let names: Vec<_> = outcome.results.iter().map(|r| r.platform.name()).collect();
+    assert!(names.contains(&"claude"));
+    assert!(names.contains(&"copilot"));
+    assert!(names.contains(&"gemini"));
+    assert!(names.contains(&"opencode"));
+    for r in &outcome.results {
+        assert_eq!(r.status, Status::Success, "{} should succeed", r.platform.name());
+        assert!(r.content.contains("critique"));
+        assert_eq!(r.exit_code, Some(0));
+    }
+    assert_eq!(outcome.schema_version, DEBATE_SCHEMA_VERSION);
+
+    let audit_path = outcome.audit_path.as_ref().expect("audit path");
+    let audit = fs::read_to_string(audit_path).expect("read audit");
+    let lines: Vec<_> = audit.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 6, "audit should have 6 records, got: {audit}");
+    assert!(lines[0].contains("\"kind\":\"debate_started\""));
+    assert!(lines[5].contains("\"kind\":\"debate_finished\""));
 }
 
 #[test]
-fn plan_envelope_round_trips() {
-    let plan = PlanEnvelope {
-        schema_version: DEBATE_SCHEMA_VERSION.to_owned(),
-        debate_id: "deb-1".to_owned(),
-        originator: "agent.driver.cli".to_owned(),
-        plan: "implement payment retry logic".to_owned(),
-        repo: Some("/tmp/repo".to_owned()),
-        deadline_unix_ms: 1_700_000_000_000,
-        max_tokens: Some(8192),
-    };
-    let bytes = plan.to_bytes();
-    let decoded = PlanEnvelope::from_bytes(&bytes).expect("decodes");
-    assert_eq!(plan, decoded);
+fn missing_cli_reported_as_status_not_error() {
+    let env = TestEnv::new("missing-cli");
+    env.write_fake("claude", "#!/usr/bin/env bash\nprintf 'claude says ok'\n");
+
+    let outcome = run_debate(env.options("test plan")).expect("debate runs");
+
+    let claude = outcome
+        .results
+        .iter()
+        .find(|r| r.platform == Platform::Claude)
+        .unwrap();
+    assert_eq!(claude.status, Status::Success);
+
+    let missing: Vec<_> = outcome
+        .results
+        .iter()
+        .filter(|r| r.status == Status::CliMissing)
+        .collect();
+    assert_eq!(missing.len(), 3);
+    assert_eq!(outcome.missing_count(), 3);
+    for r in &missing {
+        assert!(
+            r.stderr_excerpt.contains("not found on PATH"),
+            "stderr_excerpt should mention PATH, got: {}",
+            r.stderr_excerpt
+        );
+    }
 }
 
 #[test]
-fn critique_envelope_round_trips_with_dissent_points() {
-    let critique = CritiqueEnvelope {
-        schema_version: DEBATE_SCHEMA_VERSION.to_owned(),
-        debate_id: "deb-1".to_owned(),
-        agent: "agent.worker.gemini".to_owned(),
-        critique: "Plan ignores idempotency.".to_owned(),
-        agreement_score: 70,
-        dissent_points: vec![
-            "missing_idempotency_key".to_owned(),
-            "no_retry_budget".to_owned(),
-        ],
-        cost_tokens: Some(420),
-    };
-    let bytes = critique.to_bytes();
-    let decoded = CritiqueEnvelope::from_bytes(&bytes).expect("decodes");
-    assert_eq!(critique, decoded);
-}
+fn slow_cli_is_killed_after_timeout() {
+    let env = TestEnv::new("slow-cli");
+    env.write_fake("claude", "#!/usr/bin/env bash\nsleep 10\nprintf 'should never appear'\n");
+    for name in ["copilot", "gemini", "opencode"] {
+        env.write_fake(name, "#!/usr/bin/env bash\nprintf 'ok'\n");
+    }
 
-#[test]
-fn critique_envelope_rejects_non_critique_kind() {
-    let plan = PlanEnvelope {
-        schema_version: DEBATE_SCHEMA_VERSION.to_owned(),
-        debate_id: "deb-1".to_owned(),
-        originator: "x".to_owned(),
-        plan: "p".to_owned(),
-        repo: None,
-        deadline_unix_ms: 0,
-        max_tokens: None,
-    };
-    let bytes = plan.to_bytes();
-    let result = CritiqueEnvelope::from_bytes(&bytes);
-    let err: EnvelopeDecodeError = result.unwrap_err();
-    assert!(err.message.contains("not 'critique'"), "got: {}", err.message);
-}
-
-#[test]
-fn orchestrator_aggregates_critiques_into_consensus() {
-    let broker = Broker::new();
-    let credentials = PeerCredentials::new(0, 0, std::process::id());
-    let trust_policy = SocketTrustPolicy::new(0, 0, 0o600);
-
-    // Spawn a "worker thread" that subscribes to plan subjects and replies.
-    let synthetic_worker = spawn_synthetic_worker(broker.clone(), "agent.worker.synthetic");
-
-    let orchestrator = DebateOrchestrator::new(&broker, credentials, trust_policy);
-    let outcome = orchestrator
-        .run(
-            DebateOptions::new("agent.driver.test", "Refactor the payment module")
-                .with_timeout(Duration::from_secs(2))
-                .with_quorum(1),
-        )
-        .expect("debate succeeds");
-
-    assert_eq!(outcome.critiques.len(), 1);
-    assert_eq!(outcome.critiques[0].agent, "agent.worker.synthetic");
-    assert!(outcome
-        .consensus
-        .consensus
-        .contains("Refactor the payment module"));
-    assert!(outcome
-        .consensus
-        .consensus
-        .contains("agent.worker.synthetic"));
-
-    // Make sure the synthetic worker thread is shut down.
-    synthetic_worker.shutdown();
-}
-
-#[test]
-fn orchestrator_returns_empty_consensus_on_timeout() {
-    let broker = Broker::new();
-    let credentials = PeerCredentials::new(0, 0, std::process::id());
-    let trust_policy = SocketTrustPolicy::new(0, 0, 0o600);
-    let orchestrator = DebateOrchestrator::new(&broker, credentials, trust_policy);
-
-    let started = Instant::now();
-    let outcome = orchestrator
-        .run(
-            DebateOptions::new("agent.driver.test", "no-workers plan")
-                .with_timeout(Duration::from_millis(200))
-                .with_quorum(1),
-        )
-        .expect("debate must not error on timeout, just return empty");
+    // Use 5s timeout (vs the slow CLI's 10s sleep) — gives plenty of
+    // headroom for the fast scripts under parallel-test load while still
+    // reliably killing the slow one.
+    let started = std::time::Instant::now();
+    let outcome = run_debate(
+        env.options("test plan")
+            .with_per_platform_timeout(Duration::from_secs(5)),
+    )
+    .expect("debate completes");
     let elapsed = started.elapsed();
 
     assert!(
-        elapsed >= Duration::from_millis(150),
-        "should have waited for the timeout, elapsed={elapsed:?}"
+        elapsed < Duration::from_secs(9),
+        "debate should not have run the full 10s sleep: elapsed={elapsed:?}"
     );
-    assert!(
-        elapsed < Duration::from_millis(800),
-        "should not exceed the timeout meaningfully, elapsed={elapsed:?}"
-    );
-    assert!(outcome.critiques.is_empty());
-    assert!(outcome.consensus.consensus.contains("no critiques received"));
-}
 
-#[test]
-fn dissent_records_are_preserved_in_consensus() {
-    let broker = Broker::new();
-    let credentials = PeerCredentials::new(0, 0, std::process::id());
-    let trust_policy = SocketTrustPolicy::new(0, 0, 0o600);
+    let claude = outcome
+        .results
+        .iter()
+        .find(|r| r.platform == Platform::Claude)
+        .unwrap();
+    assert_eq!(claude.status, Status::Timeout);
 
-    let dissenting_worker = spawn_dissenting_worker(broker.clone(), "agent.worker.dissent");
-
-    let orchestrator = DebateOrchestrator::new(&broker, credentials, trust_policy);
-    let outcome = orchestrator
-        .run(
-            DebateOptions::new("agent.driver.test", "broken plan with security holes")
-                .with_timeout(Duration::from_secs(2))
-                .with_quorum(1),
-        )
-        .expect("debate succeeds");
-
-    assert_eq!(outcome.consensus.dissent.len(), 1);
-    let dissent: &DissentRecord = &outcome.consensus.dissent[0];
-    assert_eq!(dissent.agent, "agent.worker.dissent");
-    assert_eq!(dissent.points, vec!["sql_injection_risk".to_owned()]);
-    assert!(outcome.consensus.consensus.contains("DISSENT POINTS"));
-    assert!(outcome.consensus.consensus.contains("sql_injection_risk"));
-
-    dissenting_worker.shutdown();
-}
-
-#[test]
-fn orchestrator_rejects_empty_plan() {
-    let broker = Broker::new();
-    let credentials = PeerCredentials::new(0, 0, std::process::id());
-    let trust_policy = SocketTrustPolicy::new(0, 0, 0o600);
-    let orchestrator = DebateOrchestrator::new(&broker, credentials, trust_policy);
-    let result = orchestrator.run(DebateOptions::new("a", "   "));
-    assert!(matches!(
-        result.as_ref().unwrap_err().code(),
-        "E_DEBATE_INVALID_PLAN"
-    ));
-}
-
-#[test]
-fn consensus_envelope_serialization_is_stable() {
-    let consensus = ConsensusEnvelope {
-        schema_version: DEBATE_SCHEMA_VERSION.to_owned(),
-        debate_id: "deb-1".to_owned(),
-        consensus: "synthesized text".to_owned(),
-        dissent: vec![DissentRecord {
-            agent: "agent.worker.gemini".to_owned(),
-            points: vec!["concurrency_risk".to_owned()],
-        }],
-        participants: vec!["agent.worker.gemini".to_owned()],
-        timed_out: vec!["agent.worker.copilot".to_owned()],
-        total_cost_tokens: 1024,
-        round: 1,
-    };
-    let bytes = consensus.to_bytes();
-    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v["kind"], "consensus");
-    assert_eq!(v["schema_version"], DEBATE_SCHEMA_VERSION);
-    assert_eq!(v["debate_id"], "deb-1");
-    assert_eq!(v["dissent"][0]["agent"], "agent.worker.gemini");
-    assert_eq!(v["timed_out"][0], "agent.worker.copilot");
-}
-
-// ---- synthetic worker helpers (no platform CLI needed) ----
-
-struct SyntheticWorker {
-    handle: Option<thread::JoinHandle<()>>,
-    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl SyntheticWorker {
-    fn shutdown(mut self) {
-        self.stop_flag
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            // Best-effort: the thread will exit on its next recv_timeout tick.
-            let _ = h.join();
-        }
+    for name in ["copilot", "gemini", "opencode"] {
+        let r = outcome
+            .results
+            .iter()
+            .find(|r| r.platform.name() == name)
+            .unwrap();
+        assert_eq!(r.status, Status::Success, "{name} should succeed");
     }
 }
 
-fn spawn_synthetic_worker(broker: Broker, agent_id: &str) -> SyntheticWorker {
-    let agent_id = agent_id.to_owned();
-    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop_flag_clone = std::sync::Arc::clone(&stop_flag);
-    let (subscribed_tx, subscribed_rx) = std::sync::mpsc::sync_channel::<()>(0);
-    let handle = thread::spawn(move || {
-        let (tx, rx) = channel::<DeliveryAttempt>();
-        let _sub = broker
-            .subscribe(WORKER_PLAN_SUBSCRIPTION, tx)
-            .expect("worker subscribes");
-        // Signal the parent that the subscription is registered before any
-        // race with the orchestrator's publish.
-        let _ = subscribed_tx.send(());
-        loop {
-            if stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(delivery) => {
-                    let plan = PlanEnvelope::from_bytes(delivery.envelope().payload())
-                        .expect("plan decodes");
-                    if plan.originator == agent_id {
-                        continue;
-                    }
-                    let critique = CritiqueEnvelope {
-                        schema_version: DEBATE_SCHEMA_VERSION.to_owned(),
-                        debate_id: plan.debate_id.clone(),
-                        agent: agent_id.clone(),
-                        critique: format!("synthetic critique of: {}", plan.plan),
-                        agreement_score: 80,
-                        dissent_points: vec![],
-                        cost_tokens: Some(123),
-                    };
-                    let env = Envelope::new(
-                        agent_id.clone(),
-                        subject_critique(&plan.debate_id, "synthetic"),
-                        critique.to_bytes(),
-                    )
-                    .expect("envelope");
-                    let _ = broker.publish(env);
-                }
-                Err(_) => continue,
-            }
-        }
-    });
-    subscribed_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("synthetic worker subscribed in time");
-    SyntheticWorker {
-        handle: Some(handle),
-        stop_flag,
+#[test]
+fn nonzero_exit_is_reported_with_stderr() {
+    let env = TestEnv::new("nonzero-exit");
+    env.write_fake("claude", "#!/usr/bin/env bash\nprintf 'rate limit hit' >&2\nexit 7\n");
+    for name in ["copilot", "gemini", "opencode"] {
+        env.write_fake(name, "#!/usr/bin/env bash\nprintf 'ok'\n");
     }
+
+    let outcome = run_debate(env.options("test plan")).expect("debate runs");
+
+    let claude = outcome
+        .results
+        .iter()
+        .find(|r| r.platform == Platform::Claude)
+        .unwrap();
+    assert_eq!(claude.status, Status::NonZeroExit);
+    assert_eq!(claude.exit_code, Some(7));
+    assert!(claude.stderr_excerpt.contains("rate limit hit"));
 }
 
-fn spawn_dissenting_worker(broker: Broker, agent_id: &str) -> SyntheticWorker {
-    let agent_id = agent_id.to_owned();
-    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop_flag_clone = std::sync::Arc::clone(&stop_flag);
-    let (subscribed_tx, subscribed_rx) = std::sync::mpsc::sync_channel::<()>(0);
-    let handle = thread::spawn(move || {
-        let (tx, rx) = channel::<DeliveryAttempt>();
-        let _sub = broker
-            .subscribe(WORKER_PLAN_SUBSCRIPTION, tx)
-            .expect("worker subscribes");
-        let _ = subscribed_tx.send(());
-        loop {
-            if stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(delivery) => {
-                    let plan = PlanEnvelope::from_bytes(delivery.envelope().payload())
-                        .expect("plan decodes");
-                    if plan.originator == agent_id {
-                        continue;
-                    }
-                    let critique = CritiqueEnvelope {
-                        schema_version: DEBATE_SCHEMA_VERSION.to_owned(),
-                        debate_id: plan.debate_id.clone(),
-                        agent: agent_id.clone(),
-                        critique: format!("dissenting critique of: {}", plan.plan),
-                        agreement_score: 20,
-                        dissent_points: vec!["sql_injection_risk".to_owned()],
-                        cost_tokens: Some(99),
-                    };
-                    let env = Envelope::new(
-                        agent_id.clone(),
-                        subject_critique(&plan.debate_id, "dissent"),
-                        critique.to_bytes(),
-                    )
-                    .expect("envelope");
-                    let _ = broker.publish(env);
-                }
-                Err(_) => continue,
-            }
-        }
-    });
-    subscribed_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("dissenting worker subscribed in time");
-    SyntheticWorker {
-        handle: Some(handle),
-        stop_flag,
+#[test]
+fn empty_response_is_distinct_from_success() {
+    let env = TestEnv::new("empty-response");
+    env.write_fake("claude", "#!/usr/bin/env bash\n# exit 0 with no output\n");
+    for name in ["copilot", "gemini", "opencode"] {
+        env.write_fake(name, "#!/usr/bin/env bash\nprintf 'real critique'\n");
+    }
+
+    let outcome = run_debate(env.options("test plan")).expect("debate runs");
+
+    let claude = outcome
+        .results
+        .iter()
+        .find(|r| r.platform == Platform::Claude)
+        .unwrap();
+    assert_eq!(claude.status, Status::EmptyResponse);
+    assert_eq!(claude.exit_code, Some(0));
+}
+
+#[test]
+fn very_large_output_is_truncated() {
+    let env = TestEnv::new("truncate");
+    env.write_fake(
+        "claude",
+        "#!/usr/bin/env bash\nprintf 'x%.0s' {1..10000}\n",
+    );
+    for name in ["copilot", "gemini", "opencode"] {
+        env.write_fake(name, "#!/usr/bin/env bash\nprintf 'ok'\n");
+    }
+
+    let outcome = run_debate(
+        env.options("test plan")
+            .with_max_output_bytes(1024),
+    )
+    .expect("debate runs");
+
+    let claude = outcome
+        .results
+        .iter()
+        .find(|r| r.platform == Platform::Claude)
+        .unwrap();
+    assert_eq!(claude.status, Status::Success);
+    assert!(claude.truncated, "should be marked truncated");
+    assert!(claude.bytes_read >= 10_000, "bytes_read should reflect total");
+    assert!(claude.content.contains("[truncated"));
+}
+
+#[test]
+fn empty_plan_is_rejected_before_any_subprocess() {
+    let result = run_debate(DebateRunOptions::new("   "));
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), "E_DEBATE_INVALID_PLAN");
+}
+
+#[test]
+fn platform_subset_invokes_only_requested() {
+    let env = TestEnv::new("subset");
+    env.write_fake("claude", "#!/usr/bin/env bash\nprintf 'ok'\n");
+    env.write_fake("gemini", "#!/usr/bin/env bash\nprintf 'ok'\n");
+
+    let outcome = run_debate(
+        env.options("subset plan")
+            .with_platforms(vec![Platform::Claude, Platform::Gemini]),
+    )
+    .expect("debate runs");
+
+    assert_eq!(outcome.results.len(), 2);
+    let names: Vec<_> = outcome.results.iter().map(|r| r.platform.name()).collect();
+    assert!(names.contains(&"claude"));
+    assert!(names.contains(&"gemini"));
+    assert!(!names.contains(&"copilot"));
+    assert!(!names.contains(&"opencode"));
+}
+
+#[test]
+fn audit_records_replay_via_read_audit_in() {
+    let env = TestEnv::new("replay");
+    for name in ["claude", "copilot", "gemini", "opencode"] {
+        env.write_fake(name, "#!/usr/bin/env bash\nprintf 'critique'\n");
+    }
+
+    let outcome = run_debate(env.options("replay plan")).expect("debate runs");
+
+    let records =
+        zornmesh_cli::debate::read_audit_in(&outcome.debate_id, env.state_dir())
+            .expect("read audit");
+    assert!(records.len() >= 6);
+    assert_eq!(records[0]["kind"], "debate_started");
+    assert_eq!(records[0]["debate_id"], outcome.debate_id);
+    assert_eq!(
+        records.last().expect("last record")["kind"],
+        "debate_finished"
+    );
+}
+
+// ---- TestEnv ----
+
+struct TestEnv {
+    bin_dir: PathBuf,
+    state_dir: PathBuf,
+}
+
+impl TestEnv {
+    fn new(label: &str) -> Self {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("zornmesh-debate-test-{label}-{id}"));
+        let bin_dir = base.join("bin");
+        let state_dir = base.join("state");
+        fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        fs::create_dir_all(&state_dir).expect("mkdir state");
+        Self { bin_dir, state_dir }
+    }
+
+    fn write_fake(&self, name: &str, body: &str) {
+        let path = self.bin_dir.join(name);
+        fs::write(&path, body).expect("write fake CLI");
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+
+    fn options(&self, plan: &str) -> DebateRunOptions {
+        DebateRunOptions::new(plan)
+            .with_audit_dir_override(self.state_dir.clone())
+            .with_program_dir_override(self.bin_dir.clone())
+            .with_per_platform_timeout(Duration::from_secs(10))
+    }
+
+    fn state_dir(&self) -> &std::path::Path {
+        &self.state_dir
     }
 }
