@@ -46,7 +46,7 @@ claude mcp add zornmesh -- zornmesh stdio --as-agent default
 ## Verify
 
 ```bash
-zornmesh --version            # zornmesh 0.1.0
+zornmesh --version            # zornmesh 0.1.2
 zornmesh service status       # installed=false reachable=false …
 zornmesh stdio --help
 ```
@@ -62,7 +62,7 @@ just lint         # cargo fmt --check + cargo clippy -D warnings
 just docs         # cargo doc --workspace --no-deps
 just conformance  # envelope_round_trip + golden_help + daemon_help
 
-cargo run -p zornmesh -- --help          # smoke check; output is fixture-pinned in fixtures/cli/
+cargo run -p zornmesh -- --help          # smoke check; output is fixture-pinned in crates/zornmesh-cli/fixtures/
 ```
 
 Releases are cut by tagging `v*.*.*` and letting `.github/workflows/release.yml` fan out to GitHub Releases, the Homebrew tap, and GHCR. See [`RELEASE.md`](RELEASE.md) for the maintainer checklist.
