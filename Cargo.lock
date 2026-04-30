@@ -150,72 +150,12 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zornmesh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
- "zornmesh-broker",
- "zornmesh-core",
- "zornmesh-daemon",
- "zornmesh-rpc",
- "zornmesh-sdk",
- "zornmesh-store",
-]
-
-[[package]]
-name = "zornmesh-broker"
-version = "0.1.0"
-dependencies = [
- "zornmesh-core",
- "zornmesh-store",
-]
-
-[[package]]
-name = "zornmesh-core"
-version = "0.1.0"
-
-[[package]]
-name = "zornmesh-daemon"
-version = "0.1.0"
-dependencies = [
  "signal-hook",
- "zornmesh-broker",
- "zornmesh-core",
- "zornmesh-proto",
- "zornmesh-rpc",
- "zornmesh-store",
-]
-
-[[package]]
-name = "zornmesh-proto"
-version = "0.1.0"
-dependencies = [
- "zornmesh-core",
-]
-
-[[package]]
-name = "zornmesh-rpc"
-version = "0.1.0"
-dependencies = [
- "zornmesh-proto",
-]
-
-[[package]]
-name = "zornmesh-sdk"
-version = "0.1.0"
-dependencies = [
- "zornmesh-core",
- "zornmesh-daemon",
- "zornmesh-proto",
- "zornmesh-rpc",
-]
-
-[[package]]
-name = "zornmesh-store"
-version = "0.1.0"
-dependencies = [
- "zornmesh-core",
 ]
 
 [[package]]
 name = "zornmesh-xtask"
-version = "0.1.0"
+version = "0.1.1"

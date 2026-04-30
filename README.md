@@ -69,16 +69,17 @@ Releases are cut by tagging `v*.*.*` and letting `.github/workflows/release.yml`
 
 ## Architecture
 
-| Crate | Role |
+`zornmesh` is published as a single crate. Internal modules under `crates/zornmesh-cli/src/` separate concerns at the source level:
+
+| Module | Role |
 |---|---|
-| [`zornmesh-core`](https://crates.io/crates/zornmesh-core) | Shared primitives |
-| [`zornmesh-proto`](https://crates.io/crates/zornmesh-proto) | Wire protocol, envelope round-trip |
-| [`zornmesh-store`](https://crates.io/crates/zornmesh-store) | Persistence, evidence, audit, retention |
-| [`zornmesh-rpc`](https://crates.io/crates/zornmesh-rpc) | Local Unix-socket RPC layer |
-| [`zornmesh-broker`](https://crates.io/crates/zornmesh-broker) | Subject-pattern pub/sub broker |
-| [`zornmesh-daemon`](https://crates.io/crates/zornmesh-daemon) | Per-user daemon owning the socket |
-| [`zornmesh-sdk`](https://crates.io/crates/zornmesh-sdk) | Rust SDK |
-| [`zornmesh`](https://crates.io/crates/zornmesh) | CLI binary, MCP stdio bridge |
+| `core` | Shared primitives — `Envelope`, `ErrorCategory`, `CoordinationOutcome` |
+| `proto` | Wire protocol, envelope round-trip |
+| `store` | Persistence — evidence, audit, retention |
+| `rpc` | Local Unix-socket trust + connect |
+| `broker` | Subject-pattern pub/sub, capability policy, the MCP `StdioBridge` |
+| `daemon` | Per-user daemon owning the socket |
+| `sdk` | Rust SDK surface (`Mesh::connect`/`publish`/`subscribe`); not a separate published crate yet |
 
 A TypeScript SDK lives under [`sdks/typescript`](sdks/typescript) and ships as `@zornmesh/sdk` (Bun-managed); a Bun-bundled React local UI ([`apps/local-ui`](apps/local-ui)) is offline-served by the daemon UI gateway on loopback only.
 
