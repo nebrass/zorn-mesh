@@ -2371,19 +2371,19 @@ fn worker_listen(args: &[String], invocation: &Invocation) -> Result<(), CliErro
         )
     })?;
 
-    let _ = invocation; // unused in v0.2: workers are stateless of CLI invocation context
-    let broker = crate::broker::Broker::new();
-    let daemon = crate::debate::WorkerDaemon::new(&broker, platform)
-        .with_invocation_timeout(Duration::from_millis(invocation_timeout_ms));
-    eprintln!(
-        "zornmesh worker: platform={} agent_id={} subscription={}",
-        platform.name(),
-        daemon.agent_id(),
-        crate::debate::WORKER_PLAN_SUBSCRIPTION
-    );
-    daemon
-        .listen(None)
-        .map_err(|err| CliError::new("E_DAEMON_IO", err, ExitKind::Io))
+    let _ = invocation; // workers don't need the CLI invocation's parsed config
+    crate::debate::cli_runner::run_worker_via_daemon(
+        platform,
+        Duration::from_millis(invocation_timeout_ms),
+        None,
+    )
+    .map_err(|err| {
+        CliError::new(
+            error_code_to_static(err.code()),
+            err.message(),
+            ExitKind::Io,
+        )
+    })
 }
 
 fn run_debate(args: &[String], invocation: &Invocation) -> Result<(), CliError> {
@@ -2502,15 +2502,10 @@ fn debate_run(args: &[String], invocation: &Invocation) -> Result<(), CliError> 
         })?
     };
 
-    // For v0.2 the CLI runs the orchestrator against an in-process broker.
-    // Workers must already be running against this same broker (this means
-    // the v0.2 CLI flow currently exercises the in-process path; real-world
-    // multi-process workers wait on v0.3's daemon-mediated broker access).
-    let broker = crate::broker::Broker::new();
-    let credentials =
-        crate::broker::PeerCredentials::new(0, 0, std::process::id());
-    let trust_policy = crate::broker::SocketTrustPolicy::new(0, 0, 0o600);
-    let orchestrator = crate::debate::DebateOrchestrator::new(&broker, credentials, trust_policy);
+    // The driver-side CLI talks to the *real* per-user daemon over the SDK so
+    // that workers in other terminals see the same broker state. The
+    // in-process orchestrator at `crate::debate::DebateOrchestrator` stays
+    // available for unit tests and embedders.
     let options = crate::debate::DebateOptions::new(originator, plan)
         .with_timeout(Duration::from_secs(timeout_secs))
         .with_quorum(quorum.max(1));
@@ -2520,9 +2515,13 @@ fn debate_run(args: &[String], invocation: &Invocation) -> Result<(), CliError> 
         options
     };
 
-    let outcome = orchestrator
-        .run(options)
-        .map_err(|err| CliError::new(error_code_to_static(err.code()), err.message(), ExitKind::Validation))?;
+    let outcome = crate::debate::cli_runner::run_debate_via_daemon(options).map_err(|err| {
+        CliError::new(
+            error_code_to_static(err.code()),
+            err.message(),
+            ExitKind::DaemonUnreachable,
+        )
+    })?;
 
     match invocation.output {
         OutputFormat::Human => {
