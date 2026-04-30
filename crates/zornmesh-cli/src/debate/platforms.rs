@@ -1,16 +1,11 @@
-//! Platform plugins. Each adapter knows how to take a critique prompt and
-//! invoke the underlying coding agent's headless / non-interactive mode,
-//! then parse the response back to a string.
+//! Per-coding-agent platform adapters.
 //!
-//! v0.2 strategy: spawn the platform's CLI as a subprocess with stdin
-//! carrying the prompt where supported, capture stdout, ignore stderr.
-//! Each platform has its own conventions; the adapter trait abstracts them.
+//! Each adapter only declares (a) the program name to spawn and (b) any
+//! per-platform argv. The actual subprocess handling — spawning, timeout,
+//! bounded stdout, kill — lives in `debate::run`. This split keeps the
+//! adapter trait tiny and makes adding a new platform a one-row change.
 
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -39,26 +34,28 @@ impl Platform {
             Platform::Opencode => "opencode",
         }
     }
-}
 
-/// One invocation of an underlying coding-agent CLI.
-#[derive(Debug, Clone)]
-pub struct PlatformInvocation {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_status: Option<i32>,
+    pub const fn all() -> &'static [Platform] {
+        &[
+            Platform::Claude,
+            Platform::Copilot,
+            Platform::Gemini,
+            Platform::Opencode,
+        ]
+    }
 }
 
 pub trait PlatformAdapter: Send + Sync {
     fn platform(&self) -> Platform;
-    /// Invoke the underlying agent CLI with the prompt. Implementors should
-    /// honor `cwd` (repo path) and `timeout` strictly to bound runaway calls.
-    fn invoke(
-        &self,
-        prompt: &str,
-        cwd: Option<&str>,
-        timeout: Duration,
-    ) -> std::io::Result<PlatformInvocation>;
+    /// Binary name on PATH. v0.3 uses simple names (`claude`, `copilot`,
+    /// etc.) and resolves them via the `which`-style probe in `debate::run`
+    /// before spawning, so MCP hosts launched from a Dock-stripped PATH get
+    /// a clear `Status::CliMissing` rather than a mysterious spawn failure.
+    fn program(&self) -> &'static str;
+    /// Arguments passed to the CLI in non-interactive mode. Each platform
+    /// has its own conventions — these were taken from the v0.2 worker
+    /// adapters and confirmed against current CLI versions.
+    fn args(&self) -> &'static [&'static str];
 }
 
 pub fn adapter_for(platform: Platform) -> Box<dyn PlatformAdapter> {
@@ -70,123 +67,71 @@ pub fn adapter_for(platform: Platform) -> Box<dyn PlatformAdapter> {
     }
 }
 
-// ----- helpers -----
-
-fn run_with_stdin(
-    program: &str,
-    args: &[&str],
-    cwd: Option<&str>,
-    stdin_text: &str,
-    _timeout: Duration,
-) -> std::io::Result<PlatformInvocation> {
-    // Note: timeout is intentionally unused in v0.2; std::process doesn't have
-    // a built-in wait-with-timeout. Workers wrap each call in a thread + recv
-    // loop with a timeout (see worker.rs); the orchestrator's own deadline
-    // additionally bounds end-to-end latency. Adding wait4-with-timeout via
-    // libc is a v0.3 hardening item.
-    let mut command = Command::new(program);
-    command.args(args);
+/// Build a `Command` from an adapter, configured with cwd if provided.
+/// Stdio piping and the process-group split happen in `debate::run`.
+pub fn default_command(adapter: &dyn PlatformAdapter, cwd: Option<&str>) -> Command {
+    let mut cmd = Command::new(adapter.program());
+    cmd.args(adapter.args());
     if let Some(dir) = cwd {
-        command.current_dir(dir);
+        cmd.current_dir(dir);
     }
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(stdin_text.as_bytes());
-        // Drop the handle to signal EOF.
-    }
-    let output = child.wait_with_output()?;
-    Ok(PlatformInvocation {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_status: output.status.code(),
-    })
+    cmd
 }
 
-// ----- per-platform adapters -----
-
 pub struct ClaudeAdapter;
-
 impl PlatformAdapter for ClaudeAdapter {
     fn platform(&self) -> Platform {
         Platform::Claude
     }
-    fn invoke(
-        &self,
-        prompt: &str,
-        cwd: Option<&str>,
-        timeout: Duration,
-    ) -> std::io::Result<PlatformInvocation> {
+    fn program(&self) -> &'static str {
+        "claude"
+    }
+    fn args(&self) -> &'static [&'static str] {
         // `claude --print` reads the prompt from stdin and emits the model's
-        // text response to stdout. `--output-format text` keeps the response
+        // text response to stdout; `--output-format text` keeps the response
         // free of tool-call framing.
-        run_with_stdin(
-            "claude",
-            &["--print", "--output-format", "text"],
-            cwd,
-            prompt,
-            timeout,
-        )
+        &["--print", "--output-format", "text"]
     }
 }
 
 pub struct CopilotAdapter;
-
 impl PlatformAdapter for CopilotAdapter {
     fn platform(&self) -> Platform {
         Platform::Copilot
     }
-    fn invoke(
-        &self,
-        prompt: &str,
-        cwd: Option<&str>,
-        timeout: Duration,
-    ) -> std::io::Result<PlatformInvocation> {
-        // GitHub Copilot CLI's headless invocation uses `copilot -p` with the
-        // prompt piped over stdin since v1.0.30. The CLI insists on running
-        // inside a git repo, which is satisfied by setting cwd to the repo
-        // path the orchestrator passed in.
-        run_with_stdin("copilot", &["-p"], cwd, prompt, timeout)
+    fn program(&self) -> &'static str {
+        "copilot"
+    }
+    fn args(&self) -> &'static [&'static str] {
+        // `copilot -p` reads the prompt from stdin in non-interactive mode.
+        // The CLI requires a git repo as cwd; the orchestrator passes one
+        // when the caller specified `--repo`.
+        &["-p"]
     }
 }
 
 pub struct GeminiAdapter;
-
 impl PlatformAdapter for GeminiAdapter {
     fn platform(&self) -> Platform {
         Platform::Gemini
     }
-    fn invoke(
-        &self,
-        prompt: &str,
-        cwd: Option<&str>,
-        timeout: Duration,
-    ) -> std::io::Result<PlatformInvocation> {
-        // `gemini --print` reads the prompt from stdin in non-interactive mode
-        // and writes the model output to stdout. `--no-color` keeps the
-        // output free of ANSI escapes.
-        run_with_stdin("gemini", &["--print"], cwd, prompt, timeout)
+    fn program(&self) -> &'static str {
+        "gemini"
+    }
+    fn args(&self) -> &'static [&'static str] {
+        &["--print"]
     }
 }
 
 pub struct OpencodeAdapter;
-
 impl PlatformAdapter for OpencodeAdapter {
     fn platform(&self) -> Platform {
         Platform::Opencode
     }
-    fn invoke(
-        &self,
-        prompt: &str,
-        cwd: Option<&str>,
-        timeout: Duration,
-    ) -> std::io::Result<PlatformInvocation> {
-        // OpenCode's `opencode run` accepts the prompt via stdin and emits
-        // text output. Sticking to text mode keeps the worker's parsing
-        // trivial; structured output (JSON) can be a v0.3 addition.
-        run_with_stdin("opencode", &["run"], cwd, prompt, timeout)
+    fn program(&self) -> &'static str {
+        "opencode"
+    }
+    fn args(&self) -> &'static [&'static str] {
+        &["run"]
     }
 }

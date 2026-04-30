@@ -4,9 +4,9 @@
 [![GitHub Release](https://img.shields.io/github/v/release/nebrass/zorn-mesh)](https://github.com/nebrass/zorn-mesh/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-`zornmesh` is a **local-first message bus between coding agents**, with a Model Context Protocol (MCP) stdio bridge so any MCP-compatible host (Claude Code, OpenCode, Copilot CLI, Gemini CLI, Cursor, Windsurf, VS Code) joins as a first-class participant. A per-user Rust daemon owns a private Unix-domain socket. No SaaS, no network listeners — every byte stays on loopback. macOS and Linux only.
+`zornmesh` is a **multi-agent debate tool for local coding agents**. One CLI command (or one MCP tool call) parallel-spawns each installed coding-agent CLI — Claude Code, GitHub Copilot CLI, Gemini CLI, OpenCode — in non-interactive mode, asks each to critique a plan, and returns the aggregated responses. Every byte stays on the local machine; no SaaS, no network listeners, macOS and Linux only.
 
-The v0.2 release ships the **multi-agent debate substrate**: one driver (a coding agent acting on a user's prompt) broadcasts a plan; worker daemons running for each registered coding-agent CLI invoke their underlying tool in non-interactive mode and respond with critiques; the orchestrator synthesizes a consensus that explicitly preserves dissent. See "Multi-agent debate" below.
+v0.3 deliberately ships **without** a daemon, broker, persistent workers, or pub/sub of any kind. The substrate from v0.1/v0.2 was over-engineered for the actual use case (everything runs on one laptop in one second-scale interaction). A debate is now one tool call: spawn N subprocesses in parallel, capture stdout with per-platform timeouts and bounded memory, append a JSONL audit record, return.
 
 ## Install
 
@@ -99,51 +99,51 @@ const delivery = await subscription.recvDelivery(500);
 
 ## Multi-agent debate
 
-The v0.2 use case: a coding agent (the *driver*) announces what it intends to do; the other coding agents on the mesh (*workers*) critique the plan; the driver synthesizes the response and proceeds with an improved plan.
-
-### Run a worker daemon per coding-agent CLI
-
-One persistent process per platform — these subscribe to `debate.*.plan` and shell out to the underlying CLI in non-interactive mode when a plan arrives. Run each in its own `tmux` window or as a `launchd` / `systemd` user unit:
+One CLI command runs the full debate. No background processes, no daemons, no service install — just `brew install` + the MCP config you already added per host.
 
 ```bash
-zornmesh worker --platform claude     # spawns `claude --print` on each plan
-zornmesh worker --platform copilot    # spawns `copilot -p`
-zornmesh worker --platform gemini     # spawns `gemini --print`
-zornmesh worker --platform opencode   # spawns `opencode run`
+zornmesh debate run "Refactor payment.rs to add idempotency keys" --repo $(pwd)
 ```
 
-Each worker registers as `agent.worker.<platform>` in the mesh, so the audit trail attributes every critique back to its source.
+zornmesh parallel-spawns `claude --print`, `copilot -p`, `gemini --print`, and `opencode run` (all four by default; restrict with `--platforms claude,gemini`), pipes the same critique prompt into each, captures stdout with per-platform timeout and a 256 KiB memory cap, then prints an aggregated consensus to stdout. A JSONL audit record of every spawn lands in `$XDG_STATE_HOME/zornmesh/debates/<id>.jsonl` (or `~/.local/state/zornmesh/debates/<id>.jsonl`).
 
-### Start a debate from the CLI
+Each platform's outcome carries a stable `status` so partial results stay useful when one platform fails:
+
+| Status | Meaning |
+|---|---|
+| `success` | exit 0 with stdout content |
+| `empty_response` | exit 0 with no content |
+| `non_zero_exit` | exit non-zero, stderr captured |
+| `timeout` | exceeded `--timeout` (default 60s) — process group killed |
+| `cli_missing` | binary not on PATH at debate start |
+| `spawn_failed` | OS spawn error |
+
+Replay any past debate from the audit log:
 
 ```bash
-zornmesh debate run "Refactor payment.rs to add idempotency keys" \
-  --repo $(pwd) \
-  --timeout 30 \
-  --quorum 2
+zornmesh debate replay deb-19ddf1f5c56-0001
 ```
 
-The originator publishes a plan envelope to `debate.<id>.plan`, blocks until `quorum` critiques arrive (or the timeout fires), then prints a synthesized consensus that **explicitly preserves dissent points** — disagreements are surfaced, not averaged away.
+### Calling it from inside a coding-agent host
 
-### Start a debate from inside a coding-agent host
+Drivers in Claude Code, Copilot CLI, Gemini CLI, and OpenCode invoke the debate via their host's bash tool — no bespoke MCP integration needed. From any host, the prompt:
 
-Until v0.3 ships a bespoke `zornmesh.debate_plan` MCP tool, drivers in Claude Code / Copilot CLI / Gemini CLI / OpenCode invoke `zornmesh debate run` via their host's bash tool. From any of those hosts, the prompt:
+> Run `zornmesh debate run "<your plan>" --repo $(pwd) --output json` and synthesize the consensus into your final plan.
 
-> Run `zornmesh debate run "..." --output json --timeout 30` and synthesize the consensus into your final plan.
+works end-to-end. Pipe the JSON output into the host's tool result; per-platform structured results let the model decide what to do with dissent.
 
-works end-to-end as long as the worker daemons are running.
+### What got removed in v0.3
 
-### Subject taxonomy
+The v0.1/v0.2 substrate had a daemon, a pub/sub broker, per-platform worker daemons, a subject taxonomy, and an SDK-mediated cross-process orchestrator — all justified by hypothetical multi-host or cross-machine use cases that never materialized. v0.3 deletes:
 
-Stable as of v0.2 (`zornmesh.debate.v1`):
+- `zornmesh worker --platform <p>` (no persistent workers; debate spawns subprocesses on demand)
+- `zornmesh service install` of worker units (nothing to supervise)
+- The `agent.worker.<platform>` mesh-identity convention for debate participants
+- `debate.<id>.plan` / `debate.<id>.critique.<agent>` / `debate.<id>.consensus` subject taxonomy (no broker)
+- Hand-rolled envelope serde for plan/critique/consensus types
+- The SDK-mediated `cli_runner` module
 
-| Subject | Producer | Consumer |
-|---|---|---|
-| `debate.<id>.plan` | originator (driver) | workers |
-| `debate.<id>.critique.<agent>` | workers | orchestrator |
-| `debate.<id>.consensus` | orchestrator | originator + audit |
-
-The orchestrator is in-process for v0.2 (lives inside the `zornmesh debate run` invocation). v0.3+ will move it behind a registered broker capability so the SDK and a future `zornmesh.debate_plan` MCP tool can drive it without spawning a CLI.
+The daemon (`zornmesh daemon`) and MCP stdio bridge (`zornmesh stdio`) still exist for the broader local-mesh use cases the project may grow into; they are no longer involved in the debate flow.
 
 ## Daemon contract
 
