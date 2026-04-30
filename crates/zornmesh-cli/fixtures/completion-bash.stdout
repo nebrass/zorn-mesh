@@ -4,7 +4,7 @@ _zornmesh()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui service completion help"
+    commands="daemon doctor agents stdio inspect trace tail replay retention audit release compliance evidence redact airmf ui service worker debate completion help"
     daemon_commands="status shutdown help"
     shells="bash zsh fish"
     formats="human json ndjson"
